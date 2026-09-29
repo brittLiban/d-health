@@ -85,6 +85,22 @@ export function patientStatusWording(
         detail: null,
         tone: 'active',
       }
+    case 'BLOCKED':
+      // DHEALTH-LAB-BLOCKED-001 §17. Two things are wrong here and this is the wording that avoids
+      // both. Mapping BLOCKED onto "Analyse en cours" would make the screen claim progress that
+      // is not happening -- the exact deception `docs/NATIVE-OPERATING-PRODUCT.md` §16 says the
+      // BLOCKED state exists to end, and it would be worse on the patient's screen than in the
+      // laboratory's queue. Showing the reason would carry a laboratory's operational vocabulary
+      // to somebody with no way to act on it, against rule 3 above.
+      //
+      // So: the fact, no category, no note, no actor, no laboratory-internal term, and a next step
+      // the patient can actually take. `PatientOrderResponse` carries no block field at all, so
+      // there is nothing here to leak even by accident -- only `status` reaches this function.
+      return {
+        headline: 'Votre analyse est en attente au laboratoire.',
+        detail: 'Contactez votre clinique.',
+        tone: 'attention',
+      }
     case 'COMPLETED':
       return completedWording(resultStatus)
     default:

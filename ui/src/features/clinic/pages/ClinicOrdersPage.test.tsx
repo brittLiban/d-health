@@ -54,6 +54,7 @@ function makeOrder(overrides: Partial<LabOrderSummary> = {}): LabOrderSummary {
     item_count: 2,
     visit_id: null,
     lab_assignment: null,
+    block: null,
     ...overrides,
   }
 }
@@ -72,6 +73,7 @@ function makeFullOrder(overrides: Partial<LabOrder> = {}): LabOrder {
     ],
     visit_id: null,
     lab_assignment: null,
+    block: null,
     ...overrides,
   }
 }

@@ -4,9 +4,9 @@
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
 > describes. **The newest ticket entries are at the end of this file** (currently
-> DHEALTH-ACCESS-CAPABILITIES-001, 2026-09-28 — this parenthetical has now gone stale thirteen
+> DHEALTH-LAB-BLOCKED-001, 2026-09-29 — this parenthetical has now gone stale fourteen
 > times, first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001", then "DHEALTH-RESULT-DELIVERY-001", then "DHEALTH-CLINIC-VISIT-001", then "DHEALTH-BILLING-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001", then "DHEALTH-RESULT-DELIVERY-001", then "DHEALTH-CLINIC-VISIT-001", then "DHEALTH-BILLING-001", then "DHEALTH-ACCESS-CAPABILITIES-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -22245,3 +22245,204 @@ shared template can remove authority from many people at once and needs its own 
 **Human usability is not claimed.** No facility administrator has used the capability sheet.
 **Pilot-ready is still not clinically live.** No staff member's access was changed by this work.
 All data synthetic; no real patient data used.
+
+---
+
+## DHEALTH-LAB-BLOCKED-001 — an order a laboratory cannot continue (2026-09-29)
+
+**Status: DONE, committed locally, not pushed.** Implements `docs/NATIVE-OPERATING-PRODUCT.md`
+§16's **P0-4**, the last P0 gap on the Lab track that was not billing.
+
+### The problem, in one sentence
+
+A haemolysed tube used to leave an order sitting in `ACCEPTED`, a queue state that **claims work is
+progressing when it is not** — nobody is told, nobody owns it, and the only workaround is to
+telephone the clinic, which leaves the software lying. §16 names this as the reason the state is
+P0; §27 names the ordering clinician as the next owner it was failing to notify.
+
+### What exists now
+
+`BLOCKED` is a real `LabOrderStatus`, reachable only from `ACCEPTED`/`IN_PROGRESS` and only
+together with a `LabOrderBlock` **episode** written in the same transaction. The episode carries
+the reason, an optional note, the actor, the instant, and — the load-bearing field —
+`blocked_from_status`, the state the block interrupted and the only state resolving it may restore.
+
+**`BLOCKED` is a status rather than a flag beside one, and that is the single most consequential
+design choice here.** Every laboratory mutation that must not happen while an order is blocked —
+accept, a new collection milestone, start-processing, result entry, entry completion, release — was
+*already* gated on a specific status by code that predates this ticket, so all of them refuse a
+blocked order without one new check. A boolean column would have required that same refusal to be
+re-added in six places and forgotten in one.
+
+### The reason catalog — HUMAN DECISION REQUIRED
+
+Four reasons, and they are **exactly the four this repository's own specification already names**
+(§16: *sample unusable, insufficient quantity, patient did not attend, clarification needed*):
+`SPECIMEN_UNUSABLE`, `SPECIMEN_INSUFFICIENT`, `PATIENT_DID_NOT_ATTEND`, `CLARIFICATION_REQUIRED`.
+No fifth was invented. The ticket's own brief proposed a longer candidate list including a
+technical/analyser reason and a free `OTHER`; both were left out rather than added on an agent's
+authority.
+
+> **BLOCKER — `Human Decision Required: Yes`**
+> **Confirm the block-reason catalog with a laboratory participant.** §16 states the list *"must be
+> confirmed with a laboratory participant before it is fixed"*, and that has not happened. Two
+> specific questions:
+> 1. **Does an equipment/analyser reason belong in the list?** A laboratory whose analyser is down
+>    has no home among the four today. Such a case currently lands in the optional free-text note —
+>    honestly unstructured rather than filed under a category nobody approved. This is a real gap,
+>    named rather than quietly filled.
+> 2. **Are the French labels right?** `Prélèvement inutilisable`, `Quantité insuffisante`,
+>    `Patient non présenté`, `Précision nécessaire` (`ui/src/features/lab/blockVocabulary.ts`) are
+>    unconfirmed operational vocabulary, not clinical content, but still a laboratory's words.
+>
+> Until answered, the catalog ships as **provisional** and is documented as such in
+> `models.py`'s `LabOrderBlockReason`, `blockVocabulary.ts`, and `docs/NATIVE-OPERATING-PRODUCT.md`
+> §16. Nothing is blocked on this — the workflow is complete and qualified — but the list must not
+> be treated as settled.
+
+### Who sees what — the data-minimization decision, recorded
+
+| | reason | note | actor | timestamps | episode id | history |
+|---|---|---|---|---|---|---|
+| **Lab staff** (`lab.queue.work`) | yes | yes | yes (id) | yes | yes | yes |
+| **Clinic staff** (ordering provider) | **yes** | no | no | no | no | no |
+| **Patient** | no | no | no | no | no | no |
+
+The clinic is told **that** its order stopped and **broadly why**, because §27 makes the ordering
+clinician the next owner and withholding it entirely would recreate the silent state. It is told no
+more than the operational category, because §26's minimum-necessary rule applies across an
+organization boundary. The narrowing lives in the *shape of the return type*
+(`get_active_block_reasons_for_orders` returns `dict[order_id, reason]`, and nothing else is ever in
+scope where the clinic projection is built) rather than in a filter every future caller must
+remember.
+
+The patient gets no block field at all. `PatientOrderResponse` carries only `status`, and
+`patientStatusWording.ts` maps `BLOCKED` to *"Votre analyse est en attente au laboratoire. /
+Contactez votre clinique."* — the fact, no category, no technical vocabulary, and a next step they
+can act on. Mapping it onto "Analyse en cours" was considered and rejected: that would make the
+patient's screen claim progress that is not happening, which is worse there than in the queue.
+
+### Authority
+
+`lab.queue.work`, unchanged and unsplit. **No new capability was introduced** — blocking is
+ordinary laboratory queue work performed by the same person who accepts and collects, and a
+`lab.order.block` capability would be exactly the speculative seam
+DHEALTH-ACCESS-CAPABILITIES-001 §3A forbids. `lab.result.release` stays independently assignable: a
+technician may block, resolve and process for ever and still not publish a result.
+
+### Defects found during implementation
+
+1. **A 64-character constraint name that would have failed on the first real `alembic upgrade`.**
+   `ck_exchange_lab_order_blocks_resolution_note_requires_resolution` is 64 characters against
+   PostgreSQL's 63-character identifier limit. SQLite enforces no such limit, so the entire unit
+   suite stayed green and the failure would have appeared only on a real deployment — the exact
+   shape of the `0028` incident, one identifier layer down. Renamed, **and**
+   `tests/test_migration_hygiene.py` grew a permanent AST-based guard measuring every explicitly
+   named constraint and index in every migration, with the original 64-character name pinned as a
+   fixture so the check cannot rot.
+2. **A Pydantic forward reference that Python 3.14 hid and the shipped container would not have.**
+   `ProviderBlockResponse | None` was written above its own class definition. Python 3.14 (the local
+   venv) defers annotation evaluation (PEP 649) and resolved it lazily, so every test passed; the
+   image in `adapter/Dockerfile` is **python:3.13**, where the same line raises `NameError` at
+   import and the API never starts. Caught by `ruff` (F821), not by any test. The class was moved
+   above its consumers and the reason recorded in its docstring.
+3. **`record-collection` is correctly *not* refused on a blocked order when a milestone already
+   exists.** DH-EX-011 made that replay branch unconditional on purpose — the milestone genuinely
+   already happened, the call writes nothing and advances nothing. A *new* milestone is refused.
+   The first version of LAB-BLOCK-7 asserted 409 for both and was wrong about the domain; it is now
+   split into two cases with the distinction documented rather than papered over.
+4. **PG-BLOCK-2's original assertion ("exactly one of the pair must fail") was wrong about the
+   domain.** Block-racing-start-processing is not symmetric: if the advance wins first, blocking the
+   now-`IN_PROGRESS` order is perfectly legitimate and *both* succeed. The real invariant — asserted
+   instead — is that the episode must record the state it genuinely interrupted, because an episode
+   claiming `ACCEPTED` on an order that had already started would rewind it past a real transition
+   on resolution.
+
+### Billing — one line, and it preserves semantics rather than changing them
+
+`BLOCKED` was added to `BILLABLE_ORDER_STATUSES`. That set's own comment defines it as "the order
+states in which a laboratory has actually taken the work", and a blocked order is work the
+laboratory took and intends to finish. **Leaving it out would have been the semantic change** — a
+laboratory would silently lose the ability to invoice the moment a tube arrived unusable. The
+converse is asserted not to exist: no balance causes, prevents, or resolves a block (LAB-BLOCK-13),
+and no payment-shaped reason exists in the catalog (LAB-BLOCK-13b, a structural assertion).
+
+### Evidence
+
+- **34 adapter tests** (`test_dhealthlabblocked001_blocked_orders.py`), LAB-BLOCK-1..19 over HTTP.
+- **13 real-PostgreSQL tests** (`tests/integration/test_dhealthlabblocked001_postgres_qualification.py`),
+  PG-BLOCK-1..6 plus the CHECK constraints, the `RESTRICT` guard and the real `VARCHAR` boundary.
+  Run three times consecutively for race stability.
+- **Migration `0037` up → down → up on real PostgreSQL**, and **the downgrade refused exactly as
+  designed**: with 28 `BLOCKED` orders present it raised `CheckViolation` on the status constraint
+  *before* dropping the block table, leaving all 52 episodes intact and `alembic_version`
+  unchanged. After an operator-style resolution it downgraded, re-upgraded, and the suite passed
+  again. `0037` was also applied in place to the live demo database, which had pre-existing orders;
+  all were preserved.
+- **15 new UI tests** on the laboratory page plus 4 on the patient screen; 110 lab UI tests total.
+- **13 browser phases** (`scripts/demo/qualify-blocked.sh`) against real Chromium, Caddy, Keycloak
+  26.7.1, the adapter and PostgreSQL 16 — block, **survives a full browser reload**, the reason
+  legible on the queue row, the Aujourd'hui count, the server refusing prohibited steps when asked
+  directly, the clinic being told, resolution restoring the interrupted state, a **second
+  independent episode that does not overwrite the first**, then entry, release by a separate
+  releaser, and clinician review.
+- **All six sibling browser suites re-run green** on the rebuilt stack: golden journey 12, visit 9,
+  billing 6, capabilities 6, access 16.
+- **Eight negative controls executed and reverted byte for byte** (sha256-verified; the full
+  working diff after the last revert is identical to the one taken before the first).
+
+### Negative controls — what each one actually broke
+
+| NC | Mutation | Reddened | Real-world outcome enabled |
+|---|---|---|---|
+| NC-BLOCK-1 | tenant clause dropped from `block` | LAB-BLOCK-5 | **Lab Rival blocked Lab Bloqué's order** — 200, with a real episode created |
+| NC-BLOCK-2 | `_require_lab_tech` removed from the endpoint | LAB-BLOCK-2, -3, -5, -15c | anyone authenticated blocks any laboratory's work |
+| NC-BLOCK-3 | `FOR UPDATE` removed **and** the partial index dropped | PG-BLOCK-6 (5/5 runs), PG-BLOCK-1 (4/6 runs) | **up to 5 simultaneous unresolved blocks on one order** |
+| NC-BLOCK-4 | result-entry gate widened to admit `BLOCKED` | LAB-BLOCK-7 | a blocked order accepted a clinical result value (201) |
+| NC-BLOCK-5 | release gate widened to admit `BLOCKED` | LAB-BLOCK-11 | **a result was released from work the laboratory had declared unable to continue** |
+| NC-BLOCK-6 | `session.delete(block)` on resolution | LAB-BLOCK-9, -10, -12 | all block history vanishes the moment it is resolved |
+| NC-BLOCK-7 | client-supplied `resume_to` honoured | LAB-BLOCK-8b | **`IN_PROGRESS` with `collection_recorded_at: null`** — processing asserted that never started |
+| NC-BLOCK-8 | capability check replaced with a `LAB_TECH` role check | LAB-BLOCK-3, -4 | a directly-granted member is refused; the feature is role-hardcoded again |
+
+**NC-BLOCK-3 is reported honestly as partially nondeterministic.** The index half reddens on every
+run. The *race* half reddened on 4 of 6 runs: a `threading.Barrier` maximizes overlap but cannot
+guarantee the worst interleaving, which is why the suite's assertions are about final state rather
+than timing. Both layers are real and both are needed; only one of them is deterministically
+demonstrable.
+
+**NC-BLOCK-8 did *not* redden the AST no-role-hardcoding guard, and that is a real gap worth
+naming.** `api.py` is on that test's allowlist (legitimately — it carries the role endpoints and
+`/me`), so role hardcoding *inside an endpoint handler* is caught only by the behavioural
+capability tests, never structurally. LAB-BLOCK-3/4 are therefore load-bearing rather than
+belt-and-braces.
+
+### Deliberately NOT built
+
+No specimen entity, accession, barcode, container, aliquot, storage, transport, custody event,
+multi-specimen order, or recollection linkage. **D-3 is still open** and this ticket is not a
+partial down-payment on it: `SPECIMEN_UNUSABLE` says the laboratory stopped and says nothing about
+what physically happens to the tube next. No `RECOLLECTION_REQUIRED` reason exists.
+
+No cancellation endpoint. `BLOCKED → CANCELLED` exists in the transition table for consistency with
+its `ACCEPTED`/`IN_PROGRESS` siblings, and a cancelled-while-blocked order keeps its unresolved
+episode as the truthful reason it never finished — but no HTTP route reaches it, because none
+existed before this ticket either and inventing one was out of scope.
+
+### Connect
+
+**No contract change, and no new event.** `connect/apply.py` refuses to apply an externally
+released result unless the order is `ACCEPTED` or `IN_PROGRESS`; a `BLOCKED` order falls into its
+existing "anything else" branch and is refused as a `CONFLICT`. That is correct and required no
+edit. There is **no generic workflow-event mechanism** by which a block is announced to an external
+system, and none was invented — an external system is not told an order is blocked. Recorded as a
+known gap, not as interoperability.
+
+### Still open
+
+**D-3** (first-class specimen entity) · **D-4** (Lab Reception identity attributes) · **D-1**'s
+Front Desk portion · **D-6** (walk-in laboratory patient) · **D-8** (auditing successful sensitive
+reads) — all untouched. The **reason-catalog confirmation** above is the new one.
+
+**Human usability is not claimed.** No laboratory worker has used this screen. Automated browser
+evidence is not human usability evidence. **Pilot-ready is still not clinically live.** All data
+synthetic; no real patient data used; GitHub Actions untouched.

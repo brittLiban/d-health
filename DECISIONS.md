@@ -9425,3 +9425,186 @@ person do this here* — and the answer is a set intersection.
 
 **Pilot-ready is still not clinically live.** Nothing here is authorization to use DHealth on a real
 patient, and no staff member's access was changed by this work.
+
+---
+
+## ADR-068 — ACCEPTED / IMPLEMENTED (2026-09-29, DHEALTH-LAB-BLOCKED-001): a laboratory may say **"we cannot continue this"**, and the software stops lying
+
+### 1. Context
+
+`docs/NATIVE-OPERATING-PRODUCT.md` §16 lists this as **P0-4**, and the reason it is P0 rather than
+P1 is specific: when a tube arrives haemolysed, the order stays in `ACCEPTED`. That is a queue state
+which **claims work is progressing when it is not**. Nobody is told, nobody owns it, and the only
+recourse is to telephone the clinic — which means the software is lying to both parties and a human
+is compensating for it. §27's ownership test and law 11 both fail.
+
+Nothing in the product could express the difference between *"this order is fine and being worked
+on"* and *"this order is fine and nobody can work on it"*. The four states staff might otherwise be
+tempted to misuse — `CANCELLED`, `PENDING`, `ACCEPTED`, `IN_PROGRESS` — each mean something else,
+and overloading any of them would trade one lie for another.
+
+### 2. Decision
+
+**`BLOCKED` is a `LabOrderStatus`, not a flag beside one.**
+
+This is the load-bearing choice and it is not stylistic. Every laboratory mutation that must not
+happen while an order is blocked — accept, a *new* collection milestone, start-processing, result
+entry, entry completion, release — was **already** gated on a specific status by code predating this
+ticket. Making `BLOCKED` a status means all of them refuse a blocked order through checks that
+already existed and are already tested. A boolean column beside the status would have required the
+identical refusal to be remembered and re-added in six places, and it would have been forgotten in
+exactly one — which is the class of defect that produces a released result from work a laboratory
+had declared unable to continue.
+
+**A block is an episode, not a pair of columns.** `exchange_lab_order_blocks` holds one row per
+occurrence. §16's own worked example is an order blocked for an unusable specimen, resolved, worked
+further, and blocked again for an unrelated reason. A `LabOrder.block_reason` column answers *"why
+is it blocked now"* and destroys the first answer the moment the second is written. The question a
+laboratory actually asks — *has this order been trouble before?* — is only answerable if every
+episode survives. So none is ever updated after resolution and there is no delete path anywhere.
+
+**The resume state belongs to the server and is recorded at block time.** `blocked_from_status` is
+copied off the locked order row when the block is created, and resolution restores that value and
+nothing else. It is not a parameter. A client able to name its own resume destination could move an
+order blocked from `ACCEPTED` straight to `IN_PROGRESS`, asserting processing that never started and
+skipping the collection milestone DH-EX-011 requires — which the negative control NC-BLOCK-7
+demonstrated exactly, producing `IN_PROGRESS` with `collection_recorded_at: null`.
+
+**At most one unresolved episode per order**, enforced by a partial unique index over
+`lab_order_id WHERE resolved_at IS NULL` sitting behind the `LabOrder` `FOR UPDATE` lock that
+actually serializes concurrent blocks. Partial, because the whole point is that an order may
+accumulate any number of *resolved* episodes while never having two live ones.
+
+**Eligible source states are `ACCEPTED` and `IN_PROGRESS`, and nothing else.**
+`AWAITING_LAB_SELECTION`/`SELECTED` is work no laboratory has taken — a laboratory that will not do
+it *rejects* it, and that path already exists. `COMPLETED` is a released clinical fact: blocking it
+would make `BLOCKED` a way to undo a release, which the amendment domain (ADR-048) owns instead.
+`REJECTED`/`CANCELLED` are terminal.
+
+### 3. The reason catalog is **provisional**, and that is part of the decision
+
+Four reasons, and they are **exactly the four §16 already names**: `SPECIMEN_UNUSABLE`,
+`SPECIMEN_INSUFFICIENT`, `PATIENT_DID_NOT_ATTEND`, `CLARIFICATION_REQUIRED`. No fifth was invented.
+
+The ticket that produced this ADR proposed a longer candidate list — a technical/analyser reason and
+a free `OTHER` — and both were left out. `AGENTS.md`'s rule about *"any gap that obviously should be
+filled a particular way"* applies at full force here: the instinct to round the list out is the
+failure mode being guarded against, not a licence.
+
+§16 states the list *"must be confirmed with a laboratory participant before it is fixed."* **That
+has not happened**, so it ships marked provisional in the enum, in the French vocabulary module, in
+§16 itself, and as **D-11** in §28 / an open `Human Decision Required` item in `PROJECT_STATE.md`.
+
+The concrete consequence, stated rather than buried: **a laboratory whose analyser is down has no
+category among these four.** Such a case lands in the optional free-text note — honestly
+unstructured rather than filed under a heading nobody approved. That is a real gap and it is named.
+
+**No payment-shaped reason exists, and none may be added.** A `PAYMENT_REQUIRED` block would encode
+the clinical policy **D-2b** explicitly reserves for a human, and it is asserted structurally
+(LAB-BLOCK-13b) rather than left to review.
+
+### 4. Who may see what
+
+| | reason | note | actor | timestamps | episode id | history |
+|---|---|---|---|---|---|---|
+| Lab staff (`lab.queue.work`) | yes | yes | yes | yes | yes | yes |
+| Clinic staff (ordering provider) | **yes** | no | no | no | no | no |
+| Patient | no | no | no | no | no | no |
+
+The clinic is told **that** the work stopped and **broadly why**: §27 makes the ordering clinician
+the next owner of blocked work, so withholding it entirely would simply recreate the silent state
+this ADR exists to remove. It is told no more than the operational category, because §26's
+minimum-necessary rule applies across an organization boundary — a laboratory's internal note
+("rotor fault after maintenance", a colleague's name, a supplier) is written for that bench.
+
+The narrowing is expressed in the **shape of the return type**, not in a filter: the service method
+feeding the provider projection returns `dict[order_id, reason]` and nothing else, so no note,
+actor or timestamp is ever in scope where that projection is built. A list of full records left to
+be filtered correctly by every future caller eventually would not be.
+
+The patient receives no block field at all. `BLOCKED` maps to *"Votre analyse est en attente au
+laboratoire. / Contactez votre clinique."* — the fact, no category, no technical vocabulary, and a
+next step they can act on. Mapping it onto "Analyse en cours" was considered and **rejected**: that
+would make the patient's own screen claim progress that is not happening, which is a worse lie there
+than in a queue.
+
+### 5. Authority: `lab.queue.work`, and no new capability
+
+Blocking and resolving are ordinary laboratory queue work, performed by the same person who accepts
+and records collection. **No `lab.order.block` capability was created** — that is precisely the
+speculative seam ADR-067 §3A forbids, and the product has never drawn a line between these actions.
+
+`lab.result.release` stays independently assignable and is **not** implied: a technician may block,
+resolve and process for ever and still not publish a result. Proved in both directions
+(LAB-BLOCK-14).
+
+### 6. Billing, in one line and one direction
+
+`BLOCKED` joins `BILLABLE_ORDER_STATUSES`. That set's own definition is "the order states in which a
+laboratory has actually taken the work", and a blocked order is work the laboratory took and intends
+to finish. **Omitting it would have been the semantic change** — a laboratory would silently lose
+the ability to invoice the moment a tube arrived unusable, and regain it on resolution.
+
+The converse is asserted not to exist: no balance causes, prevents, or resolves a block, and none
+prevents the later release. ADR-066/**D-2b**'s *financial state never gates legitimate clinical or
+laboratory work* holds unchanged.
+
+### 7. Connect: no contract change, and no claim
+
+`connect/apply.py` refuses to apply an externally released result unless the order is `ACCEPTED` or
+`IN_PROGRESS`; a `BLOCKED` order falls into its existing "anything else" branch and is refused as a
+`CONFLICT`. Correct, and it required no edit.
+
+There is **no generic workflow-event mechanism** by which a block is announced to an external
+system, and none was invented. An external system is **not** told an order is blocked. That is a
+known gap recorded as such, not interoperability.
+
+### 8. Consequences
+
+- One new table, one widened order-status CHECK, two new audit event types, one structurally
+  redundant unique constraint on `exchange_lab_selections` that exists solely so the block's tenant
+  foreign key can be **composite** — two single-column keys would each be satisfiable while the
+  *pair* is a fabrication.
+- Three new endpoints, all explicit transitions. There is deliberately no
+  `PATCH {"status": "BLOCKED"}`: the server owns which transitions exist, which are legal from here,
+  and what a resolution restores, and a status-setting PATCH hands all three to the caller.
+- Resolution is addressed by **episode id**, not by order. A delayed retry can then only resolve the
+  episode its caller actually saw — addressing it by order would let a stale retry silently resolve
+  a *second*, later block raised for an entirely different reason.
+- `orders.py`'s generic `transition()` refuses to produce `BLOCKED` at all, and refuses to leave it
+  for anything but the recorded resume state. That primitive has no production HTTP caller, and this
+  repository's discipline is to enforce an invariant inside the mutation rather than rely on "no
+  caller happens to bypass it today" (DH-EX-011/DH-EX-012's own precedent).
+- **No specimen was modelled.** No accession, container, aliquot, storage, transport, custody event,
+  multi-specimen order, or recollection linkage. `SPECIMEN_UNUSABLE` says the laboratory stopped and
+  says nothing about what physically happens to the tube next. **D-3 is exactly as open as it was**,
+  and this ADR is not a partial down-payment on it.
+- `BLOCKED → CANCELLED` exists in the transition table for consistency with its siblings, and a
+  cancelled-while-blocked order keeps its unresolved episode as the truthful reason it never
+  finished — but **no HTTP route reaches it**, because none existed before this ticket either.
+
+### 9. Two defects this ticket found, worth recording because both were invisible to tests
+
+**A 64-character constraint name.** PostgreSQL's identifier limit is 63; SQLite has none. The whole
+unit suite stayed green and migration `0037` would have failed on the first real `alembic upgrade` —
+the exact shape of the `0028` incident, one identifier layer down. `test_migration_hygiene.py` now
+carries a permanent AST guard measuring every explicitly named constraint and index in every
+migration, with the original over-long name pinned as a fixture so the check cannot rot.
+
+**A Pydantic forward reference that the local interpreter hid.** A response model referenced a class
+defined below it. Python 3.14 defers annotation evaluation (PEP 649) and resolved it lazily; the
+shipped image is `python:3.13`, where the same line raises `NameError` at import and the API never
+starts. Caught by `ruff` F821, by no test at all.
+
+### 10. What may and may not be claimed
+
+May: *DHealth Lab can durably pause an eligible diagnostic order when operational work cannot
+continue, record why and by whom, preserve the block history, safely resume the prior workflow after
+resolution, and prevent blocked work from advancing or being clinically released until the issue is
+resolved.* And: *block/resolve authority is capability-driven and organization-scoped.*
+
+May **not**: full specimen management · accessioning · laboratory inventory · analyser integration ·
+complete LIS parity · a confirmed reason vocabulary · **human usability**.
+
+**Human usability is not qualified.** No laboratory worker has used this screen; automated browser
+evidence is not human evidence. **Pilot-ready is still not clinically live.** All data synthetic.

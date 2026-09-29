@@ -100,6 +100,18 @@ export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
 
   const availableResultsCount = orders.filter((o) => o.status === 'COMPLETED').length
 
+  // DHEALTH-LAB-BLOCKED-001. `docs/NATIVE-OPERATING-PRODUCT.md` §27 names the ordering clinician
+  // as the next owner of a blocked order, and §16's whole case for the feature is that without
+  // it a stalled order sits in a queue state claiming progress nobody is making. "Ordres actifs"
+  // is exactly that claim, so counting blocked work only there would reproduce the problem on
+  // the clinician's own home screen.
+  //
+  // Deliberately a *subset*, not a fourth mutually-exclusive bucket: a blocked order genuinely is
+  // still outstanding, so it keeps counting toward "Ordres actifs" and is called out again here.
+  // The alternative -- subtracting it -- would make the active count drop when a laboratory hits
+  // a problem, which reads like progress.
+  const blockedOrdersCount = orders.filter((o) => o.status === 'BLOCKED').length
+
   return (
     <div style={{ padding: 'var(--space-5)', maxWidth: '1000px', margin: '0 auto' }}>
       <header style={{ marginBottom: 'var(--space-5)' }}>
@@ -178,6 +190,51 @@ export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
                 </div>
               </div>
             </Card>
+
+            {/*
+              Card 1b: Bloqués au laboratoire — DHEALTH-LAB-BLOCKED-001.
+
+              Rendered only when there is something to act on. That is the opposite of the Lab's
+              own "Bloqués" tile, which always shows even at zero, and the difference is
+              deliberate: a laboratory worker needs to confirm at the start of a shift that
+              nothing is stuck, whereas a clinician has no such duty and a permanent "0" beside
+              their real work is noise. The order list is where a clinician confirms a negative.
+            */}
+            {blockedOrdersCount > 0 ? (
+              <Card>
+                <div style={{ padding: 'var(--space-4)' }}>
+                  <span
+                    style={{
+                      fontSize: 'var(--font-size-sm)',
+                      fontWeight: 600,
+                      color: 'var(--color-neutral-600)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                    }}
+                  >
+                    Bloqués au laboratoire
+                  </span>
+                  <p
+                    style={{
+                      fontSize: 'var(--font-size-3xl)',
+                      fontWeight: 700,
+                      color: 'var(--color-danger, #b91c1c)',
+                      margin: 'var(--space-2) 0',
+                    }}
+                  >
+                    {blockedOrdersCount}
+                  </p>
+                  <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-500)' }}>
+                    Le laboratoire ne peut pas poursuivre ces analyses
+                  </p>
+                  <div style={{ marginTop: 'var(--space-3)' }}>
+                    <Button variant="secondary" onClick={() => onNavigate('orders')}>
+                      Voir les ordres bloqués
+                    </Button>
+                  </div>
+                </div>
+              </Card>
+            ) : null}
 
             {/* Card 2: Résultats disponibles */}
             <Card>

@@ -295,11 +295,23 @@ class LineRequest:
 #: The order states in which a laboratory has actually taken the work, and may therefore charge for
 #: it. Assignment alone (`SELECTED`) is not enough -- see `_require_performed_here`. `REJECTED` and
 #: `CANCELLED` are excluded because the test will not be performed at all.
+#:
+#: DHEALTH-LAB-BLOCKED-001 adds `BLOCKED`, and adding it is what *preserves* this set's stated
+#: meaning rather than changing it: a blocked order is work the laboratory took and intends to
+#: finish, temporarily interrupted, which is the definition above. Leaving it out would have been
+#: the semantic change -- a laboratory would silently lose the ability to invoice the moment a
+#: tube arrived unusable, and regain it on resolution.
+#:
+#: This is the only edit DHEALTH-LAB-BLOCKED-001 makes to billing, and it is deliberately
+#: one-directional. The converse -- a balance causing or preventing a block -- does not exist and
+#: is asserted not to: ADR-066/D-2b's *financial state never gates legitimate clinical or
+#: laboratory work*, tested rather than assumed.
 BILLABLE_ORDER_STATUSES: frozenset[str] = frozenset(
     {
         LabOrderStatus.ACCEPTED.value,
         LabOrderStatus.IN_PROGRESS.value,
         LabOrderStatus.COMPLETED.value,
+        LabOrderStatus.BLOCKED.value,
     }
 )
 

@@ -57,6 +57,7 @@ function makeOrder(overrides: Partial<LabWorkflowOrder> = {}): LabWorkflowOrder 
     ordering_provider_name: 'Clinique de la Paix',
     requested_tests: [],
     collection_recorded_at: null,
+    active_block: null,
     ...overrides,
   }
 }

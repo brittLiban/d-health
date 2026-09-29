@@ -241,7 +241,7 @@ Verified by reading code during this ticket. Evidence levels:
 | Explicit release by a separate authority | BUILT + RUNTIME-QUALIFIED | `LAB_RESULT_RELEASER`, ADR-044, entry ≠ release |
 | Post-release amendment + re-release | BUILT, NOT HUMAN-QUALIFIED | ADR-048; not browser-exercised |
 | **Lab reception / patient presents at the lab** | **NOT BUILT** | — |
-| **Specimen adequacy, rejection, recollection** | **NOT BUILT** | The P0-4 gap |
+| **Specimen adequacy, rejection, recollection** | **PARTIAL** | Order-level `BLOCKED` is built (P0-4, ADR-068): a laboratory can say *this cannot continue*, why, and resume it. No specimen entity, no rejection of an individual specimen, no recollection linkage — **D-3** |
 | **Multi-specimen orders** | **NOT BUILT** | One collection row per order cannot express "blood taken, urine pending" |
 | **Specimen labels / barcodes** | **NOT BUILT** | — |
 | **Lab billing** | **NOT BUILT** | — |
@@ -752,6 +752,26 @@ that **claims work is progressing when it is not**, nobody is told, and nobody o
 The reason list is operational, not clinical (*sample unusable, insufficient quantity, patient did not
 attend, clarification needed*) and must be confirmed with a laboratory participant before it is fixed.
 
+> **BUILT 2026-09-29 — `DHEALTH-LAB-BLOCKED-001`, ADR-068.** `BLOCKED` is a real `LabOrderStatus`,
+> reachable only from `ACCEPTED`/`IN_PROGRESS` and only together with a `LabOrderBlock` **episode**
+> written in the same transaction — so a blocked order can always say why, who, when, and what it
+> will resume to. Episodes are never overwritten or deleted: an order blocked twice has two of
+> them, which is what makes *"has this order been trouble before?"* answerable at all. At most one
+> may be unresolved at a time (a partial unique index behind the `LabOrder` row lock). Resolution
+> restores `blocked_from_status` and nothing else — the destination is never the client's to pick.
+> The ordering clinician sees the status and the reason key; the laboratory's free-text note and
+> the technician's identity do not cross the organization boundary; the patient sees neither.
+>
+> **The reason list above is implemented exactly as written here and remains PROVISIONAL.** The
+> confirmation this paragraph requires has *not* happened — it is an open `Human Decision Required`
+> item in `PROJECT_STATE.md`. Note in particular that **no equipment/analyser reason exists**: a
+> laboratory whose analyser is down has no category among these four today and must use the free-text
+> note. That gap is named deliberately rather than filled on an agent's authority.
+>
+> Still **not** built, and deliberately: the specimen entity (**D-3**), recollection linkage, and any
+> announcement of a block to an external system through Connect (§22 — Connect refuses to apply a
+> released result to a blocked order, which is correct, but nothing *tells* an external system).
+
 **P1 — a first-class specimen entity.** Needed for: one order spanning several specimen types (a CBC
 and a urine culture cannot share a tube, and one collection row per order cannot say "blood taken,
 urine pending"); one specimen satisfying several ordered items; accession identifiers; per-specimen
@@ -1250,7 +1270,8 @@ Only where different answers materially change architecture or workflow.
 | **D-1** | **Which new backend authority does Front Desk need**, and does Billing share it or need its own? Introducing it changes what guards patient-directory reads. **Billing portion RESOLVED 2026-09-28, ADR-066**: Billing needs its own — `BILLING_CLERK`, valid at PROVIDER and LAB, asked for as a *capability* rather than a role name. The **Front Desk portion remains open** and ADR-066 says so explicitly. | **BACKEND AUTHORITY DECISION REQUIRED** (Front Desk portion only) | Still blocks Front Desk and Reception. **No longer blocks Billing.** |
 | **D-2a** | **Who pays whom in a routed order** — lab bills patient, lab bills clinic, or clinic bills patient and settles with lab. **Interim answer 2026-09-28, ADR-066 §3**: each organization invoices only what it actually performed, enforced server-side at the invoice line. **Still open** for commercial arrangements over routed external laboratory work — settlement, commissions, referral fees, revenue sharing, pass-through billing, markup and inter-facility AP/AR are all deliberately unbuilt. | Product / commercial | No longer blocks the billing ticket. Blocks any inter-facility commercial model. |
 | **D-2b** | **What happens when payment is incomplete.** If anyone proposes unpaid → no release, that is clinical policy. | **HUMAN DECISION REQUIRED / CLINICAL POLICY** | Must never be encoded casually. Default until decided: billing never gates clinical release. |
-| **D-3** | **Is a first-class specimen entity required for Launch-1?** (The order-level `BLOCKED` state, P0-4, is needed regardless.) | Product, needs a laboratory participant | Determines whether the lab ticket is small or large. |
+| **D-3** | **Is a first-class specimen entity required for Launch-1?** ~~(The order-level `BLOCKED` state, P0-4, is needed regardless.)~~ **P0-4 is now BUILT (2026-09-29, ADR-068) and D-3 is unaffected by it** — order-level blocking deliberately models no specimen, so this question is exactly as open as it was. | Product, needs a laboratory participant | Determines whether the lab ticket is small or large. |
+| **D-11** | **Is the block-reason catalog right?** Four reasons ship as **provisional** (ADR-068), exactly the four §16 names. §16 requires confirmation with a laboratory participant before the list is fixed, and that has not happened. Specifically: does an **equipment/analyser** reason belong, and are the French labels a laboratory's own words? | Product, needs a laboratory participant | Does not block — the workflow is complete and qualified. Blocks calling the vocabulary settled. |
 | **D-4** | **Which patient attributes must a receiving laboratory see to confirm the presenting patient?** (`docs/MVP-1.0.md` gap 10.) | Product + clinical safety | Blocks Lab Reception. Must not be invented. |
 | **D-5** | **Diagnosis coding** — free text only, or a code system, and which? Clinician-recorded either way; system-generated never. | Clinical lead | Blocks any structured diagnosis. Free-text note is unaffected. |
 | **D-6** | **May a laboratory hold its own patient records** so a walk-in laboratory patient is representable? | Product + privacy | Blocks walk-in lab workflow. P0 only if the pilot is a laboratory. |
@@ -1319,7 +1340,7 @@ Status: **BUILT** · **PARTIAL** · **NOT BUILT**. Every row names the data it m
 | Aujourd'hui (lab) | Lab Staff; Releaser | See lab work owed | Unaccepted, awaiting collection, processing, entry incomplete | Open the next order | Provider visit notes | Lab workflow | **BUILT** |
 | Réception | Reception *(D-1)* | Confirm who this is and why | Patient identity attributes (**D-4**), requested tests, order validity | Confirm arrival | Clinical notes; unrelated history | Orders + identity | **NOT BUILT** |
 | Ordres (lab) | Lab Staff | Work assigned orders | Order, patient, tests, status | Accept / reject | Other labs' orders | Lab workflow | **BUILT** |
-| Prélèvements | Lab Staff | Record collection; flag problems | Order, collection state, block reason | Record collection / block | Result values | Collection + `BLOCKED` | **PARTIAL** — milestone only |
+| Prélèvements | Lab Staff | Record collection; flag problems | Order, collection state, block reason | Record collection / block | Result values | Collection + `BLOCKED` | **PARTIAL** — milestone + `BLOCKED`/resolve/history are built (ADR-068) and live on `Ordres`; no separate `Prélèvements` section and no specimen entity (**D-3**) |
 | Saisie des résultats | Lab Staff | Enter structured values | Template fields, units, ranges | Save / complete entry | Release control | Templates + results | **BUILT** |
 | Libération | Releaser | Release results | Entered values, completeness, fingerprint | Release | Administration | Release | **BUILT** |
 | Rectificatifs | Lab Staff; Releaser | Amend after release | Prior version, revision | Release amendment | — | Amendments | **BUILT**, not browser-exercised |
@@ -1617,7 +1638,7 @@ never to what mature EMRs contain.
 | P0-1 | Visits / encounters | No record of why a patient came or what happened; no clinical thread | Clinic |
 | P0-2 | Arrival + waiting list | Nobody knows who is waiting; a paper register runs alongside DHealth (Law 2) | Clinic |
 | P0-3 | Invoice, payment, receipt | Cannot take money or prove payment | Both |
-| P0-4 | Honest `BLOCKED` state on an accepted order | A queue entry claims progress that is not happening; nobody owns it | Lab |
+| ~~P0-4~~ | ~~Honest `BLOCKED` state on an accepted order~~ **DONE 2026-09-29, ADR-068** | ~~A queue entry claims progress that is not happening; nobody owns it~~ | Lab |
 | P0-5 | Patient-directory import | A facility with an existing patient list cannot begin | Both |
 | P0-6 | Facility-owned services and prices | Billing cannot exist without something to charge for | Both |
 
@@ -1696,7 +1717,7 @@ Eight tickets. Each is independently useful and testable; none is a rewrite.
 | # | Ticket | Depends on | Blocked by a decision? |
 |---|---|---|---|
 | 1 | ~~**`DHEALTH-CLINIC-VISIT-001`**~~ — Visits/Encounters, clinician-only | Patient directory (built) | **DONE** 2026-09-27, ADR-065 |
-| 2 | **`DHEALTH-LAB-BLOCKED-001`** — honest cannot-proceed state | Lab workflow (built) | No |
+| 2 | ~~**`DHEALTH-LAB-BLOCKED-001`**~~ — honest cannot-proceed state | Lab workflow (built) | **DONE** 2026-09-29, ADR-068 |
 | 3 | **`DHEALTH-CLINIC-FRONTDESK-001`** — arrival, waiting list, Front Desk role | Ticket 1 | **D-1** (Front Desk portion) |
 | 4 | ~~**`DHEALTH-BILLING-001`**~~ — services, invoice, payment, receipt | Ticket 1 | **DONE** 2026-09-28, ADR-066 |
 | 5 | **`DHEALTH-MIGRATE-PATIENTS-001`** — CSV/XLSX directory import | Patient directory | No |

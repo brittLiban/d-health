@@ -1139,6 +1139,7 @@ describe('Clinic native patient workflow', () => {
     ],
     visit_id: null,
     lab_assignment: null,
+    block: null,
   }
 
   it('fetches and displays patient order history with truthful status and lab state in patient workspace', async () => {
@@ -1191,6 +1192,7 @@ describe('Clinic native patient workflow', () => {
       ],
       visit_id: null,
       lab_assignment: null,
+      block: null,
     }
 
     const listCatalog = vi.fn().mockResolvedValue(mockCatalogTests)
@@ -1312,6 +1314,7 @@ describe('Clinic native patient workflow', () => {
       ],
       visit_id: null,
       lab_assignment: null,
+      block: null,
     }
 
     const client = makeClient({
@@ -1363,6 +1366,7 @@ describe('Clinic native patient workflow', () => {
       ],
       visit_id: null,
       lab_assignment: null,
+      block: null,
     }
 
     const createOrder = vi.fn().mockImplementation(() => {
@@ -1554,6 +1558,7 @@ describe('Clinic native patient workflow', () => {
       ],
       visit_id: null,
       lab_assignment: null,
+      block: null,
     }
 
     const createOrder = vi.fn().mockImplementation(() => {
@@ -1694,6 +1699,7 @@ describe('Clinic native patient workflow', () => {
       ],
       visit_id: null,
       lab_assignment: null,
+      block: null,
     }
 
     const createOrder = vi.fn().mockResolvedValue({ order: createdOrder, created: true })
@@ -1823,6 +1829,7 @@ describe('Clinic native patient workflow', () => {
       ],
       visit_id: null,
       lab_assignment: null,
+      block: null,
     }
 
     // Set stored technical metadata in localStorage
@@ -1890,6 +1897,7 @@ describe('Clinic native patient workflow', () => {
         items: [{ catalog_entry_id: 'c1', catalog_code_snapshot: 'C1', catalog_display_name_snapshot: 'D1' }],
         visit_id: null,
         lab_assignment: null,
+        block: null,
       },
       {
         id: 'ord-cancelled',
@@ -1903,6 +1911,7 @@ describe('Clinic native patient workflow', () => {
         // Never routed before cancellation -- truthfully has no destination.
         visit_id: null,
         lab_assignment: null,
+        block: null,
       },
       {
         id: 'ord-rejected',
@@ -1916,6 +1925,7 @@ describe('Clinic native patient workflow', () => {
         // §23: SELECTED -> REJECTED -- the lab that rejected it must still show, never hidden.
         visit_id: null,
         lab_assignment: routedTo('Laboratoire Rejetant'),
+        block: null,
       },
       {
         id: 'ord-selected',
@@ -1928,6 +1938,7 @@ describe('Clinic native patient workflow', () => {
         items: [{ catalog_entry_id: 'c4', catalog_code_snapshot: 'C4', catalog_display_name_snapshot: 'D4' }],
         visit_id: null,
         lab_assignment: routedTo('Laboratoire Sélectionné'),
+        block: null,
       },
       {
         id: 'ord-completed',
@@ -1940,6 +1951,7 @@ describe('Clinic native patient workflow', () => {
         items: [{ catalog_entry_id: 'c5', catalog_code_snapshot: 'C5', catalog_display_name_snapshot: 'D5' }],
         visit_id: null,
         lab_assignment: routedTo('Laboratoire Terminé'),
+        block: null,
       },
     ]
 
@@ -1984,6 +1996,7 @@ describe('Clinic native patient workflow', () => {
       items: [{ catalog_entry_id: 'c1', catalog_code_snapshot: 'C1', catalog_display_name_snapshot: 'D1' }],
       visit_id: null,
       lab_assignment: null,
+      block: null,
     }
 
     const createOrder = vi.fn().mockImplementation((_providerId, _key) => {

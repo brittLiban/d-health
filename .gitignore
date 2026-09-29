@@ -79,3 +79,8 @@ native-billing-results.json
 # repository root by scripts/demo/qualify-capabilities.sh. Evidence of a run, not part of the
 # source -- same treatment as its six siblings above.
 native-capabilities-results.json
+
+# DHEALTH-LAB-BLOCKED-001: the blocked-order qualification report, written at the repository root
+# by scripts/demo/qualify-blocked.sh. Evidence of a run, not part of the source -- same treatment
+# as its seven siblings above.
+native-blocked-results.json

@@ -14,6 +14,9 @@ import {
   StatusBadge,
   type StatusTone,
 } from '../../../design-system'
+// DHEALTH-LAB-BLOCKED-001: one shared vocabulary across Clinic and Lab. The clinic must not
+// describe a block differently from the laboratory that raised it — see `blockVocabulary.ts`.
+import { formatBlockReason } from '../../lab/blockVocabulary'
 import { LabRoutingStep } from '../components/LabRoutingStep'
 import { PatientAccessHandoff } from '../components/PatientAccessHandoff'
 import { PatientIdentity } from '../components/PatientIdentity'
@@ -34,6 +37,10 @@ function mapOrderStatusTone(status: LabOrderStatus): StatusTone {
     case 'REJECTED':
     case 'CANCELLED':
       return 'danger'
+    case 'BLOCKED':
+      // DHEALTH-LAB-BLOCKED-001: `warning`, never `danger` — a blocked order is stalled, not
+      // refused, and must stay visually distinguishable from `REJECTED` at a glance.
+      return 'warning'
     default:
       return 'neutral'
   }
@@ -57,6 +64,11 @@ function formatOrderStatusLabel(status: LabOrderStatus): string {
       return 'Refusé'
     case 'CANCELLED':
       return 'Annulé'
+    case 'BLOCKED':
+      // DHEALTH-LAB-BLOCKED-001 §29: names the laboratory explicitly, so a clinician reading
+      // their own order list knows where the work has stopped and therefore who to contact. The
+      // operational reason is rendered beside it from `order.block.reason`.
+      return 'Bloqué au laboratoire'
     default:
       return status
   }
@@ -299,6 +311,19 @@ export function ClinicOrdersPage() {
                           tone={mapOrderStatusTone(order.status)}
                           label={formatOrderStatusLabel(order.status)}
                         />
+                        {/*
+                          DHEALTH-LAB-BLOCKED-001 §29: the operational reason, in text, beside the
+                          badge — so a clinician scanning this table sees not only that the
+                          laboratory stopped but enough to know whether it is theirs to act on
+                          ("Patient non présenté" is; "Quantité insuffisante" may be). The
+                          laboratory's internal note, the technician's identity and the block
+                          history are all absent by design — see `ProviderBlock`.
+                        */}
+                        {order.block ? (
+                          <p style={{ margin: 'var(--space-1) 0 0', fontSize: 'var(--font-size-sm)' }}>
+                            Motif : {formatBlockReason(order.block.reason)}
+                          </p>
+                        ) : null}
                       </td>
                       <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
                         {order.lab_assignment ? (

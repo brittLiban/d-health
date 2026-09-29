@@ -2244,3 +2244,52 @@ authority from many people at once and needs its own concurrency design.
 **No staff member's real access was changed by this work.** All organizations, memberships and
 people used anywhere in it are synthetic. No real patient data is used. Pilot-ready remains not
 clinically live.
+
+---
+
+## 2026-09-29 — DHEALTH-LAB-BLOCKED-001: an honest state for work that cannot continue
+
+**What is true now.** A laboratory worker holding `lab.queue.work` can open an order their
+laboratory has accepted or started, say that work cannot continue, pick a reason from a short
+structured list, add an optional note, and confirm. The order becomes `BLOCKED`. It stays blocked
+across a full browser reload, appears under its own `Bloqués` queue filter and in a count on the
+laboratory's `Aujourd'hui`, and shows the reason as text on the queue row rather than by colour.
+The ordering clinician sees `Bloqué au laboratoire` and the reason on their own orders list and on
+their home screen. While it stands, the laboratory cannot accept, record a new collection, start
+processing, enter or complete results, or release — and the *server* refuses each of those when
+asked directly, not just the interface. Resolving it restores exactly the state the block
+interrupted and leaves the episode behind as history. An order can be blocked, resolved, worked
+further and blocked again, and both episodes remain individually readable.
+
+**How strongly it is known.** 34 adapter tests over HTTP; 13 tests against real PostgreSQL run
+three times for race stability; migration `0037` applied, downgraded, re-upgraded and re-tested on
+a real database, and separately applied in place to the live demo database with existing orders
+preserved; 19 new frontend tests; 13 browser phases against real Chromium, Caddy, Keycloak 26.7.1,
+the adapter and PostgreSQL 16; eight negative controls executed and reverted byte for byte, each
+reddening a named test for a named reason.
+
+**What is not true.** **Human usability is not claimed.** No laboratory worker has used this
+screen, nothing was timed, and thirteen green browser phases say the mechanism works — not that a
+technician at a bench finds it obvious or faster than telling a colleague. Product law 3 remains a
+validated target here as everywhere else.
+
+**The reason vocabulary is provisional, and that is a real open question rather than a formality.**
+The four reasons are the four `docs/NATIVE-OPERATING-PRODUCT.md` §16 already named, and §16 itself
+requires them to be confirmed with a laboratory participant before they are fixed. That has not
+happened (`D-11`). The consequence a reader should hold onto: **a laboratory whose analyser is down
+has no reason to choose** and must write it in the free-text note. The ticket proposed adding a
+technical reason; it was not added, because inventing an operational vocabulary for a laboratory
+nobody has spoken to is the failure mode `AGENTS.md` names.
+
+**No specimen entity was built and `D-3` is exactly as open as it was.** `SPECIMEN_UNUSABLE` is a
+statement that the laboratory stopped. It does not identify a tube, create an accession, record a
+container, or link a recollection to its predecessor. Recollection has no representation at all: a
+block whose reason is an unusable specimen communicates the operational state and nothing more.
+
+**Nothing tells an external system.** DHealth Connect refuses to apply an externally released
+result to a blocked order — correct, and it needed no change — but there is no mechanism by which a
+block is *announced* outward, and none was invented. That is a known gap, not interoperability.
+
+**No staff member's real access was changed and no real order was blocked.** Every organization,
+person, patient, order and note used anywhere in this work is synthetic. Pilot-ready remains not
+clinically live.

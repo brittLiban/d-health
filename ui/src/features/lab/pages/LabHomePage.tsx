@@ -168,6 +168,26 @@ export function LabHomePage() {
               </p>
             </div>
           </Card>
+          {/*
+            DHEALTH-LAB-BLOCKED-001 §25. `docs/NATIVE-OPERATING-PRODUCT.md` §16's whole argument
+            for this feature is that a stalled order must appear as work owed to a human rather
+            than sitting silently in a queue. Aujourd'hui is where a laboratory asks "what needs
+            me now", so a blocked order has to be counted here or the feature only half exists.
+
+            The count is rendered unconditionally, including when it is zero: a tile that vanishes
+            when empty cannot be trusted to appear when it is not, and "0 bloqués" is itself worth
+            reading at the start of a shift.
+          */}
+          <Card>
+            <div style={{ padding: 'var(--space-4)' }}>
+              <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
+                Bloqués
+              </p>
+              <p style={{ margin: 0, fontSize: 'var(--font-size-2xl)', fontWeight: 700 }}>
+                {queueState.entries.filter((o) => o.status === 'BLOCKED').length}
+              </p>
+            </div>
+          </Card>
         </div>
       )}
     </div>

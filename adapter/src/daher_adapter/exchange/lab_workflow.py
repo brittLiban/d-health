@@ -47,6 +47,36 @@ package's own established style favors a repeated one-liner over a premature sha
 identical duplicate lives in ``exchange/orders.py``'s ``transition()``, so that the *generic*
 state-machine mutation path cannot bypass the same invariant this module enforces on its own
 dedicated ``start_processing`` action -- see that function's own comment for why both must agree.
+
+**DHEALTH-LAB-BLOCKED-001 addition.** ``block``/``resolve_block`` implement
+`docs/NATIVE-OPERATING-PRODUCT.md` §16's P0-4: an order this laboratory took and cannot currently
+continue gets an honest status instead of sitting in a queue state that claims progress nobody is
+making. Unlike ``record_collection``, this *does* move ``LabOrder.status`` -- to ``BLOCKED`` and,
+on resolution, back to whatever it genuinely was before -- and it does so together with a
+``LabOrderBlock`` episode written in the same transaction. Neither half is ever written alone: a
+``BLOCKED`` order with no episode cannot say why it stopped, and an unresolved episode on a
+non-``BLOCKED`` order would contradict the status.
+
+Three properties are worth stating here rather than leaving to be inferred:
+
+* **Blocking enforces nothing new.** Every mutation that must not happen while blocked -- accept,
+  collection, start-processing, result entry, entry completion, release -- is already gated on a
+  specific status (``SELECTED``, ``ACCEPTED``, ``IN_PROGRESS``), so an order in ``BLOCKED``
+  fails all of them through the checks that already existed. That is the reason ``BLOCKED`` is a
+  status rather than a flag beside one: a flag would have required the same refusal to be
+  remembered and re-added in every one of those places, and forgotten in exactly one.
+* **The resume state is the server's, recorded at block time.** ``blocked_from_status`` is copied
+  off the locked order row, never accepted from a caller, and a resolution restores that value and
+  nothing else. See ``LabOrderBlock``'s own docstring for what a client-chosen resume destination
+  would let somebody fabricate.
+* **Resolution is addressed by episode, not by order.** ``resolve_block`` takes the episode's own
+  id, so a retried or long-delayed resolution can only ever resolve the episode its caller
+  actually saw -- never a *second*, later block that happened to be active by the time the retry
+  arrived.
+
+Lock discipline is this module's existing one, unchanged: ``LabOrder`` ``FOR UPDATE`` first, then
+the ``LabSelection`` assignment read. That lock is what serializes two workers blocking the same
+order simultaneously; ``LabOrderBlock``'s partial unique index is the second layer behind it.
 """
 
 from __future__ import annotations
@@ -60,7 +90,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from daher_adapter.exchange.models import (
+    BLOCKABLE_ORDER_STATUSES,
     LabOrder,
+    LabOrderBlock,
+    LabOrderBlockReason,
     LabOrderStatus,
     LabSampleCollection,
     LabSelection,
@@ -80,6 +113,25 @@ class LabOrderNotAssigned(RuntimeError):
 class InvalidLabWorkflowTransition(RuntimeError):
     """The order's current status does not permit the requested lab-workflow action, and it is
     not a safe idempotent replay of an already-completed one either."""
+
+
+class ConflictingBlockRequest(RuntimeError):
+    """DHEALTH-LAB-BLOCKED-001: this order is already blocked, and the incoming request asks for a
+    *different* reason or note than the active episode records.
+
+    Refused rather than silently returning the existing episode, and rather than quietly rewriting
+    it. Both alternatives are wrong in the same way `IdempotencyKeyConflict` is wrong in
+    ``exchange/orders.py``: a retry of the request that already won is a replay, but a genuinely
+    different request that happens to arrive second is a real conflict, and answering it with
+    somebody else's block would tell the caller their reason was recorded when it was not. Maps to
+    HTTP 409."""
+
+
+class BlockEpisodeNotFound(RuntimeError):
+    """No ``LabOrderBlock`` matches the given id *on this order at this laboratory* -- one error
+    for all three cases, never disclosing that an episode id exists on an order this caller may
+    not see (the same anti-enumeration convention ``LabOrderNotAssigned`` already applies). Maps
+    to HTTP 404."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +159,39 @@ class LabWorkflowOrderRecord:
     recorded in DHealth for this order" -- for a legacy order that predates this ticket, that is
     honestly "unrecorded," never a false claim that collection did not happen (see
     ``LabSampleCollection``'s own docstring)."""
+    active_block: LabOrderBlockRecord | None = None
+    """DHEALTH-LAB-BLOCKED-001: the unresolved block episode, when there is one. ``None`` and
+    ``status != 'BLOCKED'`` always agree -- both halves are written in one transaction -- so a
+    caller may read either, and neither can be stale with respect to the other. Resolved episodes
+    are deliberately absent here: this is the queue's "what is wrong right now" field, and the
+    history behind it is its own bounded read (``list_blocks_for_order``)."""
+
+
+@dataclass(frozen=True, slots=True)
+class LabOrderBlockRecord:
+    """DHEALTH-LAB-BLOCKED-001: one block episode, exactly as stored.
+
+    This is the **laboratory's own** view and it carries everything, including the free-text notes
+    and the actor identities. What a provider or a patient is allowed to see is a strictly smaller
+    projection built at the HTTP boundary (``exchange/api.py``), never this record handed onward
+    -- keeping the narrowing at one visible place rather than trusting every future caller to
+    remember which fields are internal."""
+
+    id: uuid.UUID
+    lab_order_id: uuid.UUID
+    lab_organization_id: uuid.UUID
+    reason: str
+    note: str | None
+    blocked_from_status: str
+    blocked_at: datetime
+    blocked_by_identity_id: uuid.UUID
+    resolved_at: datetime | None
+    resolved_by_identity_id: uuid.UUID | None
+    resolution_note: str | None
+
+    @property
+    def active(self) -> bool:
+        return self.resolved_at is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +226,7 @@ class LabWorkflowRepository:
             collection = session.scalar(
                 select(LabSampleCollection).where(LabSampleCollection.lab_order_id == order_id)
             )
-            return _to_record(order, selection, collection)
+            return _to_record(order, selection, collection, _get_active_block(session, order_id))
 
     def list_for_lab(
         self,
@@ -171,9 +256,20 @@ class LabWorkflowRepository:
         of how many orders or items each order has."""
         with self._sessions() as session:
             query = (
-                select(LabOrder, LabSelection, LabSampleCollection)
+                select(LabOrder, LabSelection, LabSampleCollection, LabOrderBlock)
                 .join(LabSelection, LabSelection.lab_order_id == LabOrder.id)
                 .outerjoin(LabSampleCollection, LabSampleCollection.lab_order_id == LabOrder.id)
+                # DHEALTH-LAB-BLOCKED-001: folded into this same query for exactly the reason
+                # DH-EX-011 folded collection in -- never a second per-row query. The `resolved_at
+                # IS NULL` half of the ON clause is what keeps this one-row-per-order: without it
+                # an order with a long block history would multiply its row once per episode.
+                # `uq_exchange_lab_order_blocks_one_active_per_order` is what guarantees the
+                # filtered join can match at most once.
+                .outerjoin(
+                    LabOrderBlock,
+                    (LabOrderBlock.lab_order_id == LabOrder.id)
+                    & (LabOrderBlock.resolved_at.is_(None)),
+                )
                 .where(LabSelection.lab_organization_id == lab_organization_id)
                 .options(selectinload(LabOrder.items))
             )
@@ -182,7 +278,8 @@ class LabWorkflowRepository:
             query = query.order_by(LabOrder.updated_at.desc(), LabOrder.id.desc()).limit(limit)
             rows = session.execute(query).all()
             return [
-                _to_record(order, selection, collection) for order, selection, collection in rows
+                _to_record(order, selection, collection, block)
+                for order, selection, collection, block in rows
             ]
 
     def accept(
@@ -279,7 +376,15 @@ class LabWorkflowRepository:
             # exactly what preserves a legacy pre-DH-EX-011 IN_PROGRESS order's safe retry: an
             # order already IN_PROGRESS with no collection milestone never reaches that check on a
             # repeated start_processing call, so no fake milestone is ever needed to let it pass.
-            return _to_record(order, selection, _get_collection(session, order_id)), False
+            return (
+                _to_record(
+                    order,
+                    selection,
+                    _get_collection(session, order_id),
+                    _get_active_block(session, order_id),
+                ),
+                False,
+            )
         if current != from_status:
             raise InvalidLabWorkflowTransition(
                 f"cannot move LabOrder {order_id} to {to_status.value!r} from its current "
@@ -300,7 +405,15 @@ class LabWorkflowRepository:
 
         order.status = to_status.value
         session.flush()
-        return _to_record(order, selection, _get_collection(session, order_id)), True
+        return (
+            _to_record(
+                order,
+                selection,
+                _get_collection(session, order_id),
+                _get_active_block(session, order_id),
+            ),
+            True,
+        )
 
     def record_collection(
         self, *, order_id: uuid.UUID, lab_organization_id: uuid.UUID, session: Session | None = None
@@ -364,6 +477,299 @@ class LabWorkflowRepository:
         session.flush()
         return _to_collection_record(collection), True
 
+    # -- DHEALTH-LAB-BLOCKED-001: the cannot-proceed workflow -------------------------------
+
+    def block(
+        self,
+        *,
+        order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        reason: LabOrderBlockReason,
+        blocked_by_identity_id: uuid.UUID,
+        note: str | None = None,
+        session: Session | None = None,
+    ) -> tuple[LabWorkflowOrderRecord, LabOrderBlockRecord, bool]:
+        """Records that this laboratory cannot currently continue this order.
+
+        Returns ``(order, episode, created)``. ``created=False`` is the retry/double-click case:
+        the order is already blocked and the active episode records *the same* reason and note, so
+        the existing episode is returned unchanged -- no second row, no second audit, no rewritten
+        timestamp. The same shape ``accept``/``record_collection`` already use.
+
+        A block request that arrives while a *different* reason or note is already active raises
+        ``ConflictingBlockRequest`` (409) instead: see that exception for why returning somebody
+        else's episode would be a lie rather than a convenience.
+
+        Only ``reason`` and ``note`` come from the caller. The laboratory, the actor, the instant
+        and ``blocked_from_status`` are all derived here from the URL, the authenticated
+        principal, the server clock and the order's own locked row."""
+        if session is not None:
+            return self._block_in_session(
+                session,
+                order_id=order_id,
+                lab_organization_id=lab_organization_id,
+                reason=reason,
+                blocked_by_identity_id=blocked_by_identity_id,
+                note=note,
+            )
+        with self._sessions.begin() as owned_session:
+            return self._block_in_session(
+                owned_session,
+                order_id=order_id,
+                lab_organization_id=lab_organization_id,
+                reason=reason,
+                blocked_by_identity_id=blocked_by_identity_id,
+                note=note,
+            )
+
+    def _block_in_session(
+        self,
+        session: Session,
+        *,
+        order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        reason: LabOrderBlockReason,
+        blocked_by_identity_id: uuid.UUID,
+        note: str | None,
+    ) -> tuple[LabWorkflowOrderRecord, LabOrderBlockRecord, bool]:
+        self._organizations.require_type(lab_organization_id, OrganizationType.LAB)
+
+        # Normalized before anything compares it. A browser that sends `""` for an untouched
+        # textarea and `null` on the retry is describing the same absent note, and without this
+        # the replay check below would call that a conflicting request and refuse the retry with
+        # a 409. Whitespace is stripped for the same reason -- " " is not a note.
+        note = _normalize_note(note)
+
+        order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
+        if order is None:
+            raise LabOrderNotAssigned(str(order_id))
+
+        selection = session.scalar(
+            select(LabSelection).where(LabSelection.lab_order_id == order_id)
+        )
+        if selection is None or selection.lab_organization_id != lab_organization_id:
+            raise LabOrderNotAssigned(str(order_id))
+
+        existing = _get_active_block(session, order_id)
+        if existing is not None:
+            # Replay-or-conflict is decided before the status check, deliberately: a retry of the
+            # request that already won must succeed regardless of what the order's status is now,
+            # exactly as `record_collection`'s own idempotent branch fires unconditionally.
+            if existing.reason != reason.value or existing.note != note:
+                raise ConflictingBlockRequest(
+                    f"LabOrder {order_id} already has an active block episode recording a "
+                    f"different reason -- resolve it before recording a new one"
+                )
+            return (
+                _to_record(order, selection, _get_collection(session, order_id), existing),
+                _to_block_record(existing),
+                False,
+            )
+
+        if order.status not in BLOCKABLE_ORDER_STATUSES:
+            raise InvalidLabWorkflowTransition(
+                f"cannot block LabOrder {order_id} in status {order.status!r} -- only work this "
+                f"laboratory has taken and not yet released may be blocked "
+                f"({', '.join(sorted(BLOCKABLE_ORDER_STATUSES))})"
+            )
+
+        block = LabOrderBlock(
+            lab_order_id=order_id,
+            lab_organization_id=lab_organization_id,
+            reason=reason.value,
+            note=note,
+            # Read off the locked row, never from the request. This is the whole resume design.
+            blocked_from_status=order.status,
+            blocked_at=utc_now(),
+            blocked_by_identity_id=blocked_by_identity_id,
+        )
+        session.add(block)
+        # The status and its episode move together or not at all -- one transaction, so no reader
+        # can ever observe a BLOCKED order whose episode does not exist yet, or the reverse.
+        order.status = LabOrderStatus.BLOCKED.value
+        session.flush()
+        return (
+            _to_record(order, selection, _get_collection(session, order_id), block),
+            _to_block_record(block),
+            True,
+        )
+
+    def resolve_block(
+        self,
+        *,
+        order_id: uuid.UUID,
+        block_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        resolved_by_identity_id: uuid.UUID,
+        resolution_note: str | None = None,
+        session: Session | None = None,
+    ) -> tuple[LabWorkflowOrderRecord, LabOrderBlockRecord, bool]:
+        """Resolves one named block episode and restores the workflow state it interrupted.
+
+        Returns ``(order, episode, resolved)``. ``resolved=False`` means this episode was already
+        resolved and the call was a safe replay -- the stored resolution is returned untouched,
+        and in particular the original resolver and instant are **not** overwritten by the second
+        caller's.
+
+        The episode is addressed by id rather than by "whatever is active on this order". A
+        delayed retry can then only ever resolve the episode its caller actually saw; addressing
+        it by order would let a retry silently resolve a second, later block that had since been
+        raised for an entirely different reason.
+
+        The destination is ``blocked_from_status`` and nothing else -- not a parameter, and not
+        derivable by the client. ``resolution_note`` is optional free text and is held to
+        ``LabOrderBlock.note``'s rules."""
+        if session is not None:
+            return self._resolve_block_in_session(
+                session,
+                order_id=order_id,
+                block_id=block_id,
+                lab_organization_id=lab_organization_id,
+                resolved_by_identity_id=resolved_by_identity_id,
+                resolution_note=resolution_note,
+            )
+        with self._sessions.begin() as owned_session:
+            return self._resolve_block_in_session(
+                owned_session,
+                order_id=order_id,
+                block_id=block_id,
+                lab_organization_id=lab_organization_id,
+                resolved_by_identity_id=resolved_by_identity_id,
+                resolution_note=resolution_note,
+            )
+
+    def _resolve_block_in_session(
+        self,
+        session: Session,
+        *,
+        order_id: uuid.UUID,
+        block_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        resolved_by_identity_id: uuid.UUID,
+        resolution_note: str | None,
+    ) -> tuple[LabWorkflowOrderRecord, LabOrderBlockRecord, bool]:
+        self._organizations.require_type(lab_organization_id, OrganizationType.LAB)
+
+        order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
+        if order is None:
+            raise LabOrderNotAssigned(str(order_id))
+
+        selection = session.scalar(
+            select(LabSelection).where(LabSelection.lab_order_id == order_id)
+        )
+        if selection is None or selection.lab_organization_id != lab_organization_id:
+            raise LabOrderNotAssigned(str(order_id))
+
+        block = session.scalar(
+            select(LabOrderBlock).where(
+                LabOrderBlock.id == block_id,
+                LabOrderBlock.lab_order_id == order_id,
+                LabOrderBlock.lab_organization_id == lab_organization_id,
+            )
+        )
+        if block is None:
+            raise BlockEpisodeNotFound(str(block_id))
+
+        if block.resolved_at is not None:
+            # Already resolved: a replay. Nothing is rewritten -- not `resolved_at`, not
+            # `resolved_by_identity_id`, and not `resolution_note`, even when this caller supplied
+            # a different one. The first resolution is the one that happened.
+            return (
+                _to_record(
+                    order,
+                    selection,
+                    _get_collection(session, order_id),
+                    _get_active_block(session, order_id),
+                ),
+                _to_block_record(block),
+                False,
+            )
+
+        if order.status != LabOrderStatus.BLOCKED.value:
+            # Structurally unreachable through any supported path -- an unresolved episode and a
+            # non-BLOCKED status are written in one transaction and cannot disagree. Refused
+            # rather than "repaired": silently forcing the order back to `blocked_from_status`
+            # here would overwrite whatever genuinely happened to it with a guess.
+            raise InvalidLabWorkflowTransition(
+                f"cannot resolve a block on LabOrder {order_id} -- the order is "
+                f"{order.status!r}, not 'BLOCKED'"
+            )
+
+        block.resolved_at = utc_now()
+        block.resolved_by_identity_id = resolved_by_identity_id
+        block.resolution_note = _normalize_note(resolution_note)
+        # The server's recorded resume state, and the only value this line may ever take. The
+        # CHECK on `blocked_from_status` means it is already known to be ACCEPTED or IN_PROGRESS,
+        # so this can never restore a released, rejected or cancelled order.
+        order.status = block.blocked_from_status
+        session.flush()
+        return (
+            _to_record(order, selection, _get_collection(session, order_id), None),
+            _to_block_record(block),
+            True,
+        )
+
+    def list_blocks_for_order(
+        self, order_id: uuid.UUID, lab_organization_id: uuid.UUID
+    ) -> list[LabOrderBlockRecord] | None:
+        """The order's full block history, newest first. ``None`` -- never an empty list -- when
+        the order does not exist or is not assigned to this laboratory, so the caller can map that
+        to the same 404 every other tenant-scoped lookup here produces.
+
+        Unbounded by episode count on purpose: this is per-order, an order accumulating enough
+        episodes to matter is itself the operational signal, and truncating the history would
+        defeat the one question this read exists to answer."""
+        with self._sessions() as session:
+            order = session.get(LabOrder, order_id)
+            if order is None:
+                return None
+            selection = session.scalar(
+                select(LabSelection).where(LabSelection.lab_order_id == order_id)
+            )
+            if selection is None or selection.lab_organization_id != lab_organization_id:
+                return None
+            blocks = session.scalars(
+                select(LabOrderBlock)
+                .where(LabOrderBlock.lab_order_id == order_id)
+                .order_by(LabOrderBlock.blocked_at.desc(), LabOrderBlock.id.desc())
+            ).all()
+            return [_to_block_record(block) for block in blocks]
+
+    def get_active_block_reasons_for_orders(
+        self, order_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, str]:
+        """DHEALTH-LAB-BLOCKED-001: the **provider-facing** projection, and the only block read in
+        this module that is not scoped to the owning laboratory.
+
+        It returns the reason key and nothing else -- no note, no resolution note, no actor, no
+        timestamp, no episode id, no history. That narrowing lives here, in the shape of the
+        return type, rather than in the caller: a `dict[order_id, reason]` structurally cannot leak
+        a laboratory's internal note to the ordering clinic, whereas a list of
+        `LabOrderBlockRecord`s left to be filtered correctly by every future caller eventually
+        will not be. `docs/NATIVE-OPERATING-PRODUCT.md` §16 makes the ordering clinician the next
+        owner of a blocked order, so they must be told *that* it is blocked and *why* in
+        operational terms; §26's minimum-necessary rule is why they are told no more than that.
+
+        Not tenant-scoped on purpose, and safe because of what it returns: the caller has already
+        proven the orders are its own (provider-side reads run through
+        ``_existing_order_for_provider_or_404`` and the provider order listing), and an order id
+        the caller could not already see is not in ``order_ids``. Only *active* episodes are
+        included -- a resolved block is history the laboratory owns, not a current fact the clinic
+        is owed.
+
+        One query for the whole page regardless of size, mirroring
+        ``_lab_assignments_for_orders``'s own N+1-safe discipline."""
+        if not order_ids:
+            return {}
+        with self._sessions() as session:
+            rows = session.execute(
+                select(LabOrderBlock.lab_order_id, LabOrderBlock.reason).where(
+                    LabOrderBlock.lab_order_id.in_(order_ids),
+                    LabOrderBlock.resolved_at.is_(None),
+                )
+            ).all()
+            return {order_id: reason for order_id, reason in rows}
+
     def get_collection_for_order(self, order_id: uuid.UUID) -> LabSampleCollectionRecord | None:
         with self._sessions() as session:
             collection = _get_collection(session, order_id)
@@ -377,7 +783,10 @@ def _get_collection(session: Session, order_id: uuid.UUID) -> LabSampleCollectio
 
 
 def _to_record(
-    order: LabOrder, selection: LabSelection, collection: LabSampleCollection | None
+    order: LabOrder,
+    selection: LabSelection,
+    collection: LabSampleCollection | None,
+    active_block: LabOrderBlock | None = None,
 ) -> LabWorkflowOrderRecord:
     return LabWorkflowOrderRecord(
         id=order.id,
@@ -399,6 +808,7 @@ def _to_record(
             for item in order.items
         ),
         collection_recorded_at=collection.recorded_at if collection is not None else None,
+        active_block=None if active_block is None else _to_block_record(active_block),
     )
 
 
@@ -408,4 +818,43 @@ def _to_collection_record(collection: LabSampleCollection) -> LabSampleCollectio
         lab_order_id=collection.lab_order_id,
         lab_organization_id=collection.lab_organization_id,
         recorded_at=collection.recorded_at,
+    )
+
+
+def _to_block_record(block: LabOrderBlock) -> LabOrderBlockRecord:
+    return LabOrderBlockRecord(
+        id=block.id,
+        lab_order_id=block.lab_order_id,
+        lab_organization_id=block.lab_organization_id,
+        reason=block.reason,
+        note=block.note,
+        blocked_from_status=block.blocked_from_status,
+        blocked_at=block.blocked_at,
+        blocked_by_identity_id=block.blocked_by_identity_id,
+        resolved_at=block.resolved_at,
+        resolved_by_identity_id=block.resolved_by_identity_id,
+        resolution_note=block.resolution_note,
+    )
+
+
+def _normalize_note(note: str | None) -> str | None:
+    """``None``, ``""`` and ``"   "`` all mean "no note" and are stored identically.
+
+    This exists so the replay check in ``_block_in_session`` compares meanings rather than
+    encodings: a browser that sends an empty string for an untouched textarea and ``null`` on the
+    retry would otherwise look like a *different* request and be refused as a conflict."""
+    if note is None:
+        return None
+    stripped = note.strip()
+    return stripped or None
+
+
+def _get_active_block(session: Session, order_id: uuid.UUID) -> LabOrderBlock | None:
+    """The one unresolved episode, or ``None``. ``uq_exchange_lab_order_blocks_one_active_per_
+    order`` is what lets this return a scalar rather than a list without the caller having to
+    decide what "several active blocks" would mean -- there cannot be several."""
+    return session.scalar(
+        select(LabOrderBlock).where(
+            LabOrderBlock.lab_order_id == order_id, LabOrderBlock.resolved_at.is_(None)
+        )
     )

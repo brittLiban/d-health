@@ -126,7 +126,10 @@ from daher_adapter.exchange.lab_result_templates import (
     TemplateValidationError,
 )
 from daher_adapter.exchange.lab_workflow import (
+    BlockEpisodeNotFound,
+    ConflictingBlockRequest,
     InvalidLabWorkflowTransition,
+    LabOrderBlockRecord,
     LabOrderNotAssigned,
     LabWorkflowOrderRecord,
     LabWorkflowRepository,
@@ -145,6 +148,7 @@ from daher_adapter.exchange.membership import (
 from daher_adapter.exchange.models import (
     DoctorReviewStatus,
     ExchangeIdentity,
+    LabOrderBlockReason,
     LabOrderStatus,
     LabResultType,
     OnboardingStatus,
@@ -957,6 +961,43 @@ class LabAssignmentSummaryResponse(BaseModel):
     selected_at: datetime
 
 
+class ProviderBlockResponse(BaseModel):
+    """DHEALTH-LAB-BLOCKED-001: what the **ordering clinic** is told about a blocked order.
+
+    The reason key and nothing else. `docs/NATIVE-OPERATING-PRODUCT.md` §16 makes the ordering
+    clinician the next owner of blocked work, so withholding the fact entirely would recreate the
+    silent state this ticket exists to remove; §26's minimum-necessary rule is why they receive no
+    more than the operational category.
+
+    Specifically absent, and each for a stated reason rather than by oversight:
+
+    * **the free-text note** -- a laboratory's internal working note (an equipment fault after
+      maintenance, a colleague's name, a supplier) is written for that bench, not for another
+      organization's clinician;
+    * **the actor** -- which technician stopped the work is the laboratory's internal staffing
+      matter, and naming them to an external organization serves no clinical purpose;
+    * **the timestamps and the episode id** -- operational detail of another organization's
+      internal workflow;
+    * **the history** -- whether this order has been blocked before is the laboratory's own
+      operational record. Only what is true *now* crosses the boundary.
+
+    Present only while a block is active. A resolved block disappears from the provider's view
+    because the order has genuinely resumed, and that is the fact the clinic needs.
+
+    **Defined here, above its two consumers, rather than beside the laboratory-facing block models
+    further down.** That is not tidiness. This module has no ``from __future__ import
+    annotations``, so ``ProviderBlockResponse | None`` in ``LabOrderResponse`` below is evaluated
+    when that class body runs. Python 3.14 defers annotation evaluation (PEP 649) and resolved it
+    lazily, so the whole suite passed against the local interpreter -- but the shipped container is
+    ``python:3.13`` (``adapter/Dockerfile``), where the same line raises ``NameError`` at import
+    and the API never starts. Found by ``ruff`` (F821), not by any test, and recorded here because
+    the next person moving a response model has exactly one chance to reintroduce it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: LabOrderBlockReason
+
+
 class LabOrderResponse(BaseModel):
     """Deliberately excludes ``selected_price_amount``/``selected_price_currency`` -- this ticket
     never selects a lab, so both are always ``NULL`` on every item; omitting them from the response
@@ -988,6 +1029,10 @@ class LabOrderResponse(BaseModel):
     """DHEALTH-CLINIC-VISIT-001: the clinic visit this order was raised during, or ``None``
     for a standalone order and for every order that predates visits."""
     lab_assignment: LabAssignmentSummaryResponse | None = None
+    block: ProviderBlockResponse | None = None
+    """DHEALTH-LAB-BLOCKED-001: present only while the laboratory has this order actively
+    blocked, and carrying only the operational reason -- see ``ProviderBlockResponse`` for the
+    full list of what is deliberately withheld from the ordering clinic and why."""
 
 
 class LabOrderSummaryResponse(BaseModel):
@@ -1015,6 +1060,9 @@ class LabOrderSummaryResponse(BaseModel):
     """DHEALTH-CLINIC-VISIT-001: the clinic visit this order was raised during, or ``None``
     for a standalone order and for every order that predates visits."""
     lab_assignment: LabAssignmentSummaryResponse | None = None
+    block: ProviderBlockResponse | None = None
+    """DHEALTH-LAB-BLOCKED-001: same projection as ``LabOrderResponse.block``, resolved equally
+    batched -- one query for the whole page, never per row."""
 
 
 # -- DH-CLINIC-003C: backend-owned durable canonical order intent ---------------------------------
@@ -1456,6 +1504,68 @@ def _to_lab_patient_identity(summary: PatientIdentitySummaryResponse) -> LabPati
     )
 
 
+class LabOrderBlockResponse(BaseModel):
+    """DHEALTH-LAB-BLOCKED-001: one block episode, **as the owning laboratory sees it**.
+
+    This is the widest of the three block projections and the only one carrying the free-text
+    notes or the actor identities. The ordering clinic gets ``ProviderBlockResponse`` below
+    (reason key only) and the patient gets no block field at all. Keeping the three shapes
+    distinct and adjacent is deliberate: a single response model filtered per caller is exactly
+    how an internal note reaches a screen nobody meant it to reach.
+
+    Actors are identity ids, not names, matching every other actor field in this file
+    (``entry_completed_by_identity_id`` and friends). ``ExchangeIdentity`` holds no display name
+    by design -- it identifies a human by their OIDC ``(issuer, subject)`` pair and nothing
+    else -- so there is no name to return, and none is invented here."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    reason: LabOrderBlockReason
+    note: str | None
+    blocked_at: datetime
+    blocked_by_identity_id: uuid.UUID
+    blocked_from_status: str
+    """The state this episode interrupted, and therefore the state resolving it will restore. Read
+    by the laboratory UI to say what will happen, never sent back as a request field."""
+    resolved_at: datetime | None
+    resolved_by_identity_id: uuid.UUID | None
+    resolution_note: str | None
+
+
+class LabOrderBlockRequest(BaseModel):
+    """DHEALTH-LAB-BLOCKED-001: the entire legitimate input to blocking an order.
+
+    Two fields, and every other fact the episode records is derived server-side: the laboratory
+    from the URL and the authenticated membership, the actor from the token, the instant from the
+    server clock, and the resume state from the order's own locked row. There is deliberately no
+    ``blocked_by``, ``blocked_at``, ``organization_id``, ``from_status`` or ``resume_to`` field --
+    a caller able to supply the last of those could move an order into a state its history never
+    passed through.
+
+    ``note``'s ``max_length`` matches ``LabOrderBlock.note``'s ``String(1024)`` exactly. Without
+    it an oversized value passes this model, reaches real PostgreSQL's ``VARCHAR(n)``, raises
+    ``DataError``, and surfaces as a raw 500 that the SQLite-backed unit suite cannot see at all --
+    the exact failure DH-EX-007A documented on this file's own result schemas."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: LabOrderBlockReason
+    note: str | None = Field(default=None, max_length=1024)
+
+
+class LabOrderBlockResolveRequest(BaseModel):
+    """DHEALTH-LAB-BLOCKED-001: resolving takes at most one optional note.
+
+    No destination field. The state the order returns to is the ``blocked_from_status`` the server
+    recorded when it was blocked -- see ``LabOrderBlock``'s docstring for what a client-chosen
+    resume destination would let somebody fabricate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution_note: str | None = Field(default=None, max_length=1024)
+
+
 class LabWorkflowOrderResponse(BaseModel):
     """The selected lab's own narrow clinical-work view -- deliberately excludes
     `PatientReference`/`ExchangeIdentity`/membership/audit internal ids, patient contact data, and
@@ -1480,6 +1590,9 @@ class LabWorkflowOrderResponse(BaseModel):
     """DH-EX-011: ``null`` means no sample/specimen collection milestone has been recorded in
     DHealth for this order -- honestly "unrecorded" for a legacy order, never a claim that
     collection did not happen (see ``LabSampleCollection``'s own docstring in ``models.py``)."""
+    active_block: LabOrderBlockResponse | None = None
+    """DHEALTH-LAB-BLOCKED-001: the unresolved block episode, or ``null``. Always agrees with
+    ``status == 'BLOCKED'`` -- both are written in one transaction."""
 
 
 class LabCollectionResponse(BaseModel):
@@ -4908,6 +5021,7 @@ def build_exchange_router(
             result.order,
             _require_patient_identity(provider_id, result.order.patient_reference_id),
             _lab_assignment_for_order(result.order),
+            _block_reason_for_order(result.order),
         )
 
     @router.get("/organizations/{provider_id}/orders", response_model=list[LabOrderSummaryResponse])
@@ -4925,11 +5039,13 @@ def build_exchange_router(
             provider_id, [order.patient_reference_id for order in page]
         )
         lab_assignments_by_order = _lab_assignments_for_orders(page)
+        block_reasons_by_order = _block_reasons_for_orders(page)
         return [
             _to_order_summary_response(
                 order,
                 identities_by_reference[order.patient_reference_id],
                 lab_assignments_by_order[order.id],
+                block_reasons_by_order[order.id],
             )
             for order in page
         ]
@@ -4967,6 +5083,7 @@ def build_exchange_router(
             order,
             _require_patient_identity(provider_id, order.patient_reference_id),
             _lab_assignment_for_order(order),
+            _block_reason_for_order(order),
         )
 
     @router.get("/organizations/{provider_id}/orders/{order_id}", response_model=LabOrderResponse)
@@ -4983,6 +5100,7 @@ def build_exchange_router(
             order,
             _require_patient_identity(provider_id, order.patient_reference_id),
             _lab_assignment_for_order(order),
+            _block_reason_for_order(order),
         )
 
     @router.post(
@@ -5203,6 +5321,7 @@ def build_exchange_router(
             result.order,
             _require_patient_identity(provider_id, result.order.patient_reference_id),
             _lab_assignment_for_order(result.order),
+            _block_reason_for_order(result.order),
         )
 
     @router.get(
@@ -5227,8 +5346,14 @@ def build_exchange_router(
         patient_identity = _require_patient_identity(provider_id, patient_reference_id)
         page = orders.list_for_patient(provider_id, patient_reference_id, limit=limit)
         lab_assignments_by_order = _lab_assignments_for_orders(page)
+        block_reasons_by_order = _block_reasons_for_orders(page)
         return [
-            _to_order_response(order, patient_identity, lab_assignments_by_order[order.id])
+            _to_order_response(
+                order,
+                patient_identity,
+                lab_assignments_by_order[order.id],
+                block_reasons_by_order[order.id],
+            )
             for order in page
         ]
 
@@ -5422,6 +5547,7 @@ def build_exchange_router(
             provider_id, [order.patient_reference_id for order in visit_orders]
         )
         lab_assignments_by_order = _lab_assignments_for_orders(visit_orders)
+        block_reasons_by_order = _block_reasons_for_orders(visit_orders)
         return VisitDetailResponse(
             visit=_to_visit_response(visit),
             notes=[
@@ -5439,6 +5565,7 @@ def build_exchange_router(
                     order,
                     identities_by_reference[order.patient_reference_id],
                     lab_assignments_by_order[order.id],
+                    block_reasons_by_order[order.id],
                 )
                 for order in visit_orders
             ],
@@ -6369,6 +6496,26 @@ def build_exchange_router(
             for order in orders_page
         }
 
+    def _block_reasons_for_orders(
+        orders_page: list[LabOrderRecord],
+    ) -> dict[uuid.UUID, str | None]:
+        """DHEALTH-LAB-BLOCKED-001: the active block reason for each order on a provider-side
+        page, batched into one query regardless of page size -- the same N+1-safe discipline
+        ``_lab_assignments_for_orders`` above already holds itself to.
+
+        Short-circuits when nothing on the page is blocked, which is the ordinary case: a page of
+        orders with no `BLOCKED` status among them issues no block query at all, so this costs
+        existing clinic order lists nothing."""
+        blocked_ids = [
+            order.id for order in orders_page if order.status == LabOrderStatus.BLOCKED.value
+        ]
+        reasons = lab_workflow.get_active_block_reasons_for_orders(blocked_ids)
+        return {order.id: reasons.get(order.id) for order in orders_page}
+
+    def _block_reason_for_order(order: LabOrderRecord) -> str | None:
+        """Single-order sibling of ``_block_reasons_for_orders``, for detail reads."""
+        return _block_reasons_for_orders([order])[order.id]
+
     @router.post(
         "/organizations/{provider_id}/orders/{order_id}/patient-access",
         response_model=PatientAccessIssueResponse,
@@ -6971,6 +7118,7 @@ def build_exchange_router(
                 for item in record.items
             ],
             collection_recorded_at=record.collection_recorded_at,
+            active_block=_to_lab_block_response(record.active_block),
         )
 
     def _lab_workflow_order_responses(
@@ -7033,6 +7181,9 @@ def build_exchange_router(
                         for item in record.items
                     ],
                     collection_recorded_at=record.collection_recorded_at,
+                    # DHEALTH-LAB-BLOCKED-001: already on the record, folded into
+                    # `list_for_lab`'s own single query -- no per-row lookup is added here.
+                    active_block=_to_lab_block_response(record.active_block),
                 )
             )
         return responses
@@ -7202,6 +7353,128 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return LabCollectionResponse(order_id=record.lab_order_id, recorded_at=record.recorded_at)
+
+    # -- DHEALTH-LAB-BLOCKED-001: the cannot-proceed workflow -------------------------------
+    #
+    # Explicit transition actions, never a generic `PATCH {"status": "BLOCKED"}`. The server owns
+    # which transitions exist, which are legal from here, and what a resolution restores; a
+    # status-setting PATCH would hand all three to the caller. Same shape as the accept/reject/
+    # start-processing/record-collection actions above.
+    #
+    # Both are gated on `_require_lab_tech`, which is `Capability.LAB_QUEUE_WORK` since
+    # DHEALTH-ACCESS-CAPABILITIES-001. No new capability is introduced: blocking an order is
+    # ordinary laboratory queue work, performed by the same person who accepts and collects, and a
+    # `lab.order.block` capability would be the speculative seam §3A of that ticket forbids. It is
+    # emphatically *not* merged with `LAB_RESULT_RELEASE` either -- a technician who may block and
+    # resume an order still may not publish its result.
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/block",
+        response_model=LabWorkflowOrderResponse,
+    )
+    def block_lab_order(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        body: LabOrderBlockRequest,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> LabWorkflowOrderResponse:
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                record, _block, created = lab_workflow.block(
+                    order_id=order_id,
+                    lab_organization_id=lab_id,
+                    reason=body.reason,
+                    note=body.note,
+                    # Server-derived, never from the body -- the point of the request schema.
+                    blocked_by_identity_id=principal.identity_id,
+                    session=session,
+                )
+                if created:
+                    # Idempotent replay writes no second audit row, matching accept/reject/
+                    # record-collection. The reason key and the note are deliberately not carried
+                    # into the audit row -- see `security_audit.py`'s own note on these two events.
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_blocked",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="updated",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except LabOrderNotAssigned as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except ConflictingBlockRequest as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except InvalidLabWorkflowTransition as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _lab_workflow_order_response(record)
+
+    @router.post(
+        "/organizations/{lab_id}/lab-orders/{order_id}/blocks/{block_id}/resolve",
+        response_model=LabWorkflowOrderResponse,
+    )
+    def resolve_lab_order_block(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        block_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        body: LabOrderBlockResolveRequest | None = None,
+    ) -> LabWorkflowOrderResponse:
+        # The episode is named in the path rather than resolved from "whatever is active on this
+        # order". A retried or long-delayed resolution can then only ever resolve the episode its
+        # caller actually saw -- addressing it by order would let that retry silently resolve a
+        # *second*, later block raised for a different reason in the meantime.
+        _require_lab_tech(principal, lab_id)
+        try:
+            with session_factory.begin() as session:
+                record, _block, resolved = lab_workflow.resolve_block(
+                    order_id=order_id,
+                    block_id=block_id,
+                    lab_organization_id=lab_id,
+                    resolved_by_identity_id=principal.identity_id,
+                    resolution_note=body.resolution_note if body is not None else None,
+                    session=session,
+                )
+                if resolved:
+                    security_audit.record(
+                        session,
+                        event_type="lab_order_block_resolved",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="updated",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+        except (LabOrderNotAssigned, BlockEpisodeNotFound) as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="order not found"
+            ) from error
+        except InvalidLabWorkflowTransition as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _lab_workflow_order_response(record)
+
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/blocks",
+        response_model=list[LabOrderBlockResponse],
+    )
+    def list_lab_order_blocks(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[LabOrderBlockResponse]:
+        """Every block episode this order has had, newest first, resolved ones included. This is
+        the read that answers "has this order been trouble before?" -- the question a single
+        mutable `block_reason` column could never answer."""
+        _require_lab_tech(principal, lab_id)
+        records = lab_workflow.list_blocks_for_order(order_id, lab_id)
+        if records is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        responses = [_to_lab_block_response(record) for record in records]
+        return [response for response in responses if response is not None]
 
     @router.get(
         "/organizations/{lab_id}/lab-orders/{order_id}/result-entry-plan",
@@ -10030,10 +10303,41 @@ def _to_provider_lab_route_response(record: ProviderLabRouteRecord) -> ProviderL
     )
 
 
+def _to_lab_block_response(record: LabOrderBlockRecord | None) -> LabOrderBlockResponse | None:
+    """DHEALTH-LAB-BLOCKED-001: the laboratory's own full view of a block episode. The *only*
+    projection that may carry the free-text notes or the actor identities -- see
+    ``_to_provider_block_response`` for what leaves the organization, and
+    ``patientStatusWording.ts`` for the patient side, which receives no block field at all."""
+    if record is None:
+        return None
+    return LabOrderBlockResponse(
+        id=record.id,
+        reason=LabOrderBlockReason(record.reason),
+        note=record.note,
+        blocked_at=record.blocked_at,
+        blocked_by_identity_id=record.blocked_by_identity_id,
+        blocked_from_status=record.blocked_from_status,
+        resolved_at=record.resolved_at,
+        resolved_by_identity_id=record.resolved_by_identity_id,
+        resolution_note=record.resolution_note,
+    )
+
+
+def _to_provider_block_response(reason: str | None) -> ProviderBlockResponse | None:
+    """DHEALTH-LAB-BLOCKED-001: the whole of the provider-facing narrowing, in one place.
+
+    Takes a bare reason key -- not a ``LabOrderBlockRecord`` -- so that no note, actor or
+    timestamp is ever in scope at the point the clinic's projection is built. The service method
+    feeding it (``get_active_block_reasons_for_orders``) returns nothing else for the same
+    reason."""
+    return None if reason is None else ProviderBlockResponse(reason=LabOrderBlockReason(reason))
+
+
 def _to_order_response(
     order: LabOrderRecord,
     patient: PatientIdentitySummaryResponse,
     lab_assignment: LabAssignmentSummaryResponse | None = None,
+    block_reason: str | None = None,
 ) -> LabOrderResponse:
     return LabOrderResponse(
         id=order.id,
@@ -10053,6 +10357,7 @@ def _to_order_response(
         ],
         visit_id=order.visit_id,
         lab_assignment=lab_assignment,
+        block=_to_provider_block_response(block_reason),
     )
 
 
@@ -10060,6 +10365,7 @@ def _to_order_summary_response(
     order: LabOrderRecord,
     patient: PatientIdentitySummaryResponse,
     lab_assignment: LabAssignmentSummaryResponse | None = None,
+    block_reason: str | None = None,
 ) -> LabOrderSummaryResponse:
     return LabOrderSummaryResponse(
         id=order.id,
@@ -10072,4 +10378,5 @@ def _to_order_summary_response(
         item_count=len(order.items),
         visit_id=order.visit_id,
         lab_assignment=lab_assignment,
+        block=_to_provider_block_response(block_reason),
     )

@@ -43,6 +43,8 @@ import type {
   LabObservation,
   LabObservationHistory,
   LabOrder,
+  LabOrderBlock,
+  LabOrderBlockReason,
   LabOrderCreateOutcome,
   LabOrderCreateRequest,
   LabOrderIntent,
@@ -1088,6 +1090,83 @@ export class ExchangeClient {
     return this.request<LabWorkflowOrder>(
       `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/start-processing`,
       { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/block
+   *
+   * DHEALTH-LAB-BLOCKED-001: record that this laboratory cannot currently continue this order.
+   *
+   * The body carries the reason and an optional note and **nothing else**. The actor, the
+   * laboratory, the instant and the state the order will resume to are all derived server-side;
+   * sending any of them would be sending a fact this client is not entitled to assert. A repeat
+   * with the identical reason and note is a safe replay (200, no second episode); a repeat with a
+   * different reason while one is already active is a 409.
+   */
+  async blockLabOrder(
+    labId: string,
+    orderId: string,
+    body: { reason: LabOrderBlockReason; note?: string | null },
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabWorkflowOrder> {
+    return this.request<LabWorkflowOrder>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/block`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: body.reason, note: body.note ?? null }),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/blocks/{block_id}/resolve
+   *
+   * DHEALTH-LAB-BLOCKED-001: resolve one named block episode; the server restores the state that
+   * episode interrupted.
+   *
+   * The episode is named in the path deliberately, and this client never substitutes "whatever is
+   * active": a delayed retry must only ever resolve the block the user actually saw, never a
+   * second one raised since for a different reason. There is no destination field to send --
+   * where the order returns to is the server's recorded fact, not this client's choice.
+   */
+  async resolveLabOrderBlock(
+    labId: string,
+    orderId: string,
+    blockId: string,
+    body: { resolution_note?: string | null } = {},
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabWorkflowOrder> {
+    return this.request<LabWorkflowOrder>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/blocks/${encodeURIComponent(blockId)}/resolve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resolution_note: body.resolution_note ?? null }),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/blocks
+   *
+   * DHEALTH-LAB-BLOCKED-001: every block episode this order has had, newest first, resolved ones
+   * included -- the read that answers "has this order been trouble before?".
+   */
+  async listLabOrderBlocks(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOrderBlock[]> {
+    return this.request<LabOrderBlock[]>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/blocks`,
+      { method: 'GET', signal: options.signal },
       options.token,
     )
   }

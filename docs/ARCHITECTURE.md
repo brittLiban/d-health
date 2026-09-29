@@ -3045,3 +3045,80 @@ one and not the other is silently broken rather than loudly.
 - **Do not put mutable facility capabilities into Keycloak claims.** Authority is read from the
   database per request, which is what makes revocation effective on the next request with the same
   valid token — DHEALTH-NATIVE-SEC-001's invariant, re-qualified here for capabilities.
+
+---
+
+## 32. The blocked laboratory order (DHEALTH-LAB-BLOCKED-001, ADR-068) — added 2026-09-29
+
+`docs/NATIVE-OPERATING-PRODUCT.md` §16's P0-4. Before this, an order a laboratory could not work
+stayed in `ACCEPTED` — a state that claims progress nobody is making.
+
+### The shape
+
+```
+   ACCEPTED ──┐                                ┌── ACCEPTED
+              ├─> BLOCKED  + LabOrderBlock ────┤
+IN_PROGRESS ──┘   (reason, note?, actor,       └── IN_PROGRESS
+                   instant, blocked_from_status)
+                            │                         ▲
+                            └── resolve ──────────────┘
+                                (restores blocked_from_status, and only that)
+```
+
+**`BLOCKED` is a `LabOrderStatus`, not a flag beside one.** Every laboratory mutation that must not
+happen while blocked — accept, a *new* collection milestone, start-processing, result entry, entry
+completion, release — was already gated on a specific status by code predating this ticket, so all
+of them refuse a blocked order through checks that already existed. A boolean column would have
+required the same refusal in six places. Result entry in particular is covered by a *single* shared
+preamble (`results.py`'s `_lock_order_and_item_for_entry`), so one check guards all six entry
+mutations.
+
+**`exchange_lab_order_blocks` is one row per episode.** An order blocked twice has two rows; neither
+is ever updated after resolution and no delete path exists anywhere. A partial unique index over
+`lab_order_id WHERE resolved_at IS NULL` allows any number of resolved episodes and exactly one
+live one — sitting behind the `LabOrder` `FOR UPDATE` lock, which is what actually serializes two
+workers blocking the same order. The index is the second layer, not the first.
+
+**The tenant boundary is a composite foreign key.** `(lab_order_id, lab_organization_id)` targets
+`exchange_lab_selections`, so a block row cannot name a laboratory the order is not assigned to.
+Two single-column keys would each be satisfiable while the *pair* is a fabrication — the same shape
+`exchange_payments` uses against `uq_exchange_invoices_id_org`.
+
+**`blocked_from_status` is the resume design.** Copied off the locked order row at block time,
+CHECK-constrained to `ACCEPTED`/`IN_PROGRESS`, and the only value a resolution restores. Never a
+request field: a client able to choose could move an order blocked from `ACCEPTED` straight to
+`IN_PROGRESS`, asserting processing that never started and skipping DH-EX-011's collection
+milestone.
+
+**Resolution is addressed by episode id**, not by order, so a delayed retry can only resolve the
+episode its caller actually saw — never a second block raised since for a different reason.
+
+### The three projections
+
+| | reason | note | actor | timestamps | episode id | history |
+|---|---|---|---|---|---|---|
+| Lab (`lab.queue.work`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Clinic (ordering provider) | ✓ | — | — | — | — | — |
+| Patient | — | — | — | — | — | — |
+
+The narrowing lives in the **return type**: `LabWorkflowRepository.get_active_block_reasons_for_
+orders` returns `dict[order_id, reason]`, so nothing else is in scope where the clinic's projection
+is built. `PatientOrderResponse` gains no field at all; `patientStatusWording.ts`'s exhaustive
+`switch` over `LabOrderStatus` ends in a `never` assertion, so adding a status without deciding what
+a patient is told is a typecheck failure.
+
+### Boundaries
+
+- **Authority is `lab.queue.work`**, unsplit. No `lab.order.block` capability exists.
+  `lab.result.release` is neither implied nor implying.
+- **No specimen is modelled.** No accession, container, aliquot, storage, transport, custody event,
+  multi-specimen order or recollection linkage. **D-3 is untouched.**
+- **Billing:** `BLOCKED` is billable — the laboratory took the work. Nothing financial causes,
+  prevents or resolves a block.
+- **Connect** refuses to apply an externally released result to a `BLOCKED` order through its
+  existing "anything else" branch, unchanged. **Nothing announces a block to an external system**,
+  and no such mechanism was invented.
+- **Audit:** `lab_order_blocked` / `lab_order_block_resolved`, both `resource_type="lab_order"`,
+  order-centric like every other laboratory event. Neither carries the reason key (the episode row
+  is the single authority) nor the free-text note (a laboratory's working note belongs nowhere near
+  a security log — `VisitNote.body`'s rule).

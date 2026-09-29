@@ -36,6 +36,13 @@ export function formatOrderStatus(status: string): { label: string; tone: Status
       return { label: 'Rejeté', tone: 'danger' }
     case 'CANCELLED':
       return { label: 'Annulé', tone: 'neutral' }
+    case 'BLOCKED':
+      // DHEALTH-LAB-BLOCKED-001 §29. `warning`, not `danger`: the laboratory has stopped, which a
+      // clinician needs to notice, but the order is not refused and not lost -- `danger` is what
+      // `REJECTED` means here and the two must stay distinguishable at a glance. The reason
+      // itself is rendered separately from `LabOrder.block.reason` (see `blockVocabulary.ts`), so
+      // this label deliberately does not try to carry it.
+      return { label: 'Bloqué au laboratoire', tone: 'warning' }
     default:
       // An unknown status shows its own raw value rather than a guess. A wrong French label would
       // be worse than an obviously untranslated one.

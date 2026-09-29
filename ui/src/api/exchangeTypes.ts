@@ -85,6 +85,28 @@ export type LabOrderStatus =
   | 'COMPLETED'
   | 'REJECTED'
   | 'CANCELLED'
+  /**
+   * DHEALTH-LAB-BLOCKED-001: laboratory work that was taken and cannot currently continue. Not a
+   * cancellation and not a refusal -- the order is expected to resume. Adding it here is what
+   * makes `patientStatusWording`'s exhaustive `switch` fail to typecheck until somebody has
+   * decided what a *patient* is told, which is the point of that `never` assertion.
+   */
+  | 'BLOCKED'
+
+/**
+ * DHEALTH-LAB-BLOCKED-001: why laboratory work cannot currently continue.
+ *
+ * Operational, never clinical -- `SPECIMEN_UNUSABLE` describes a tube, not a patient. These four
+ * mirror the backend's `LabOrderBlockReason` exactly, and both come from
+ * `docs/NATIVE-OPERATING-PRODUCT.md` §16's own list rather than being invented. The list is
+ * **provisional**: §16 requires it to be confirmed with a laboratory participant before it is
+ * fixed, and that confirmation has not happened.
+ */
+export type LabOrderBlockReason =
+  | 'SPECIMEN_UNUSABLE'
+  | 'SPECIMEN_INSUFFICIENT'
+  | 'PATIENT_DID_NOT_ATTEND'
+  | 'CLARIFICATION_REQUIRED'
 
 export type DoctorReviewStatus =
   | 'PENDING'
@@ -137,6 +159,9 @@ export interface LabOrderSummary {
    * standalone order and for every order that predates visits. */
   visit_id: string | null
   lab_assignment: LabAssignmentSummary | null
+  /** DHEALTH-LAB-BLOCKED-001: present only while the laboratory has this order actively blocked,
+   * and carrying the operational reason alone — see `ProviderBlock`. */
+  block: ProviderBlock | null
 }
 
 // Helper alias for integer representation in types
@@ -155,6 +180,8 @@ export interface LabOrder {
    * by the backend, copied from the committing intent — never sent by this client. */
   visit_id: string | null
   lab_assignment: LabAssignmentSummary | null
+  /** DHEALTH-LAB-BLOCKED-001: same narrow projection as `LabOrderSummary.block`. */
+  block: ProviderBlock | null
 }
 
 export type LabOrderResponse = LabOrder
@@ -480,6 +507,48 @@ export interface LabWorkflowOrder {
   ordering_provider_name: string
   requested_tests: LabWorkflowOrderItem[]
   collection_recorded_at: string | null
+  /**
+   * DHEALTH-LAB-BLOCKED-001: the unresolved block episode, or `null`. Always agrees with
+   * `status === 'BLOCKED'` -- the backend writes both in one transaction.
+   */
+  active_block: LabOrderBlock | null
+}
+
+/**
+ * DHEALTH-LAB-BLOCKED-001: one block episode as the **owning laboratory** sees it.
+ *
+ * This is the only block shape carrying the free-text notes or the actor identities. The ordering
+ * clinic receives `ProviderBlock` below (the reason key alone) and the patient screen receives no
+ * block field at all. Mirrors the backend's `LabOrderBlockResponse` exactly.
+ *
+ * `blocked_by_identity_id` is an identity id rather than a name because `ExchangeIdentity` holds
+ * no display name by design -- it identifies a human by their OIDC `(issuer, subject)` pair. The
+ * UI compares it against the signed-in identity and says "vous" or "un autre membre" rather than
+ * rendering a raw UUID or inventing a name.
+ */
+export interface LabOrderBlock {
+  id: string
+  reason: LabOrderBlockReason
+  note: string | null
+  blocked_at: string
+  blocked_by_identity_id: string
+  /** The state this episode interrupted, and therefore the state resolving it restores. */
+  blocked_from_status: string
+  resolved_at: string | null
+  resolved_by_identity_id: string | null
+  resolution_note: string | null
+}
+
+/**
+ * DHEALTH-LAB-BLOCKED-001: what the **ordering clinic** is told about a blocked order.
+ *
+ * The operational reason and nothing else -- no note, no actor, no timestamps, no history. The
+ * clinician is the next owner of blocked work (`docs/NATIVE-OPERATING-PRODUCT.md` §16) so they
+ * must be told it stopped and broadly why; §26's minimum-necessary rule is why they are told no
+ * more than that. Present only while a block is active.
+ */
+export interface ProviderBlock {
+  reason: LabOrderBlockReason
 }
 
 /**

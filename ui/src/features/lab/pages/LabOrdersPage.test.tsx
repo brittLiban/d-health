@@ -7,6 +7,7 @@ import type {
   AmendmentInspection,
   ExchangeMeResponse,
   LabObservationHistory,
+  LabOrderBlock,
   LabWorkflowOrder,
   LabWorkflowPatientIdentity,
   ResultEntryWorkspace,
@@ -83,6 +84,7 @@ function makeOrder(overrides: Partial<LabWorkflowOrder> = {}): LabWorkflowOrder 
       },
     ],
     collection_recorded_at: null,
+    active_block: null,
     ...overrides,
   }
 }
@@ -103,6 +105,13 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     getLabObservationHistory: vi.fn().mockResolvedValue(makeHistory()),
     listLabOrderAmendments: vi.fn().mockResolvedValue({ order_id: 'order-a', amendments: [] }),
     startLabOrderAmendment: vi.fn(),
+    // DHEALTH-LAB-BLOCKED-001: the panel reads block history for *every* order it opens, not only
+    // blocked ones -- "has this been blocked before?" is a question about an order that looks
+    // healthy right now. So every test that opens a panel needs this stubbed, not just the block
+    // tests.
+    listLabOrderBlocks: vi.fn().mockResolvedValue([]),
+    blockLabOrder: vi.fn(),
+    resolveLabOrderBlock: vi.fn(),
     getLabOrderAmendment: vi.fn(),
     correctAmendmentNativeObservation: vi.fn(),
     ...overrides,
@@ -2448,5 +2457,350 @@ describe('LabOrdersPage', () => {
         expect(value).not.toContain('7.2')
       }
     })
+  })
+})
+
+// == DHEALTH-LAB-BLOCKED-001: the cannot-proceed workflow ========================================
+//
+// The safety invariant the operating-product specification states for this feature is that a
+// blocked order must appear as **work owed to a human, never a silent state**. Most of the
+// assertions below are about that rather than about the mutation: that the reason is legible on
+// the queue row, that it survives a reload, and that the block form is not offered where the
+// server would refuse it.
+
+function makeBlock(overrides: Partial<LabOrderBlock> = {}): LabOrderBlock {
+  return {
+    id: 'block-a',
+    reason: 'SPECIMEN_UNUSABLE',
+    note: null,
+    blocked_at: '2026-09-29T08:30:00Z',
+    blocked_by_identity_id: 'identity-1',
+    blocked_from_status: 'ACCEPTED',
+    resolved_at: null,
+    resolved_by_identity_id: null,
+    resolution_note: null,
+    ...overrides,
+  }
+}
+
+describe('LabOrdersPage — blocked orders (DHEALTH-LAB-BLOCKED-001)', () => {
+  // -- where the action is offered, and where it is not ------------------------------------
+
+  it('B1: an ACCEPTED order offers "Bloquer l\'ordre"', async () => {
+    const order = makeOrder({ status: 'ACCEPTED', collection_recorded_at: null })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([order]),
+      getLabOrder: vi.fn().mockResolvedValue(order),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(await screen.findByRole('button', { name: "Bloquer l'ordre" })).toBeInTheDocument()
+  })
+
+  it('B2: an IN_PROGRESS order offers it too — §16 names two source states, not one', async () => {
+    const order = makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: '2026-09-29T08:00:00Z' })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([order]),
+      getLabOrder: vi.fn().mockResolvedValue(order),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(await screen.findByRole('button', { name: "Bloquer l'ordre" })).toBeInTheDocument()
+  })
+
+  it('B3: a SELECTED order does not offer it, and neither does a COMPLETED one', async () => {
+    for (const status of ['SELECTED', 'COMPLETED'] as const) {
+      const order = makeOrder({ status })
+      const client = makeClient({
+        listLabOrders: vi.fn().mockResolvedValue([order]),
+        getLabOrder: vi.fn().mockResolvedValue(order),
+      })
+      const user = userEvent.setup()
+      const { unmount } = render(<StaffApp client={client} initialSection="orders" />)
+      await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+      // Wait for the panel to settle on something status-specific before asserting an absence.
+      await screen.findByText(/Établissement prescripteur/)
+      expect(screen.queryByRole('button', { name: "Bloquer l'ordre" })).not.toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  // -- the block interaction ----------------------------------------------------------------
+
+  it('B4: the form asks for a motif and an optional note, and for nothing the server derives', async () => {
+    const order = makeOrder({ status: 'ACCEPTED' })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([order]),
+      getLabOrder: vi.fn().mockResolvedValue(order),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Bloquer l'ordre" }))
+
+    expect(await screen.findByLabelText('Motif')).toBeInTheDocument()
+    expect(screen.getByLabelText(/Note/)).toBeInTheDocument()
+
+    // Every one of the four reasons is offered in French, never as a raw enum key.
+    for (const label of [
+      'Prélèvement inutilisable',
+      'Quantité insuffisante',
+      'Patient non présenté',
+      'Précision nécessaire',
+    ]) {
+      expect(screen.getByRole('option', { name: label })).toBeInTheDocument()
+    }
+    expect(document.body.textContent).not.toContain('SPECIMEN_UNUSABLE')
+
+    // §26: the staff identity, the organization, the time and the resume state are derived. The
+    // form must not ask for any of them.
+    expect(screen.queryByLabelText(/technicien|identité|organisation|date|heure|reprendre à/i))
+      .not.toBeInTheDocument()
+  })
+
+  it('B5: confirmation is required, and the request carries only the reason and the note', async () => {
+    const order = makeOrder({ status: 'ACCEPTED' })
+    const blockLabOrder = vi
+      .fn()
+      .mockResolvedValue(makeOrder({ status: 'BLOCKED', active_block: makeBlock() }))
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([order]),
+      getLabOrder: vi.fn().mockResolvedValue(order),
+      blockLabOrder,
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Bloquer l'ordre" }))
+
+    // Opening the form is not the mutation.
+    expect(blockLabOrder).not.toHaveBeenCalled()
+
+    await user.selectOptions(await screen.findByLabelText('Motif'), 'SPECIMEN_INSUFFICIENT')
+    await user.type(screen.getByLabelText(/Note/), 'Tube à moitié rempli')
+    await user.click(screen.getByRole('button', { name: 'Confirmer le blocage' }))
+
+    await waitFor(() =>
+      expect(blockLabOrder).toHaveBeenCalledWith('lab-a', 'order-a', {
+        reason: 'SPECIMEN_INSUFFICIENT',
+        note: 'Tube à moitié rempli',
+      }),
+    )
+  })
+
+  it('B6: an untouched note is sent as null, never as an empty string', async () => {
+    const order = makeOrder({ status: 'ACCEPTED' })
+    const blockLabOrder = vi
+      .fn()
+      .mockResolvedValue(makeOrder({ status: 'BLOCKED', active_block: makeBlock() }))
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([order]),
+      getLabOrder: vi.fn().mockResolvedValue(order),
+      blockLabOrder,
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: "Bloquer l'ordre" }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer le blocage' }))
+
+    await waitFor(() =>
+      expect(blockLabOrder).toHaveBeenCalledWith('lab-a', 'order-a', {
+        reason: 'SPECIMEN_UNUSABLE',
+        note: null,
+      }),
+    )
+  })
+
+  // -- what a blocked order looks like ------------------------------------------------------
+
+  it('B7: the queue row states "Bloqué" and the motif in text, never colour alone', async () => {
+    const blocked = makeOrder({
+      status: 'BLOCKED',
+      active_block: makeBlock({ reason: 'PATIENT_DID_NOT_ATTEND' }),
+    })
+    const client = makeClient({ listLabOrders: vi.fn().mockResolvedValue([blocked]) })
+    render(<StaffApp client={client} initialSection="orders" />)
+
+    expect(await screen.findByText('Bloqué')).toBeInTheDocument()
+    expect(screen.getByText(/Motif : Patient non présenté/)).toBeInTheDocument()
+  })
+
+  it('B8: the panel shows the reason, when, by whom, and the note', async () => {
+    const blocked = makeOrder({
+      status: 'BLOCKED',
+      active_block: makeBlock({ note: 'Second tube demandé au service' }),
+    })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([blocked]),
+      getLabOrder: vi.fn().mockResolvedValue(blocked),
+      listLabOrderBlocks: vi.fn().mockResolvedValue([makeBlock({ note: 'Second tube demandé au service' })]),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(await screen.findByText(/Travail bloqué — Prélèvement inutilisable/)).toBeInTheDocument()
+    expect(screen.getAllByText(/Second tube demandé au service/).length).toBeGreaterThan(0)
+    // `blocked_by_identity_id` matches the signed-in identity, so the screen says "vous" rather
+    // than printing a UUID at a technician.
+    expect(screen.getAllByText(/par vous/).length).toBeGreaterThan(0)
+    expect(document.body.textContent).not.toContain('identity-1')
+  })
+
+  it('B9: "Résoudre le blocage" appears only when there is an active block', async () => {
+    const accepted = makeOrder({ status: 'ACCEPTED' })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([accepted]),
+      getLabOrder: vi.fn().mockResolvedValue(accepted),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText(/Établissement prescripteur/)
+
+    expect(screen.queryByRole('button', { name: 'Résoudre le blocage' })).not.toBeInTheDocument()
+  })
+
+  // -- resolving ----------------------------------------------------------------------------
+
+  it('B10: resolving names the episode in the request and never a destination', async () => {
+    const blocked = makeOrder({ status: 'BLOCKED', active_block: makeBlock({ id: 'block-xyz' }) })
+    const resolveLabOrderBlock = vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' }))
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([blocked]),
+      getLabOrder: vi.fn().mockResolvedValue(blocked),
+      listLabOrderBlocks: vi.fn().mockResolvedValue([makeBlock({ id: 'block-xyz' })]),
+      resolveLabOrderBlock,
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Résoudre le blocage' }))
+
+    // The confirmation quotes the server's own recorded resume state; it does not offer a choice.
+    expect(await screen.findByText(/Résoudre ce blocage \?/)).toBeInTheDocument()
+    expect(document.body.textContent).toMatch(/restera dans l'historique/)
+    expect(resolveLabOrderBlock).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: 'Confirmer la reprise' }))
+    await waitFor(() =>
+      expect(resolveLabOrderBlock).toHaveBeenCalledWith('lab-a', 'order-a', 'block-xyz'),
+    )
+  })
+
+  it('B11: the user is never asked to choose the state the order resumes to', async () => {
+    const blocked = makeOrder({
+      status: 'BLOCKED',
+      active_block: makeBlock({ blocked_from_status: 'IN_PROGRESS' }),
+    })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([blocked]),
+      getLabOrder: vi.fn().mockResolvedValue(blocked),
+      listLabOrderBlocks: vi.fn().mockResolvedValue([makeBlock({ blocked_from_status: 'IN_PROGRESS' })]),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await user.click(await screen.findByRole('button', { name: 'Résoudre le blocage' }))
+
+    // It *states* where the order will go, read from `blocked_from_status`. Scoped to the
+    // confirmation itself: "En cours" is also a queue filter tab, and matching that instead would
+    // make this assertion pass without the sentence ever being rendered.
+    const confirmation = await screen.findByRole('alert')
+    expect(confirmation.textContent).toMatch(/reprendra à l'état/)
+    expect(confirmation.textContent).toMatch(/En cours/)
+    // ...and offers no control to change it.
+    expect(screen.queryByLabelText(/reprendre à|destination|état/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: /état|destination/i })).not.toBeInTheDocument()
+  })
+
+  // -- history ------------------------------------------------------------------------------
+
+  it('B12: resolved episodes stay visible, with who resolved them and when', async () => {
+    const blocked = makeOrder({ status: 'BLOCKED', active_block: makeBlock({ id: 'block-2' }) })
+    const history = [
+      makeBlock({
+        id: 'block-2',
+        reason: 'CLARIFICATION_REQUIRED',
+        blocked_from_status: 'IN_PROGRESS',
+      }),
+      makeBlock({
+        id: 'block-1',
+        reason: 'SPECIMEN_INSUFFICIENT',
+        note: 'Premier problème',
+        resolved_at: '2026-09-29T09:00:00Z',
+        resolved_by_identity_id: 'identity-1',
+        resolution_note: 'Nouveau tube reçu',
+      }),
+    ]
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([blocked]),
+      getLabOrder: vi.fn().mockResolvedValue(blocked),
+      listLabOrderBlocks: vi.fn().mockResolvedValue(history),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(await screen.findByRole('heading', { name: 'Blocages' })).toBeInTheDocument()
+    // Both episodes survive: the current one and the one already dealt with. A single mutable
+    // `block_reason` column could never show this.
+    expect(screen.getByText(/Quantité insuffisante — résolu/)).toBeInTheDocument()
+    expect(screen.getByText(/Précision nécessaire — en cours/)).toBeInTheDocument()
+    expect(screen.getByText(/Premier problème/)).toBeInTheDocument()
+    expect(screen.getByText(/Nouveau tube reçu/)).toBeInTheDocument()
+    expect(screen.getByText(/Résolu .* par vous/)).toBeInTheDocument()
+  })
+
+  it('B13: an order that has never been blocked shows no Blocages section', async () => {
+    const order = makeOrder({ status: 'ACCEPTED' })
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([order]),
+      getLabOrder: vi.fn().mockResolvedValue(order),
+      listLabOrderBlocks: vi.fn().mockResolvedValue([]),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await screen.findByText(/Établissement prescripteur/)
+
+    expect(screen.queryByRole('heading', { name: 'Blocages' })).not.toBeInTheDocument()
+  })
+
+  // -- the queue filter ---------------------------------------------------------------------
+
+  it('B14: "Bloqués" is its own filter — a state nobody can list is a silent state', async () => {
+    const listLabOrders = vi.fn().mockResolvedValue([])
+    const client = makeClient({ listLabOrders })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+
+    await user.click(await screen.findByRole('tab', { name: 'Bloqués' }))
+    await waitFor(() =>
+      expect(listLabOrders).toHaveBeenCalledWith(
+        'lab-a',
+        expect.objectContaining({ status: 'BLOCKED' }),
+      ),
+    )
+  })
+
+  // -- the unknown-reason fallback ----------------------------------------------------------
+
+  it('B15: an unrecognised reason key renders a neutral label, never the raw enum', async () => {
+    const blocked = makeOrder({
+      status: 'BLOCKED',
+      // A deployment-skew shape: the server knows a reason this build does not.
+      active_block: makeBlock({ reason: 'ANALYSER_OFFLINE' as LabOrderBlock['reason'] }),
+    })
+    const client = makeClient({ listLabOrders: vi.fn().mockResolvedValue([blocked]) })
+    render(<StaffApp client={client} initialSection="orders" />)
+
+    expect(await screen.findByText(/Motif : Motif non précisé/)).toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('ANALYSER_OFFLINE')
   })
 })

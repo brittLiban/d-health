@@ -219,3 +219,54 @@ describe('PatientStatusPage — content boundaries', () => {
     expect(status.textContent).toMatch(/un suivi est nécessaire/i)
   })
 })
+
+describe('PatientStatusPage — BLOCKED (DHEALTH-LAB-BLOCKED-001 §17)', () => {
+  it('says the analysis is waiting, and never claims it is progressing', () => {
+    render(<PatientStatusPage order={makeOrder('BLOCKED', 'NOT_READY', { selection: ASSIGNED_LAB })} />)
+
+    // The honest statement. Mapping BLOCKED onto "Analyse en cours" would make this screen claim
+    // progress that is not happening — the exact deception the BLOCKED state exists to end.
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent(/en attente au laboratoire/i)
+    expect(document.body.textContent).not.toMatch(/analyse en cours/i)
+    // Not a cancellation or a refusal either: those are different, terminal facts.
+    expect(document.body.textContent).not.toMatch(/annulé|refus|rejet/i)
+  })
+
+  it('leaks no laboratory technical detail — no reason key, no note, no enum, no actor', () => {
+    render(<PatientStatusPage order={makeOrder('BLOCKED', 'NOT_READY', { selection: ASSIGNED_LAB })} />)
+
+    const text = document.body.textContent ?? ''
+    const html = document.body.innerHTML
+    // The reason key never reaches the patient in any form: not the enum, and not the French
+    // operational label the laboratory and the clinic both read.
+    for (const leaked of [
+      'BLOCKED',
+      'SPECIMEN_UNUSABLE',
+      'SPECIMEN_INSUFFICIENT',
+      'PATIENT_DID_NOT_ATTEND',
+      'CLARIFICATION_REQUIRED',
+      'Prélèvement inutilisable',
+      'Quantité insuffisante',
+      'Précision nécessaire',
+    ]) {
+      expect(text).not.toContain(leaked)
+      expect(html).not.toContain(leaked)
+    }
+    // No technical vocabulary at all (rule 3 of `patientStatusWording`).
+    expect(text).not.toMatch(/statut|motif|bloqu|centrifug|analyseur|technicien/i)
+  })
+
+  it('gives the patient something they can actually do', () => {
+    render(<PatientStatusPage order={makeOrder('BLOCKED')} />)
+
+    // The clinic is the patient's route back in. Telling them the work stopped without telling
+    // them who to ask would be worse than saying nothing.
+    expect(document.body.textContent).toMatch(/contactez votre clinique/i)
+  })
+
+  it('§52: the state is carried by text, not colour alone', () => {
+    render(<PatientStatusPage order={makeOrder('BLOCKED')} />)
+
+    expect(screen.getByRole('status').textContent).toMatch(/en attente au laboratoire/i)
+  })
+})

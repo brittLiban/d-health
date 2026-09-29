@@ -215,12 +215,19 @@ class LabAssignmentSummaryRecord:
 # REJECTED, and CANCELLED are deliberately excluded: the latter two are reachable directly from
 # AWAITING_LAB_SELECTION (see `orders.py`'s `_ALLOWED_TRANSITIONS`) without ever having a
 # `LabSelection`, which is a legitimate historical state, not an integrity problem.
+#
+# DHEALTH-LAB-BLOCKED-001 adds BLOCKED, which the reasoning above already covers: BLOCKED is
+# reachable only from ACCEPTED/IN_PROGRESS, both of which are already in this set, so an order
+# cannot arrive there without a LabSelection any more than they can. Omitting it would have
+# quietly weakened this integrity check for exactly the orders a laboratory is most likely to be
+# looking at.
 STATUSES_REQUIRING_LAB_SELECTION = frozenset(
     {
         LabOrderStatus.SELECTED.value,
         LabOrderStatus.ACCEPTED.value,
         LabOrderStatus.IN_PROGRESS.value,
         LabOrderStatus.COMPLETED.value,
+        LabOrderStatus.BLOCKED.value,
     }
 )
 

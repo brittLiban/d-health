@@ -75,6 +75,7 @@ function makeOrder(overrides: Partial<LabOrder> = {}): LabOrder {
       lab_organization_name: 'Laboratoire Central',
       selected_at: '2026-09-18T08:05:00Z',
     },
+    block: null,
     ...overrides,
   }
 }

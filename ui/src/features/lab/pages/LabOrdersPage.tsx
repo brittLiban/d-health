@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Amendment, LabOrderStatus, LabWorkflowOrder, ResultEntryWorkspace } from '../../../api/exchangeTypes'
+import type {
+  Amendment,
+  LabOrderBlock,
+  LabOrderBlockReason,
+  LabOrderStatus,
+  LabWorkflowOrder,
+  ResultEntryWorkspace,
+} from '../../../api/exchangeTypes'
 import {
   Button,
   Card,
@@ -9,6 +16,7 @@ import {
   StatusBadge,
   type StatusTone,
 } from '../../../design-system'
+import { BLOCK_REASONS, formatBlockReason } from '../blockVocabulary'
 import { AmendmentWorkspace } from '../components/AmendmentWorkspace'
 import { LabPatientIdentity } from '../components/LabPatientIdentity'
 import { NativeResultEntryForm } from '../components/NativeResultEntryForm'
@@ -32,6 +40,12 @@ function formatOrderStatusLabel(status: LabOrderStatus): string {
       return 'Refusé'
     case 'CANCELLED':
       return 'Annulé'
+    case 'BLOCKED':
+      // DHEALTH-LAB-BLOCKED-001 §25. The laboratory's own wording is deliberately not the
+      // clinic's "Bloqué au laboratoire" — to this reader, *here* is the laboratory, and naming
+      // it back at them would be noise. The reason is rendered next to this badge, so the badge
+      // itself stays the one-word state.
+      return 'Bloqué'
     default:
       return status
   }
@@ -49,6 +63,12 @@ function orderStatusTone(status: LabOrderStatus): StatusTone {
     case 'REJECTED':
     case 'CANCELLED':
       return 'danger'
+    case 'BLOCKED':
+      // DHEALTH-LAB-BLOCKED-001 §25: `danger`, and here that is right — on the laboratory's own
+      // queue a blocked order is work owed to somebody in this room, and it must not blend in
+      // with the `warning` tone that ordinary in-flight work carries. Colour is never the only
+      // channel: the "Bloqué" text and the reason line carry the same state.
+      return 'danger'
     default:
       return 'neutral'
   }
@@ -62,6 +82,22 @@ function formatDateTime(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+/**
+ * DHEALTH-LAB-BLOCKED-001 §27: who did this, in words a colleague can use.
+ *
+ * `ExchangeIdentity` carries no display name by design — it identifies a human by their OIDC
+ * `(issuer, subject)` pair, and DH-EX-002 is explicit that email and name are not stable identity.
+ * So there is no name to print, and this deliberately does not invent one or fall back to a raw
+ * UUID at a technician. "Vous" versus "un autre membre du laboratoire" is the whole of what this
+ * screen can truthfully say, and it happens to be the distinction that actually matters at a
+ * bench: whether the person reading is the one who has to explain the block.
+ */
+function formatActor(actorIdentityId: string, viewerIdentityId: string | null): string {
+  return viewerIdentityId !== null && actorIdentityId === viewerIdentityId
+    ? 'vous'
+    : 'un autre membre du laboratoire'
 }
 
 // DH-LAB-001 §38: a fixed, generic message -- never interpolated with the order/lab ids that
@@ -79,14 +115,33 @@ const MUTATION_CONFLICT_ERROR =
 const PROCESSING_PREREQUISITE_ERROR =
   "La collecte n'a pas été enregistrée dans DHealth -- l'analyse ne peut pas commencer avant."
 
+// DHEALTH-LAB-BLOCKED-001 §26/§27. Blocking and resolving get the same recovery vocabulary the
+// four actions above already use, plus one of their own: a 409 on `block` means a colleague has
+// already blocked this order for a *different* reason, which is neither "unconfirmed" nor the
+// generic "handled differently" — the user's own reason was genuinely not recorded and the panel
+// is about to show them somebody else's.
+const BLOCK_CONFLICT_ERROR =
+  'Cet ordre vient d’être bloqué pour un autre motif — le blocage actuel est affiché ci-dessous.'
+const BLOCK_HISTORY_ERROR = "Impossible de charger l'historique des blocages de cet ordre."
+
 const QUEUE_PAGE_LIMIT = 100
 
-type QueueFilter = 'SELECTED' | 'ACCEPTED' | 'IN_PROGRESS' | 'COMPLETED' | 'REJECTED' | 'ALL'
+type QueueFilter =
+  | 'SELECTED'
+  | 'ACCEPTED'
+  | 'IN_PROGRESS'
+  | 'BLOCKED'
+  | 'COMPLETED'
+  | 'REJECTED'
+  | 'ALL'
 
 const FILTER_OPTIONS: { id: QueueFilter; label: string }[] = [
   { id: 'SELECTED', label: 'Nouveaux' },
   { id: 'ACCEPTED', label: 'Acceptés' },
   { id: 'IN_PROGRESS', label: 'En cours' },
+  // §25: blocked work is work *owed to somebody in this room*, so it gets its own filter rather
+  // than being findable only under "Tous". A state nobody can list is the silent state again.
+  { id: 'BLOCKED', label: 'Bloqués' },
   { id: 'COMPLETED', label: 'Terminés' },
   { id: 'REJECTED', label: 'Refusés' },
   { id: 'ALL', label: 'Tous' },
@@ -113,10 +168,29 @@ interface AmendmentDiscoveryState {
   amendments: Amendment[] | null
 }
 
+/** DHEALTH-LAB-BLOCKED-001 §28: every episode this order has had, newest first. */
+interface BlockHistoryState {
+  orderId: string
+  loading: boolean
+  error: string | null
+  blocks: LabOrderBlock[] | null
+}
+
+/**
+ * DHEALTH-LAB-BLOCKED-001 §26: the block form's own draft, and the whole of what a user supplies.
+ * There is deliberately no actor, organization, timestamp or resume-state field here — not
+ * disabled ones, not hidden ones, none at all. Anything this shape cannot express is a fact the
+ * server derives, and a form that cannot represent it cannot accidentally send it.
+ */
+interface BlockDraft {
+  reason: LabOrderBlockReason
+  note: string
+}
+
 const AMENDMENT_DISCOVERY_ERROR = 'Impossible de vérifier si un amendement est en cours pour cet ordre.'
 
 export function LabOrdersPage() {
-  const { status: authStatus, activeLab, capabilities, client } = useLab()
+  const { status: authStatus, activeLab, capabilities, client, user } = useLab()
 
   const [filter, setFilter] = useState<QueueFilter>('SELECTED')
   const [queueState, setQueueState] = useState<{
@@ -130,17 +204,23 @@ export function LabOrdersPage() {
   const [startAmendmentState, setStartAmendmentState] = useState<{ submitting: boolean }>({
     submitting: false,
   })
+  const [blockHistory, setBlockHistory] = useState<BlockHistoryState | null>(null)
+  const [blockDraft, setBlockDraft] = useState<BlockDraft>({
+    reason: BLOCK_REASONS[0],
+    note: '',
+  })
   const [mutationState, setMutationState] = useState<{
-    action: 'accept' | 'reject' | 'collect' | 'start' | null
+    action: 'accept' | 'reject' | 'collect' | 'start' | 'block' | 'resolve-block' | null
     submitting: boolean
     error: string | null
   }>({ action: null, submitting: false, error: null })
-  // DH-LAB-002 §15/§19/§44, extended by DH-LAB-005 §25: one confirmation slot for whichever
-  // deliberate action is pending -- reject, collection, start-processing, and starting an
-  // amendment are all mutually exclusive, and the panel stays the single confirmation surface.
-  const [confirming, setConfirming] = useState<'reject' | 'collect' | 'start' | 'start-amendment' | null>(
-    null,
-  )
+  // DH-LAB-002 §15/§19/§44, extended by DH-LAB-005 §25 and DHEALTH-LAB-BLOCKED-001 §26/§27: one
+  // confirmation slot for whichever deliberate action is pending -- reject, collection,
+  // start-processing, starting an amendment, blocking and resolving a block are all mutually
+  // exclusive, and the panel stays the single confirmation surface.
+  const [confirming, setConfirming] = useState<
+    'reject' | 'collect' | 'start' | 'start-amendment' | 'block' | 'resolve-block' | null
+  >(null)
 
   // DH-LAB-001 §39-42: same generation-ref/mounted-ref/tenant-ref stale-response discipline
   // DH-CLINIC-005/007 already established, extended here across the lab-switch dimension.
@@ -171,6 +251,11 @@ export function LabOrdersPage() {
     setStartAmendmentState({ submitting: false })
     setMutationState({ action: null, submitting: false, error: null })
     setConfirming(null)
+    // DHEALTH-LAB-BLOCKED-001: block history is lab-scoped clinical-adjacent state and clears in
+    // the same render pass as everything else — a previous laboratory's block reasons must never
+    // survive a tenant switch, for exactly the reason §12/§39 gives for the queue rows.
+    setBlockHistory(null)
+    setBlockDraft({ reason: BLOCK_REASONS[0], note: '' })
     setQueueState({ entries: [], loading: true, error: null })
     queueGenerationRef.current += 1
     panelGenerationRef.current += 1
@@ -346,6 +431,47 @@ export function LabOrdersPage() {
     }
     setAmendmentDiscovery(null)
   }, [panel?.order?.status, panel?.orderId, loadAmendmentDiscovery])
+
+  // DHEALTH-LAB-BLOCKED-001 §28: the order's own block history, read from the server rather than
+  // assembled from whatever this browser happens to have seen. Same generation/mount/tenant
+  // stale-response discipline as every other panel-scoped read on this page.
+  const loadBlockHistory = useCallback(
+    (orderId: string) => {
+      if (!activeLab) return
+      const generation = panelGenerationRef.current
+      const targetLab = activeLab.organization_id
+      const controller = new AbortController()
+
+      setBlockHistory({ orderId, loading: true, error: null, blocks: null })
+      client
+        .listLabOrderBlocks(targetLab, orderId, { signal: controller.signal })
+        .then((blocks) => {
+          if (!mountedRef.current) return
+          if (panelGenerationRef.current !== generation) return
+          if (currentLabRef.current !== targetLab) return
+          setBlockHistory({ orderId, loading: false, error: null, blocks })
+        })
+        .catch(() => {
+          if (controller.signal.aborted) return
+          if (!mountedRef.current) return
+          if (panelGenerationRef.current !== generation) return
+          if (currentLabRef.current !== targetLab) return
+          setBlockHistory({ orderId, loading: false, error: BLOCK_HISTORY_ERROR, blocks: null })
+        })
+      return () => controller.abort()
+    },
+    [client, activeLab],
+  )
+
+  // Loaded for every opened order, not only blocked ones: "has this order been blocked before?"
+  // is a question about an order that looks perfectly healthy right now, and an empty history is
+  // itself the answer.
+  useEffect(() => {
+    if (panel?.orderId && panel.order) {
+      return loadBlockHistory(panel.orderId)
+    }
+    setBlockHistory(null)
+  }, [panel?.orderId, panel?.order, loadBlockHistory])
 
   const handleOpenOrder = (orderId: string) => {
     if (panel?.orderId === orderId) return
@@ -620,6 +746,187 @@ export function LabOrdersPage() {
     }
   }, [activeLab, panel, client, loadPanel, loadQueue, filter])
 
+  // DHEALTH-LAB-BLOCKED-001 §26. The recovery predicate is `status === 'BLOCKED'` plus an active
+  // episode, and the two are read together because the server writes them together -- judging
+  // success from the status alone would call a *colleague's* block this user's success.
+  const runBlock = useCallback(async () => {
+    if (!activeLab || !panel?.order) return
+    const orderId = panel.order.order_id
+    const targetLab = activeLab.organization_id
+    const mutationGeneration = panelGenerationRef.current
+    const note = blockDraft.note.trim()
+    setMutationState({ action: 'block', submitting: true, error: null })
+    try {
+      const response = await client.blockLabOrder(targetLab, orderId, {
+        reason: blockDraft.reason,
+        note: note === '' ? null : note,
+      })
+      if (!mountedRef.current || currentLabRef.current !== targetLab) return
+      if (panelGenerationRef.current !== mutationGeneration) {
+        loadQueue(filter)
+        return
+      }
+      if (response.order_id !== orderId) {
+        setMutationState({ action: 'block', submitting: false, error: ORDER_MISMATCH_ERROR })
+      } else if (response.status !== 'BLOCKED') {
+        setMutationState({ action: 'block', submitting: false, error: MUTATION_CONFLICT_ERROR })
+      } else {
+        setMutationState({ action: null, submitting: false, error: null })
+        setBlockDraft({ reason: BLOCK_REASONS[0], note: '' })
+      }
+      setConfirming(null)
+      loadPanel(orderId, { isRecheck: true })
+      loadQueue(filter)
+    } catch {
+      if (!mountedRef.current || currentLabRef.current !== targetLab) return
+      if (panelGenerationRef.current !== mutationGeneration) {
+        loadQueue(filter)
+        return
+      }
+      setConfirming(null)
+      try {
+        const authoritative = await client.getLabOrder(targetLab, orderId)
+        if (!mountedRef.current || currentLabRef.current !== targetLab) return
+        if (panelGenerationRef.current !== mutationGeneration) {
+          loadQueue(filter)
+          return
+        }
+        const active = authoritative.active_block
+        if (authoritative.order_id !== orderId) {
+          setMutationState({ action: 'block', submitting: false, error: ORDER_MISMATCH_ERROR })
+        } else if (
+          authoritative.status === 'BLOCKED' &&
+          active !== null &&
+          active.reason === blockDraft.reason &&
+          (active.note ?? '') === note
+        ) {
+          // Case A: the episode that exists is genuinely this user's own request, recorded. No
+          // error, and never a second POST.
+          setMutationState({ action: null, submitting: false, error: null })
+          setBlockDraft({ reason: BLOCK_REASONS[0], note: '' })
+        } else if (authoritative.status === 'BLOCKED') {
+          // Case B: blocked, but for something else -- a colleague won the race. This user's own
+          // reason was *not* recorded, and saying "unconfirmed" would invite them to retry into a
+          // guaranteed 409. The panel below now shows whose block it actually is.
+          setMutationState({ action: 'block', submitting: false, error: BLOCK_CONFLICT_ERROR })
+        } else if (
+          authoritative.status === 'ACCEPTED' ||
+          authoritative.status === 'IN_PROGRESS'
+        ) {
+          // Case C: still blockable, no episode -- genuinely unconfirmed, retry stays available.
+          setMutationState({ action: 'block', submitting: false, error: MUTATION_UNCONFIRMED_ERROR })
+        } else {
+          // Case D: the order moved somewhere a block is no longer possible at all.
+          setMutationState({ action: 'block', submitting: false, error: MUTATION_CONFLICT_ERROR })
+        }
+        if (authoritative.order_id === orderId) {
+          setPanel({ orderId, loading: false, error: null, order: authoritative })
+        }
+        loadQueue(filter)
+      } catch {
+        if (!mountedRef.current || currentLabRef.current !== targetLab) return
+        if (panelGenerationRef.current !== mutationGeneration) return
+        setMutationState({ action: 'block', submitting: false, error: MUTATION_UNCONFIRMED_ERROR })
+      }
+    }
+  }, [activeLab, panel, client, blockDraft, loadPanel, loadQueue, filter])
+
+  // §27. The episode id is captured at the moment the user confirmed, and the request names it.
+  // A late retry therefore resolves the block this user was looking at or nothing at all -- never
+  // a second block raised in the meantime for an unrelated reason.
+  const runResolveBlock = useCallback(
+    async (blockId: string) => {
+      if (!activeLab || !panel?.order) return
+      const orderId = panel.order.order_id
+      const targetLab = activeLab.organization_id
+      const mutationGeneration = panelGenerationRef.current
+      setMutationState({ action: 'resolve-block', submitting: true, error: null })
+      try {
+        const response = await client.resolveLabOrderBlock(targetLab, orderId, blockId)
+        if (!mountedRef.current || currentLabRef.current !== targetLab) return
+        if (panelGenerationRef.current !== mutationGeneration) {
+          loadQueue(filter)
+          return
+        }
+        if (response.order_id !== orderId) {
+          setMutationState({
+            action: 'resolve-block',
+            submitting: false,
+            error: ORDER_MISMATCH_ERROR,
+          })
+        } else if (response.status === 'BLOCKED') {
+          setMutationState({
+            action: 'resolve-block',
+            submitting: false,
+            error: MUTATION_CONFLICT_ERROR,
+          })
+        } else {
+          // The server chose where this lands. This client deliberately asserts nothing about
+          // *which* state resumed -- it reports whatever came back.
+          setMutationState({ action: null, submitting: false, error: null })
+        }
+        setConfirming(null)
+        loadPanel(orderId, { isRecheck: true })
+        loadQueue(filter)
+      } catch {
+        if (!mountedRef.current || currentLabRef.current !== targetLab) return
+        if (panelGenerationRef.current !== mutationGeneration) {
+          loadQueue(filter)
+          return
+        }
+        setConfirming(null)
+        try {
+          const authoritative = await client.getLabOrder(targetLab, orderId)
+          if (!mountedRef.current || currentLabRef.current !== targetLab) return
+          if (panelGenerationRef.current !== mutationGeneration) {
+            loadQueue(filter)
+            return
+          }
+          if (authoritative.order_id !== orderId) {
+            setMutationState({
+              action: 'resolve-block',
+              submitting: false,
+              error: ORDER_MISMATCH_ERROR,
+            })
+          } else if (authoritative.active_block === null) {
+            // Resolved -- by this call or by a colleague's. Either way the work has resumed and
+            // there is nothing left for this user to do, so this is success rather than a
+            // conflict.
+            setMutationState({ action: null, submitting: false, error: null })
+          } else if (authoritative.active_block.id === blockId) {
+            // The same episode is still unresolved: genuinely unconfirmed, retry stays available.
+            setMutationState({
+              action: 'resolve-block',
+              submitting: false,
+              error: MUTATION_UNCONFIRMED_ERROR,
+            })
+          } else {
+            // A *different* episode is active now -- the one this user saw was resolved and the
+            // order has since been blocked again. Not an error to retry into.
+            setMutationState({
+              action: 'resolve-block',
+              submitting: false,
+              error: MUTATION_CONFLICT_ERROR,
+            })
+          }
+          if (authoritative.order_id === orderId) {
+            setPanel({ orderId, loading: false, error: null, order: authoritative })
+          }
+          loadQueue(filter)
+        } catch {
+          if (!mountedRef.current || currentLabRef.current !== targetLab) return
+          if (panelGenerationRef.current !== mutationGeneration) return
+          setMutationState({
+            action: 'resolve-block',
+            submitting: false,
+            error: MUTATION_UNCONFIRMED_ERROR,
+          })
+        }
+      }
+    },
+    [activeLab, panel, client, loadPanel, loadQueue, filter],
+  )
+
   if (authStatus === 'loading') {
     return <LoadingSkeleton />
   }
@@ -707,6 +1014,19 @@ export function LabOrdersPage() {
                         <p style={{ margin: '2px 0 0', fontSize: 'var(--font-size-sm)', color: 'var(--color-neutral-600)' }}>
                           {entry.requested_tests.map((t) => t.catalog_display_name_snapshot).join(', ')}
                         </p>
+                        {/*
+                          DHEALTH-LAB-BLOCKED-001 §25: the reason, in text, on the queue row
+                          itself. The badge's colour is never the only channel carrying this --
+                          "Bloqué" is a word and so is the motif, so the state survives a
+                          greyscale screen, a colour-blind reader and a screen reader alike. The
+                          note is deliberately not here: the queue says what is wrong, the detail
+                          panel says the rest.
+                        */}
+                        {entry.active_block ? (
+                          <p style={{ margin: '4px 0 0', fontSize: 'var(--font-size-sm)', fontWeight: 600 }}>
+                            Motif : {formatBlockReason(entry.active_block.reason)}
+                          </p>
+                        ) : null}
                         <p style={{ margin: '4px 0 0', fontSize: 'var(--font-size-xs)', color: 'var(--color-neutral-500)', fontFamily: 'monospace' }}>
                           Référence de l'ordre : <code>{entry.order_id}</code>
                         </p>
@@ -785,6 +1105,80 @@ export function LabOrdersPage() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-3)' }}>
                     <StatusBadge tone={orderStatusTone(panel.order.status)} label={formatOrderStatusLabel(panel.order.status)} />
                   </div>
+
+                  {/*
+                    DHEALTH-LAB-BLOCKED-001 §27. The active block, shown above every action, so a
+                    technician who opens a blocked order reads why before deciding anything. The
+                    server's own `blocked_from_status` is what the resume sentence quotes -- this
+                    component never computes where the order will land, because it does not decide
+                    that.
+                  */}
+                  {panel.order.active_block ? (
+                    <div
+                      role="status"
+                      style={{
+                        border: '1px solid var(--color-danger, #b91c1c)',
+                        borderRadius: 'var(--radius-md, 6px)',
+                        padding: 'var(--space-3)',
+                        marginBottom: 'var(--space-3)',
+                        display: 'grid',
+                        gap: 'var(--space-2)',
+                      }}
+                    >
+                      <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', fontWeight: 600 }}>
+                        Travail bloqué — {formatBlockReason(panel.order.active_block.reason)}
+                      </p>
+                      <p style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                        Bloqué {formatDateTime(panel.order.active_block.blocked_at)} par{' '}
+                        {formatActor(panel.order.active_block.blocked_by_identity_id, user?.identity_id ?? null)}.
+                      </p>
+                      {panel.order.active_block.note ? (
+                        <p style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                          <strong>Note :</strong> {panel.order.active_block.note}
+                        </p>
+                      ) : null}
+                      {confirming === 'resolve-block' ? (
+                        <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+                          <p role="alert" style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                            Résoudre ce blocage ? L'ordre reprendra à l'état «{' '}
+                            {formatOrderStatusLabel(
+                              panel.order.active_block.blocked_from_status as LabOrderStatus,
+                            )}{' '}
+                            » et ce blocage restera dans l'historique.
+                          </p>
+                          <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                            <Button
+                              type="button"
+                              onClick={() => void runResolveBlock(panel.order!.active_block!.id)}
+                              disabled={mutationState.submitting}
+                            >
+                              {mutationState.submitting && mutationState.action === 'resolve-block'
+                                ? 'Enregistrement…'
+                                : 'Confirmer la reprise'}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              onClick={() => setConfirming(null)}
+                              disabled={mutationState.submitting}
+                            >
+                              Annuler
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          <Button
+                            type="button"
+                            onClick={() => setConfirming('resolve-block')}
+                            disabled={mutationState.submitting}
+                          >
+                            Résoudre le blocage
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
 
                   {panel.order.status === 'SELECTED' ? (
                     confirming === 'reject' ? (
@@ -1033,6 +1427,179 @@ export function LabOrdersPage() {
                       Décision enregistrée — <strong>{formatOrderStatusLabel(panel.order.status)}</strong>.
                     </p>
                   )}
+
+                  {/*
+                    DHEALTH-LAB-BLOCKED-001 §26. Offered only in the two states the server accepts
+                    a block from, so the control is never shown where it would be refused. The
+                    server refuses a direct API call regardless -- hiding a control is usability,
+                    never the boundary (`docs/NATIVE-OPERATING-PRODUCT.md`: "the browser is never
+                    the boundary").
+
+                    Deliberately rendered *after* the workflow actions above rather than beside
+                    them: at a bench the ordinary action is to continue, and blocking is the
+                    exception being reached for. It must be findable, not the first thing a tired
+                    hand lands on.
+                  */}
+                  {panel.order.status === 'ACCEPTED' || panel.order.status === 'IN_PROGRESS' ? (
+                    <div
+                      style={{
+                        marginTop: 'var(--space-4)',
+                        paddingTop: 'var(--space-3)',
+                        borderTop: '1px solid var(--color-neutral-200)',
+                      }}
+                    >
+                      {confirming === 'block' ? (
+                        <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+                          <p style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                            Indiquez pourquoi le travail ne peut pas continuer. L'ordre reste
+                            valable et reprendra après résolution.
+                          </p>
+                          <label
+                            htmlFor="block-reason"
+                            style={{ fontSize: 'var(--font-size-sm)', fontWeight: 600 }}
+                          >
+                            Motif
+                          </label>
+                          <select
+                            id="block-reason"
+                            value={blockDraft.reason}
+                            onChange={(event) =>
+                              setBlockDraft((prev) => ({
+                                ...prev,
+                                reason: event.target.value as LabOrderBlockReason,
+                              }))
+                            }
+                            disabled={mutationState.submitting}
+                            style={{ padding: 'var(--space-2)', fontSize: 'var(--font-size-sm)' }}
+                          >
+                            {BLOCK_REASONS.map((reason) => (
+                              <option key={reason} value={reason}>
+                                {formatBlockReason(reason)}
+                              </option>
+                            ))}
+                          </select>
+                          <label
+                            htmlFor="block-note"
+                            style={{ fontSize: 'var(--font-size-sm)', fontWeight: 600 }}
+                          >
+                            Note (facultative)
+                          </label>
+                          <textarea
+                            id="block-note"
+                            value={blockDraft.note}
+                            onChange={(event) =>
+                              setBlockDraft((prev) => ({ ...prev, note: event.target.value }))
+                            }
+                            // Matches `LabOrderBlock.note`'s own String(1024) exactly, so an
+                            // over-long note is refused here rather than by PostgreSQL.
+                            maxLength={1024}
+                            rows={3}
+                            disabled={mutationState.submitting}
+                            style={{ padding: 'var(--space-2)', fontSize: 'var(--font-size-sm)' }}
+                          />
+                          <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                            <Button
+                              type="button"
+                              onClick={() => void runBlock()}
+                              disabled={mutationState.submitting}
+                            >
+                              {mutationState.submitting && mutationState.action === 'block'
+                                ? 'Enregistrement…'
+                                : 'Confirmer le blocage'}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              onClick={() => setConfirming(null)}
+                              disabled={mutationState.submitting}
+                            >
+                              Annuler
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={() => setConfirming('block')}
+                          disabled={mutationState.submitting}
+                        >
+                          Bloquer l'ordre
+                        </Button>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {/*
+                    §28: a small "Blocages" section, not an event-sourcing timeline. It answers
+                    four questions and stops: was this blocked before, why, by whom, and when was
+                    it resolved. Resolved episodes stay -- that is the whole reason this is a
+                    table of episodes rather than a column on the order.
+                  */}
+                  {blockHistory?.orderId === panel.order.order_id &&
+                  blockHistory.blocks !== null &&
+                  blockHistory.blocks.length > 0 ? (
+                    <div style={{ marginTop: 'var(--space-4)' }}>
+                      <h2
+                        style={{
+                          margin: '0 0 var(--space-2)',
+                          fontSize: 'var(--font-size-md)',
+                          color: 'var(--color-neutral-900)',
+                        }}
+                      >
+                        Blocages
+                      </h2>
+                      <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 'var(--space-2)' }}>
+                        {blockHistory.blocks.map((block) => (
+                          <li
+                            key={block.id}
+                            style={{
+                              border: '1px solid var(--color-neutral-200)',
+                              borderRadius: 'var(--radius-md, 6px)',
+                              padding: 'var(--space-2)',
+                              fontSize: 'var(--font-size-sm)',
+                            }}
+                          >
+                            <p style={{ margin: 0, fontWeight: 600 }}>
+                              {formatBlockReason(block.reason)}
+                              {block.resolved_at === null ? ' — en cours' : ' — résolu'}
+                            </p>
+                            <p style={{ margin: 0, color: 'var(--color-neutral-600)' }}>
+                              Bloqué {formatDateTime(block.blocked_at)} par{' '}
+                              {formatActor(block.blocked_by_identity_id, user?.identity_id ?? null)}
+                            </p>
+                            {block.resolved_at !== null && block.resolved_by_identity_id !== null ? (
+                              <p style={{ margin: 0, color: 'var(--color-neutral-600)' }}>
+                                Résolu {formatDateTime(block.resolved_at)} par{' '}
+                                {formatActor(block.resolved_by_identity_id, user?.identity_id ?? null)}
+                              </p>
+                            ) : null}
+                            {block.note ? (
+                              <p style={{ margin: 0 }}>
+                                <strong>Note :</strong> {block.note}
+                              </p>
+                            ) : null}
+                            {block.resolution_note ? (
+                              <p style={{ margin: 0 }}>
+                                <strong>Note de résolution :</strong> {block.resolution_note}
+                              </p>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : blockHistory?.orderId === panel.order.order_id && blockHistory.error ? (
+                    <p
+                      role="alert"
+                      style={{
+                        marginTop: 'var(--space-3)',
+                        fontSize: 'var(--font-size-sm)',
+                        color: 'var(--color-danger, #b91c1c)',
+                      }}
+                    >
+                      {blockHistory.error}
+                    </p>
+                  ) : null}
                 </div>
               </Card>
             ) : null}

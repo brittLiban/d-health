@@ -39,6 +39,7 @@ from daher_adapter.exchange.models import (
     DoctorReview,
     DoctorReviewStatus,
     LabOrder,
+    LabOrderBlock,
     LabOrderItem,
     LabOrderStatus,
     LabResultRelease,
@@ -61,8 +62,22 @@ _ALLOWED_TRANSITIONS: dict[LabOrderStatus, frozenset[LabOrderStatus]] = {
     LabOrderStatus.SELECTED: frozenset(
         {LabOrderStatus.ACCEPTED, LabOrderStatus.REJECTED, LabOrderStatus.CANCELLED}
     ),
-    LabOrderStatus.ACCEPTED: frozenset({LabOrderStatus.IN_PROGRESS, LabOrderStatus.CANCELLED}),
-    LabOrderStatus.IN_PROGRESS: frozenset({LabOrderStatus.COMPLETED, LabOrderStatus.CANCELLED}),
+    LabOrderStatus.ACCEPTED: frozenset(
+        {LabOrderStatus.IN_PROGRESS, LabOrderStatus.CANCELLED, LabOrderStatus.BLOCKED}
+    ),
+    LabOrderStatus.IN_PROGRESS: frozenset(
+        {LabOrderStatus.COMPLETED, LabOrderStatus.CANCELLED, LabOrderStatus.BLOCKED}
+    ),
+    # DHEALTH-LAB-BLOCKED-001. `BLOCKED` is the first *non-terminal* interruption this machine has
+    # ever had, so it is the first status with outgoing edges that go backwards. The two resume
+    # edges are exactly the two states it can be entered from; which of them a given order may
+    # take is not a free choice but a fact recorded on its own block episode (see `transition`'s
+    # own guard below). `CANCELLED` is here because a blocked order remains an ordinary order that
+    # a facility may abandon -- cancelling it is not "resolving" it, and the unresolved episode
+    # stays attached as the truthful reason it never finished.
+    LabOrderStatus.BLOCKED: frozenset(
+        {LabOrderStatus.ACCEPTED, LabOrderStatus.IN_PROGRESS, LabOrderStatus.CANCELLED}
+    ),
     LabOrderStatus.COMPLETED: frozenset(),
     LabOrderStatus.REJECTED: frozenset(),
     LabOrderStatus.CANCELLED: frozenset(),
@@ -453,7 +468,23 @@ class LabOrderRepository:
         now requires an existing ``LabResultRelease`` row too, for the identical reason -- the
         dedicated release action (``exchange/results.py``'s ``LabResultReleaseRepository.release``)
         is the sole supported production way to reach ``COMPLETED``, but this generic primitive
-        must not become an unguarded bypass of that same invariant."""
+        must not become an unguarded bypass of that same invariant.
+
+        DHEALTH-LAB-BLOCKED-001 adds the same shape of guard twice more, for the same reason:
+
+        * **Into** ``BLOCKED`` is refused outright here. A ``BLOCKED`` order whose block episode
+          does not exist is the one state this feature must never produce -- it would be a status
+          that cannot say why, who, when, or what to resume to, which is precisely the silent
+          state `docs/NATIVE-OPERATING-PRODUCT.md` §16 names as the failure being fixed. The
+          status and its episode are created in one transaction by
+          ``exchange/lab_workflow.py``'s ``block``, or not at all.
+        * **Out of** ``BLOCKED``, the destination is not the caller's to pick. It must equal the
+          ``blocked_from_status`` the server recorded on the episode, and no unresolved episode
+          may remain. Without this, the generic primitive is a client-controlled resume: an order
+          blocked from ``ACCEPTED`` could be resumed straight to ``IN_PROGRESS``, skipping the
+          collection milestone DH-EX-011 requires and asserting processing that never started.
+          ``CANCELLED`` is the deliberate exception -- abandoning a blocked order is not resuming
+          it, so it needs no resolved episode and restores nothing."""
         with self._sessions.begin() as session:
             order = session.scalar(
                 select(LabOrder).where(LabOrder.id == order_id).with_for_update()
@@ -466,6 +497,38 @@ class LabOrderRepository:
                 raise InvalidOrderTransition(
                     f"cannot move LabOrder {order_id} from {current.value!r} to {to_status.value!r}"
                 )
+            if to_status == LabOrderStatus.BLOCKED:
+                raise InvalidOrderTransition(
+                    f"cannot move LabOrder {order_id} to 'BLOCKED' through the generic status "
+                    f"machine -- a block must be recorded as an episode (reason, actor, instant, "
+                    f"resume state) in the same transaction, which only "
+                    f"LabWorkflowRepository.block does (DHEALTH-LAB-BLOCKED-001)"
+                )
+            if current == LabOrderStatus.BLOCKED and to_status != LabOrderStatus.CANCELLED:
+                active = session.scalar(
+                    select(LabOrderBlock.id).where(
+                        LabOrderBlock.lab_order_id == order_id,
+                        LabOrderBlock.resolved_at.is_(None),
+                    )
+                )
+                if active is not None:
+                    raise InvalidOrderTransition(
+                        f"cannot move LabOrder {order_id} out of 'BLOCKED' -- an unresolved block "
+                        f"episode is still active (DHEALTH-LAB-BLOCKED-001)"
+                    )
+                resume_from = session.scalar(
+                    select(LabOrderBlock.blocked_from_status)
+                    .where(LabOrderBlock.lab_order_id == order_id)
+                    .order_by(LabOrderBlock.blocked_at.desc(), LabOrderBlock.id.desc())
+                    .limit(1)
+                )
+                if resume_from is None or resume_from != to_status.value:
+                    raise InvalidOrderTransition(
+                        f"cannot move LabOrder {order_id} from 'BLOCKED' to "
+                        f"{to_status.value!r} -- the server-recorded resume state for its most "
+                        f"recent block episode is {resume_from!r} "
+                        f"(DHEALTH-LAB-BLOCKED-001)"
+                    )
             if to_status == LabOrderStatus.IN_PROGRESS:
                 has_collection = (
                     session.scalar(

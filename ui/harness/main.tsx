@@ -955,6 +955,7 @@ const CLINIC_ORDERS: LabOrder[] = [
       lab_organization_name: 'Laboratoire Central',
       selected_at: '2026-09-23T07:20:00Z',
     },
+    block: null,
   },
   {
     id: 'order-in-progress',
@@ -977,6 +978,7 @@ const CLINIC_ORDERS: LabOrder[] = [
       lab_organization_name: 'Laboratoire Central',
       selected_at: '2026-09-23T08:45:00Z',
     },
+    block: null,
   },
   {
     id: 'order-awaiting',
@@ -995,6 +997,7 @@ const CLINIC_ORDERS: LabOrder[] = [
     items: [WORKFLOW_ITEMS[1]],
     visit_id: null,
     lab_assignment: null,
+    block: null,
   },
 ]
 
@@ -1123,6 +1126,7 @@ const LAB_WORKFLOW_ORDERS: LabWorkflowOrder[] = [
       },
     ],
     collection_recorded_at: null,
+    active_block: null,
   },
   {
     order_id: 'order-entry',
@@ -1141,6 +1145,7 @@ const LAB_WORKFLOW_ORDERS: LabWorkflowOrder[] = [
       },
     ],
     collection_recorded_at: '2026-09-23T09:15:00Z',
+    active_block: null,
   },
 ]
 

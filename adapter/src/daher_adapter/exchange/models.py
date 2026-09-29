@@ -71,7 +71,10 @@ __all__ = [
     "LabDirectoryProfile",
     "LabOffering",
     "LabObservation",
+    "BLOCKABLE_ORDER_STATUSES",
     "LabOrder",
+    "LabOrderBlock",
+    "LabOrderBlockReason",
     "LabOrderIntent",
     "LabOrderIntentItem",
     "LabOrderItem",
@@ -143,6 +146,66 @@ class LabOrderStatus(StrEnum):
     COMPLETED = "COMPLETED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
+    #: DHEALTH-LAB-BLOCKED-001 (`docs/NATIVE-OPERATING-PRODUCT.md` §16's P0-4): laboratory work
+    #: this lab genuinely took and cannot currently continue. **Not** a cancellation, not a
+    #: rejection, not a payment state, not a result-release state -- the order still exists and is
+    #: expected to resume. Reachable only from ``ACCEPTED``/``IN_PROGRESS``, and only together
+    #: with a ``LabOrderBlock`` episode created in the same transaction, which is what carries the
+    #: reason, the actor, the instant, and the server-owned state to resume to.
+    #:
+    #: This enum's own opening paragraph stays true here: no physical-world event is inferred.
+    #: ``BLOCKED`` records that a laboratory worker *said* work cannot continue and why -- never
+    #: that a specimen is clinically inadequate, which is not DHealth's judgement to make.
+    BLOCKED = "BLOCKED"
+
+
+class LabOrderBlockReason(StrEnum):
+    """DHEALTH-LAB-BLOCKED-001: why laboratory work cannot currently continue.
+
+    **Operational, never clinical.** `docs/NATIVE-OPERATING-PRODUCT.md` §16 classifies this list
+    that way explicitly, and that distinction is what keeps it inside `AGENTS.md`'s boundary: a
+    reason states what stops the laboratory working, never what is wrong with the patient.
+    ``SPECIMEN_UNUSABLE`` is a statement about a tube -- not a haemolysis finding, not a
+    diagnosis -- and nothing in this codebase reads one back as a clinical fact.
+
+    **These four are the ones this repository's own specification already names** -- §16's
+    *"sample unusable, insufficient quantity, patient did not attend, clarification needed"* --
+    and no fifth was invented to round the list out. `AGENTS.md`'s "any gap that obviously should
+    be filled a particular way" rule applies at full force here: the ticket that produced this
+    enum proposed a longer candidate list (a technical/analyser reason, a free ``OTHER``), and
+    each of those was left out rather than added on an agent's authority.
+
+    **The list is provisional, and §16 says so:** it *"must be confirmed with a laboratory
+    participant before it is fixed."* That confirmation has not happened; it is recorded as an
+    open `HUMAN DECISION REQUIRED` item in `PROJECT_STATE.md`, and it specifically includes
+    whether a technical/equipment reason belongs here. A real laboratory's analyser going down has
+    no home among these four today. Such a case currently lands in the optional free-text note --
+    honestly unstructured rather than filed under a category nobody approved.
+    """
+
+    #: The specimen cannot be used. §16's "sample unusable".
+    SPECIMEN_UNUSABLE = "SPECIMEN_UNUSABLE"
+    #: There is not enough specimen to perform the requested work. §16's "insufficient quantity".
+    SPECIMEN_INSUFFICIENT = "SPECIMEN_INSUFFICIENT"
+    #: The patient did not present. §16's "patient did not attend".
+    PATIENT_DID_NOT_ATTEND = "PATIENT_DID_NOT_ATTEND"
+    #: Something about the order must be clarified before work continues. §16's "clarification
+    #: needed". Deliberately not "information missing": the laboratory is asking a question, not
+    #: asserting that some required field is absent.
+    CLARIFICATION_REQUIRED = "CLARIFICATION_REQUIRED"
+
+
+#: DHEALTH-LAB-BLOCKED-001: the only order states from which laboratory work may be blocked, and
+#: therefore also the only states a resolution may resume to. Derived from §16's own diagram
+#: (`ACCEPTED / IN_PROGRESS -> BLOCKED -> back to the prior state`), not invented here.
+#:
+#: Everything else is excluded deliberately: `AWAITING_LAB_SELECTION`/`SELECTED` is work no
+#: laboratory has taken yet (a lab that will not do the work rejects it -- that path already
+#: exists); `COMPLETED` is a released clinical fact and blocking it would become an undo of
+#: release, which the amendment domain owns instead; `REJECTED`/`CANCELLED` are terminal.
+BLOCKABLE_ORDER_STATUSES: frozenset[str] = frozenset(
+    {LabOrderStatus.ACCEPTED.value, LabOrderStatus.IN_PROGRESS.value}
+)
 
 
 class ResultDeliveryStatus(StrEnum):
@@ -628,8 +691,11 @@ class LabOrder(Base):
     __tablename__ = "exchange_lab_orders"
     __table_args__ = (
         CheckConstraint(
+            # DHEALTH-LAB-BLOCKED-001 appends 'BLOCKED'. Purely additive -- no existing value is
+            # removed, renamed or retyped, so every row already in this table still satisfies it
+            # and no backfill exists or is needed.
             "status IN ('AWAITING_LAB_SELECTION', 'SELECTED', 'ACCEPTED', 'IN_PROGRESS', "
-            "'COMPLETED', 'REJECTED', 'CANCELLED')",
+            "'COMPLETED', 'REJECTED', 'CANCELLED', 'BLOCKED')",
             name="ck_exchange_lab_orders_status",
         ),
         UniqueConstraint(
@@ -816,6 +882,18 @@ class LabSelection(Base):
     __tablename__ = "exchange_lab_selections"
     __table_args__ = (
         Index("ix_exchange_lab_selections_lab_organization_id", "lab_organization_id"),
+        # DHEALTH-LAB-BLOCKED-001: exists solely so `LabOrderBlock` can carry a *composite*
+        # foreign key at `(lab_order_id, lab_organization_id)` and have the database refuse a
+        # block row naming any laboratory other than the one this order is actually assigned to.
+        # Structurally redundant on its own -- `lab_order_id` is already unique below, so the pair
+        # trivially is too -- and that is exactly why adding it is safe: it can never reject a row
+        # the existing constraint would have accepted. Same shape, and the same reasoning, as
+        # DHEALTH-BILLING-001's `uq_exchange_invoices_id_org` behind `exchange_payments`.
+        UniqueConstraint(
+            "lab_order_id",
+            "lab_organization_id",
+            name="uq_exchange_lab_selections_order_lab",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -879,6 +957,145 @@ class LabSampleCollection(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+
+
+class LabOrderBlock(Base):
+    """DHEALTH-LAB-BLOCKED-001: one *episode* of "this laboratory cannot currently continue this
+    order", from the moment a worker said so to the moment somebody resolved it.
+
+    An episode, deliberately, and not a pair of columns on ``LabOrder``. `docs/
+    NATIVE-OPERATING-PRODUCT.md` §16's worked example is an order blocked for an unusable
+    specimen, resolved, worked further, and blocked again for a second, unrelated reason. A
+    ``LabOrder.block_reason`` column answers "why is it blocked *now*" and silently destroys the
+    first answer the moment the second is written. The operational question a laboratory actually
+    asks -- *has this order been trouble before?* -- is only answerable if every episode survives,
+    so every episode is its own row and none is ever updated after it is resolved.
+
+    **What is server-derived and what a caller may supply.** A caller supplies exactly two things:
+    the ``reason`` (from the closed catalog) and an optional ``note``. Everything else here --
+    ``lab_organization_id``, ``blocked_at``, ``blocked_by_identity_id``, ``blocked_from_status``,
+    and every ``resolved_*`` field -- is derived from the authenticated principal, the server
+    clock, and the order's own locked state. In particular ``blocked_from_status`` is **not** a
+    resume destination a client may choose: it is a copy of what the order's status genuinely was
+    at the instant it was blocked, and it is the only thing a resolution is ever allowed to
+    restore. A client that could name its own resume state could move an order from
+    ``ACCEPTED`` to ``IN_PROGRESS`` without a collection milestone, fabricating workflow that
+    never happened.
+
+    **At most one unresolved episode per order** --
+    ``uq_exchange_lab_order_blocks_one_active_per_order``, a partial unique index over
+    ``lab_order_id WHERE resolved_at IS NULL``. The service layer locks the ``LabOrder`` row
+    ``FOR UPDATE`` first, exactly as every other lab-workflow mutation in this package does, and
+    that lock is what actually serializes two simultaneous block attempts; the index is the second
+    layer behind it, not the first -- `exchange_invoice_number_sequences`' own established
+    reasoning, applied here.
+
+    **Resolution never rewrites history.** ``resolve`` sets ``resolved_at``/
+    ``resolved_by_identity_id`` and optionally ``resolution_note``, and touches nothing else. The
+    reason, the note, the actor, the instant and the state it was blocked from all stay exactly as
+    recorded. There is no delete path, no ``unblock`` that removes the row, and no ``CANCELLED``
+    or ``DISCARDED`` episode status -- a block that turned out to be a mistake is resolved with a
+    note saying so, not erased.
+
+    **No specimen is modelled here.** ``SPECIMEN_UNUSABLE`` names why the laboratory stopped; it
+    does not identify a tube, create an accession, record a container, or link a recollection to
+    its predecessor. ``LabSampleCollection``'s own docstring draws that boundary for the
+    collection milestone and this row inherits it unchanged -- a first-class specimen entity is
+    **D-3**, still open, and blocking an order is explicitly not a partial down-payment on it.
+    """
+
+    __tablename__ = "exchange_lab_order_blocks"
+    __table_args__ = (
+        CheckConstraint(
+            "reason IN ('SPECIMEN_UNUSABLE', 'SPECIMEN_INSUFFICIENT', "
+            "'PATIENT_DID_NOT_ATTEND', 'CLARIFICATION_REQUIRED')",
+            name="ck_exchange_lab_order_blocks_reason",
+        ),
+        CheckConstraint(
+            # The same two states `BLOCKABLE_ORDER_STATUSES` names, spelled out because a CHECK
+            # cannot read a Python frozenset. A block episode recording that it interrupted, say,
+            # a COMPLETED order would be a lie the database can refuse outright.
+            "blocked_from_status IN ('ACCEPTED', 'IN_PROGRESS')",
+            name="ck_exchange_lab_order_blocks_blocked_from_status",
+        ),
+        CheckConstraint(
+            # A resolution has an actor or it has not happened. Neither half is meaningful alone:
+            # a `resolved_at` with nobody attached is an event without an owner, and a resolver
+            # with no instant is an owner of nothing.
+            "(resolved_at IS NULL AND resolved_by_identity_id IS NULL) "
+            "OR (resolved_at IS NOT NULL AND resolved_by_identity_id IS NOT NULL)",
+            name="ck_exchange_lab_order_blocks_resolution_consistency",
+        ),
+        CheckConstraint(
+            "resolved_at IS NULL OR resolved_at >= blocked_at",
+            name="ck_exchange_lab_order_blocks_resolved_after_blocked",
+        ),
+        CheckConstraint(
+            # A resolution note on an unresolved episode would be a note about something that has
+            # not happened yet.
+            "resolution_note IS NULL OR resolved_at IS NOT NULL",
+            # Deliberately not spelled "..._resolution_note_requires_resolution": that name is 64
+            # characters and PostgreSQL's identifier limit is 63. SQLAlchemy's PostgreSQL dialect
+            # refuses an over-long *explicit* constraint name outright, so migration 0037 would
+            # fail on the first real `alembic upgrade` while the SQLite unit suite -- which has no
+            # identifier limit -- stayed green. Exactly the class of failure
+            # `tests/test_migration_hygiene.py` exists because of, one layer down.
+            name="ck_exchange_lab_order_blocks_note_requires_resolution",
+        ),
+        # The tenant boundary, in the database rather than only in the service layer: the pair
+        # must name a real `LabSelection`, so a block row can only ever attribute itself to the
+        # laboratory this order is genuinely assigned to. A composite FK, not two independent
+        # ones -- two separate FKs would each be satisfiable while the *combination* is a lie.
+        ForeignKeyConstraint(
+            ["lab_order_id", "lab_organization_id"],
+            ["exchange_lab_selections.lab_order_id", "exchange_lab_selections.lab_organization_id"],
+            name="fk_exchange_lab_order_blocks_selection",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_exchange_lab_order_blocks_lab_order_id", "lab_order_id"),
+        Index("ix_exchange_lab_order_blocks_lab_organization_id", "lab_organization_id"),
+        Index(
+            "uq_exchange_lab_order_blocks_one_active_per_order",
+            "lab_order_id",
+            unique=True,
+            postgresql_where=text("resolved_at IS NULL"),
+            sqlite_where=text("resolved_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # Plain FK *as well as* the composite one above: the composite constraint targets
+    # `exchange_lab_selections`, so without this the block would have no direct referential link
+    # to the order itself, and `exchange_lab_orders` could be deleted out from under it.
+    lab_order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False
+    )
+    lab_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: Optional operational context in the worker's own words. Never required, never parsed, never
+    #: interpreted, and never copied into an audit row, a log line or an exception message -- the
+    #: identical discipline `VisitNote.body` is held to (`AGENTS.md`, 2026-09-27). `String(1024)`
+    #: is matched exactly by the API schema's own `max_length`, because a value longer than the
+    #: column raises `DataError` on real PostgreSQL and reaches the caller as a raw 500 while
+    #: SQLite, which does not enforce `VARCHAR` length, shows nothing at all (DH-EX-007A's lesson).
+    note: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    #: The order's real status at the instant it was blocked, and therefore the one and only state
+    #: a resolution may restore. Never client-supplied -- see this class's own docstring.
+    blocked_from_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    blocked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    blocked_by_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=True
+    )
+    #: Optional, and held to exactly the same rules as `note` above.
+    resolution_note: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
 
 class LabResult(Base):
@@ -1908,6 +2125,14 @@ class ExchangeSecurityAuditEvent(Base):
             # no read event (D-8).
             "'clinic_service_created', 'clinic_service_price_changed', 'invoice_created', "
             "'payment_recorded', "
+            # DHEALTH-LAB-BLOCKED-001: the two laboratory workflow mutations. Both reuse
+            # `resource_type='lab_order'` with the *order* id, matching every lab event above --
+            # audit stays order-centric, never per-episode. The reason key is deliberately **not**
+            # copied here: DHEALTH-BILLING-001's own line below records no amount for exactly this
+            # reason, and the authoritative value lives on the `exchange_lab_order_blocks` row,
+            # where a second copy cannot diverge from it. The free-text note is not here either,
+            # and never will be -- see `LabOrderBlock.note`.
+            "'lab_order_blocked', 'lab_order_block_resolved', "
             # DHEALTH-ACCESS-CAPABILITIES-001/ADR-067: member-specific capability overrides.
             #
             # Three types rather than one with a payload field, because the *effect* is the part a

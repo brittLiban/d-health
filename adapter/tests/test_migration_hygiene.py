@@ -111,3 +111,84 @@ def test_the_length_check_would_have_failed_on_the_original_0028_name() -> None:
     shipped = _revision_assignments(_VERSIONS / "0028_connect_evidence.py")
     assert shipped["revision"] == "0028_connect_evidence"
     assert len(shipped["revision"] or "") <= ALEMBIC_VERSION_NUM_LENGTH
+
+
+# ── DHEALTH-LAB-BLOCKED-001: the same lesson, one identifier layer down ──────────────────────
+#
+# The revision-id check above catches a name too long for `alembic_version.version_num`. It does
+# not catch a *constraint* or *index* name too long for PostgreSQL itself, which is a distinct
+# failure with an identical signature: SQLite enforces no identifier limit, so the whole unit
+# suite stays green while the first real `alembic upgrade` fails outright.
+#
+# This was not hypothetical. `ck_exchange_lab_order_blocks_resolution_note_requires_resolution`
+# was written, is 64 characters, and would have failed on the first PostgreSQL run.
+
+#: PostgreSQL's `NAMEDATALEN - 1`. Not a value this repository chose, and not one it may raise.
+POSTGRES_IDENTIFIER_LENGTH = 63
+
+
+def _explicit_identifier_names(path: Path) -> list[tuple[str, str]]:
+    """Every explicitly-written constraint/index name in a migration, as ``(kind, name)``.
+
+    Parsed rather than imported, for the same reason ``_revision_assignments`` is: importing a
+    migration pulls in the whole model layer for a check that only needs string literals.
+
+    Reads `name=` keyword arguments and the leading positional name that `op.create_index`,
+    `op.create_check_constraint` and `op.create_unique_constraint` take. Auto-generated names
+    (SQLAlchemy naming conventions) are deliberately out of scope -- this checks what a human
+    typed, which is what a human can get wrong.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: list[tuple[str, str]] = []
+    positional_first_name = {
+        "create_index",
+        "create_check_constraint",
+        "create_unique_constraint",
+        "create_foreign_key",
+        "create_primary_key",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        attribute = func.attr if isinstance(func, ast.Attribute) else None
+        if attribute in positional_first_name and node.args:
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                found.append((attribute, first.value))
+        for keyword in node.keywords:
+            if keyword.arg != "name":
+                continue
+            if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                label = attribute or "constraint"
+                found.append((label, keyword.value.value))
+    return found
+
+
+@pytest.mark.parametrize("path", _migration_files(), ids=lambda p: p.name)
+def test_explicit_identifier_names_fit_postgres(path: Path) -> None:
+    for kind, name in _explicit_identifier_names(path):
+        assert len(name) <= POSTGRES_IDENTIFIER_LENGTH, (
+            f"{path.name}: {kind} name {name!r} is {len(name)} characters; PostgreSQL's limit is "
+            f"{POSTGRES_IDENTIFIER_LENGTH}. SQLAlchemy's PostgreSQL dialect refuses an over-long "
+            "explicit identifier, so this migration fails on the first real upgrade -- SQLite, "
+            "which has no identifier limit, cannot see it."
+        )
+
+
+def test_the_identifier_check_would_have_failed_on_the_name_that_was_written_first() -> None:
+    """The over-long name DHEALTH-LAB-BLOCKED-001 actually wrote, pinned as a fixture.
+
+    Without this, the assertion above is only as good as the assumption that some real name was
+    ever close to the limit -- and a future edit that measured the wrong string would still pass
+    on every file in the tree. Same reasoning as the 0028 fixture above.
+    """
+    original = "ck_exchange_lab_order_blocks_resolution_note_requires_resolution"
+    assert len(original) == 64
+    assert len(original) > POSTGRES_IDENTIFIER_LENGTH
+
+    names = {
+        name for _kind, name in _explicit_identifier_names(_VERSIONS / "0037_lab_order_blocks.py")
+    }
+    assert "ck_exchange_lab_order_blocks_note_requires_resolution" in names
+    assert original not in names

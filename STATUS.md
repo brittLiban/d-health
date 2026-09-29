@@ -6,6 +6,73 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-29, DHEALTH-LAB-BLOCKED-001, directly on `master`.** From `eecf4a0`. **A laboratory can
+say "we cannot continue this order", and the software stops claiming otherwise.** Until today a
+haemolysed tube left an order sitting in `ACCEPTED` — a queue state that claims work is progressing
+when it is not, that nobody is told about and nobody owns. `BLOCKED` is now a real order state,
+carrying a structured reason, the worker who set it, the instant, and the state it will resume to.
+**ADR-068.** Alembic head is now **`0037_lab_order_blocks`**.
+
+**A block is an episode, not a column.** An order may be blocked, resolved, worked further and
+blocked again for an unrelated reason — §16's own worked example. A `block_reason` column answers
+"why is it blocked *now*" and destroys the previous answer; the question a laboratory actually asks
+is *has this order been trouble before?*, and only durable episodes can answer it. Nothing rewrites
+an episode after resolution and no delete path exists. At most one may be unresolved at a time.
+
+**`BLOCKED` is a status rather than a flag beside one, and that is the whole safety argument.**
+Accept, a new collection milestone, start-processing, result entry, entry completion and release
+were *already* each gated on a specific status by code predating this ticket — so every one of them
+refuses a blocked order through a check that already existed and was already tested. A boolean
+column would have needed the same refusal re-added in six places and forgotten in one, and the
+place it gets forgotten is how a result gets released from work a laboratory declared unable to
+continue.
+
+**The server owns where a resolved order goes.** `blocked_from_status` is copied off the locked row
+when the block is created and is the only state a resolution restores. It is not a request field.
+The negative control that made it one produced `IN_PROGRESS` with `collection_recorded_at: null` —
+processing asserted for an order that had never been collected.
+
+**Four reasons, and the list is deliberately PROVISIONAL.** They are exactly the four
+`docs/NATIVE-OPERATING-PRODUCT.md` §16 already names. §16 also requires the list to be confirmed
+with a laboratory participant before it is fixed, and **that has not happened** — recorded as
+**D-11** and as an open `Human Decision Required` item. The concrete gap, named rather than filled:
+**there is no equipment/analyser reason**, so a laboratory whose analyser is down must use the free
+-text note. The ticket proposed adding one; it was not added on an agent's authority.
+
+**Who is told what.** The ordering clinician sees the status and the reason key — §27 makes them
+the next owner, so silence would recreate the very problem being fixed. They do **not** see the
+laboratory's free-text note, the technician's identity, the timestamps or the history; §26's
+minimum-necessary rule applies across an organization boundary. The patient sees neither — only
+*"Votre analyse est en attente au laboratoire. Contactez votre clinique."* Mapping `BLOCKED` onto
+"Analyse en cours" for the patient was considered and rejected: that is the same lie, on a smaller
+screen.
+
+**No new capability.** `lab.queue.work` covers block and resolve, because blocking is ordinary queue
+work done by the same person who accepts and collects. `lab.result.release` remains independently
+assignable and is not implied in either direction.
+
+**Two defects found that no test could have caught.** A 64-character constraint name against
+PostgreSQL's 63-character limit — invisible to SQLite, fatal on the first real `alembic upgrade`,
+and now guarded permanently in `test_migration_hygiene.py`. And a Pydantic forward reference that
+Python 3.14's deferred annotations resolved lazily but the shipped `python:3.13` image would not
+have, caught by `ruff` alone.
+
+**Evidence.** 34 adapter tests · 13 real-PostgreSQL tests (×3 runs) · migration `0037` up→down→up on
+real PostgreSQL, with the downgrade **correctly refusing** while blocked orders existed, before
+dropping any history · 19 new UI tests · **13 browser phases** against real Chromium, Caddy,
+Keycloak 26.7.1 and PostgreSQL 16, including a block that survives a full browser reload and a
+second episode that does not overwrite the first · all six sibling browser suites re-run green ·
+**eight negative controls executed and reverted byte for byte.**
+
+**Human usability is not claimed.** No laboratory worker has used this screen. Nothing was timed.
+**No specimen entity was built** — **D-3** is exactly as open as it was, and `SPECIMEN_UNUSABLE`
+says the laboratory stopped, not what happens to the tube. Still not production-deployed or
+clinically live; all data synthetic, no real patient data used.
+
+<!-- The previous as-of block follows, preserved as history rather than deleted. -->
+
+### Previous as-of — 2026-09-28, DHEALTH-ACCESS-CAPABILITIES-001
+
 **2026-09-28, DHEALTH-ACCESS-CAPABILITIES-001, directly on `master`.** From `790c736`. **DHealth no
 longer needs to know someone's job title to decide whether they may perform a facility operation.**
 The backend asks for an explicit capability; roles are reusable templates for those capabilities; a
