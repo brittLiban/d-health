@@ -22357,6 +22357,21 @@ technician may block, resolve and process for ever and still not publish a resul
    instead — is that the episode must record the state it genuinely interrupted, because an episode
    claiming `ACCEPTED` on an order that had already started would rewind it past a real transition
    on resolution.
+5. **A pre-existing failure found and proved, in another ticket's surface.**
+   `tests/integration/test_demo_seed_postgres.py::test_pgd2_pgd3_...` asserts every
+   `_WORKFLOW_TABLES` entry is empty after a reset, but `exchange_lab_prices` — the **first** entry
+   — is deliberately re-seeded by `run_reset` straight after the truncate, which `demo_seed.py`'s
+   own comment documents as intended. The loop stops there. **Verified at `eecf4a0` by checking the
+   file out at HEAD and re-running: identical failure, identical table** — not introduced here. It
+   is invisible to CI because that whole directory skips without `DHDEMO001_PG_*` set. Left for its
+   owning ticket, because fixing it means deciding whether `exchange_lab_prices` belongs in that
+   tuple or whether the loop should skip re-seeded tables — a question about another ticket's
+   design. **Consequence for this ticket:** the loop never reaches `exchange_lab_order_blocks`, so
+   that this ticket's own table is cleared was proved *directly* instead — two real episodes
+   created by the browser journey, `scripts/demo/reset.sh` run, `exchange_lab_order_blocks` 2 → 0
+   with the baseline (2 organizations, 1 patient) intact. A block episode was also added to
+   `_create_full_workflow_object` so the assertion stops being vacuous once the prices question is
+   settled (`da5a982`).
 
 ### Billing — one line, and it preserves semantics rather than changing them
 
@@ -22380,6 +22395,23 @@ and no payment-shaped reason exists in the catalog (LAB-BLOCK-13b, a structural 
   again. `0037` was also applied in place to the live demo database, which had pre-existing orders;
   all were preserved.
 - **15 new UI tests** on the laboratory page plus 4 on the patient screen; 110 lab UI tests total.
+- **Full UI suite: all 61 test files observed running, 0 real failures.** Run in batches of three
+  with a tracker that records *which files vitest actually executed*, because this repository's
+  vitest nondeterministically drops whole files from a run and still exits 0 — two earlier
+  whole-suite batch runs each reported a different set of "missing" files with zero failures, which
+  is precisely the shape that makes a green count untrustworthy. Files were re-batched until every
+  one had been observed; pass 2 closed the remaining set.
+  **One red, and it is not a defect:** `ExchangeAuthProvider.test.tsx > retry() re-runs
+  initialization from scratch` — the catalogued load-sensitive flake, whose documented trigger is
+  running UI batches under load, which is exactly what this harness does. It passes on an idle
+  machine, verified immediately afterwards. Nothing in this ticket touches that file or the auth
+  provider.
+- **One defect of this ticket's own making, found by running rather than reasoning:**
+  `LabA11y.test.tsx`'s mock client had no `listLabOrderBlocks`, so the panel's block-history effect
+  called `undefined` and `LabOrdersPage` threw, taking five accessibility assertions with it. The
+  fixture was wrong, not the component — a client without that method is one this application never
+  constructs, and failing loudly beats a defensive check that would hide a real wiring break. Fixed
+  in `c4c34a7`.
 - **13 browser phases** (`scripts/demo/qualify-blocked.sh`) against real Chromium, Caddy, Keycloak
   26.7.1, the adapter and PostgreSQL 16 — block, **survives a full browser reload**, the reason
   legible on the queue row, the Aujourd'hui count, the server refusing prohibited steps when asked
@@ -22437,11 +22469,56 @@ edit. There is **no generic workflow-event mechanism** by which a block is annou
 system, and none was invented — an external system is not told an order is blocked. Recorded as a
 known gap, not as interoperability.
 
+### What was NOT proven — stated so a reader does not infer it from the list above
+
+- **The full adapter suite ran under Python 3.14, not the shipped 3.13.** The forward-reference
+  defect above was caught by `ruff`, never by execution. What *is* real 3.13 evidence: the adapter
+  container was rebuilt on `python:3.13` and came up healthy, and all 13 browser phases plus five
+  sibling browser suites ran against it — so the import path, the new endpoints, the migration and
+  every request path those suites touch are qualified on 3.13. The 1 939-test suite is not.
+- **PG-BLOCK-4 raced `orders.transition(COMPLETED)`, not `results.release`.** Both take the
+  identical `FOR UPDATE` lock on the identical row, which is what serializes the pair, and the
+  release row the transition requires was seeded so the release half could genuinely win. But the
+  release path's own extra reads — completeness re-check, fingerprint comparison, manifest
+  construction — were not inside the race.
+- **The migration downgrade qualification used direct SQL to resolve the blocked orders**, standing
+  in for the operator the design requires. That is the intended workflow (the downgrade refuses
+  until a human deals with them), but no product path performed it.
+- **NC-BLOCK-3's concurrency half is nondeterministic** (4 of 6 runs) and is reported as such above.
+- **The AST no-role-hardcoding guard does not cover `api.py`**, which is legitimately allowlisted.
+  NC-BLOCK-8 therefore reddened only the behavioural capability tests. LAB-BLOCK-3/4 are
+  load-bearing rather than belt-and-braces.
+
+### The state machine, before and after
+
+Unchanged rows omitted; the full reconstruction is in `docs/ARCHITECTURE.md` §32.
+
+| STATE | HOW ENTERED | WHO | NEXT | ENTRY? | RELEASE? | SIDE EFFECTS |
+|---|---|---|---|---|---|---|
+| `ACCEPTED` | `lab_workflow.accept` | `lab.queue.work` | IN_PROGRESS, CANCELLED, **+BLOCKED** | no | no | audit `lab_order_accepted`; billable |
+| `IN_PROGRESS` | `lab_workflow.start_processing` | `lab.queue.work` | COMPLETED, CANCELLED, **+BLOCKED** | **yes** | **yes** | requires a `LabSampleCollection` |
+| **`BLOCKED`** *(new)* | `lab_workflow.block` **only** — `orders.transition` refuses it | `lab.queue.work` | ACCEPTED **or** IN_PROGRESS — whichever the episode recorded — or CANCELLED | **no** | **no** | `LabOrderBlock` episode in the same transaction; audit `lab_order_blocked`; **still billable**; drops off the release queue |
+
+Both resume edges exist in the table, but only **one is legal for any given order**: the one equal
+to its latest episode's `blocked_from_status`. Every other destination, and every destination at
+all while an episode is unresolved, is refused by `orders.transition` as well as by the service.
+
+`record-collection` is the one deliberate carve-out: a **new** milestone is refused while blocked, a
+**replay** of an existing one is not — DH-EX-011 made that branch unconditional on purpose, it
+writes nothing and advances nothing, and narrowing it for one status would change another ticket's
+semantics.
+
 ### Still open
 
 **D-3** (first-class specimen entity) · **D-4** (Lab Reception identity attributes) · **D-1**'s
 Front Desk portion · **D-6** (walk-in laboratory patient) · **D-8** (auditing successful sensitive
-reads) — all untouched. The **reason-catalog confirmation** above is the new one.
+reads) — all untouched. The **reason-catalog confirmation** (**D-11**) above is the new one.
+
+**Remaining Lab P0:** none from `docs/NATIVE-OPERATING-PRODUCT.md` §26's list — P0-4 was the last
+Lab-track P0 that was not billing, and billing shipped with ADR-066. **This does not make the Lab
+switch-ready**, and no such claim is made: Réception (P1, blocked on **D-1**/**D-4**), the specimen
+entity (P1, **D-3**), specimen labels (P1), facility-owned offerings/templates/prices (P1) and a
+printable result report (P1) all remain.
 
 **Human usability is not claimed.** No laboratory worker has used this screen. Automated browser
 evidence is not human usability evidence. **Pilot-ready is still not clinically live.** All data
