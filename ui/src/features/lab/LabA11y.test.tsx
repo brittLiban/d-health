@@ -69,6 +69,13 @@ describe('Lab Accessibility', () => {
       }),
       recordNativeResultValues: vi.fn(),
       completeResultEntry: vi.fn(),
+      // DHEALTH-LAB-BLOCKED-001: the panel reads block history for every order it opens, not only
+      // blocked ones. A fixture without this describes a client the product never produces, and
+      // the page throws rather than silently degrading -- which is the correct behaviour and the
+      // reason this line is here rather than a defensive check in the component.
+      listLabOrderBlocks: vi.fn().mockResolvedValue([]),
+      blockLabOrder: vi.fn(),
+      resolveLabOrderBlock: vi.fn(),
     } as unknown as ExchangeClient
   })
 
