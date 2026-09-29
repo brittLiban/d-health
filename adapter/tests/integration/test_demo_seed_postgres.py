@@ -41,7 +41,13 @@ from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.identity import PractitionerReferenceRepository
 from daher_adapter.exchange.lab_workflow import LabWorkflowRepository
 from daher_adapter.exchange.membership import ExchangeIdentityRepository
-from daher_adapter.exchange.models import LabOffering, LabResultTemplate, Organization, Patient
+from daher_adapter.exchange.models import (
+    LabOffering,
+    LabOrderBlockReason,
+    LabResultTemplate,
+    Organization,
+    Patient,
+)
 from daher_adapter.exchange.orders import LabOrderRepository, OrderItemInput
 from daher_adapter.exchange.organizations import OrganizationRepository
 from daher_adapter.exchange.patients import PatientRepository
@@ -151,6 +157,30 @@ def _create_full_workflow_object(sessions: sessionmaker[Session]) -> None:
         lab_order_id=order.id, lab_organization_id=lab.id, provider_organization_id=provider.id
     )
     workflow.accept(order_id=order.id, lab_organization_id=lab.id)
+
+    # DHEALTH-LAB-BLOCKED-001: one block episode, raised and resolved, so that
+    # `exchange_lab_order_blocks` genuinely has a row for the reset assertion to clear. Without
+    # this the loop in `test_pgd2_pgd3_...` would pass **vacuously** for the new table -- zero rows
+    # before the reset and zero after proves nothing about whether reset covers it, and this
+    # helper's whole docstring promise is that it exercises every table `_WORKFLOW_TABLES` names.
+    #
+    # Resolved rather than left active, because the order has to reach COMPLETED below and a
+    # blocked order (correctly) cannot advance. The episode survives its own resolution, which is
+    # exactly the row the reset must then remove.
+    _record, episode, _created = workflow.block(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        reason=LabOrderBlockReason.SPECIMEN_UNUSABLE,
+        blocked_by_identity_id=_labtech_identity(identities, "tech"),
+        note="note de qualification synthétique",
+    )
+    workflow.resolve_block(
+        order_id=order.id,
+        block_id=episode.id,
+        lab_organization_id=lab.id,
+        resolved_by_identity_id=_labtech_identity(identities, "tech"),
+    )
+
     workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
     workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
     order = orders.get(order.id)
