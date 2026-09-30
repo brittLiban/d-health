@@ -162,6 +162,14 @@ TS_GUARDED = (
     "features/visits/ClinicArrivals.tsx",
     "features/visits/ClinicVisitsPage.tsx",
     "features/clinic/pages/ClinicHomePage.tsx",
+    # DHEALTH-LAB-RECEPTION-001. The laboratory's own intake surface and the screen that counts the
+    # work waiting on it. `features/lab/LabProvider.tsx` was already here, which covered how the
+    # laboratory context is *derived* but not the two screens that decide which controls a worker is
+    # offered -- so "shows the wrong person the wrong control" had no guard on the laboratory side at
+    # all, the same allowlist-shaped hole DHEALTH-FRONT-DESK-001 found in the `ClinicContext` entry
+    # above. NC-LR-12 re-introduces a role check in `LabOrdersPage.tsx` to prove the guard bites.
+    "features/lab/pages/LabOrdersPage.tsx",
+    "features/lab/pages/LabHomePage.tsx",
 )
 
 #: `roles.includes('X')`, `role === 'X'`, `hasRole('X')` -- the shapes §1 names.

@@ -72,10 +72,19 @@ pin the absence.
 
 **Evidence actually executed:** 23 new adapter tests at the HTTP edge; 8 new real-PostgreSQL-16.15
 concurrency tests; **10 of 10 browser phases green** against real Chromium, Caddy, Keycloak 26.7.1 and
-PostgreSQL 16, on a **rebuilt** adapter image verified to contain the change; **eleven negative controls
-executed and reverted byte-for-byte**, one of them rebuilding the stack to prove the browser evidence is
-load-bearing rather than passing against a stale image; `ruff`, `ruff format`, `tsc -b`, `tsc -p
-e2e/tsconfig.json` and `oxlint` clean; the UI build and its no-secrets check clean.
+PostgreSQL 16, on a **rebuilt** adapter image verified to contain the change; the whole adapter suite
+**2009 passed, 234 skipped** (exit 0), measured as the prior 1986 plus this ticket's 23; **71 further
+browser phases green across 7 sibling suites**, each from its own reset baseline, for **81 in total**;
+188 UI tests across 7 files; **twelve negative controls executed and reverted byte-for-byte**, one of
+them rebuilding the stack to prove the browser evidence is load-bearing rather than passing against a
+stale image; `ruff`, `ruff format`, `tsc -b`, `tsc -p e2e/tsconfig.json` and `oxlint` clean; the UI
+build and its no-secrets check clean.
+
+**The laboratory's own screens had no structural guard against role-name authorization, and now do.**
+`test_dhealthaccesscap001_no_role_hardcoding.py`'s allowlist covered `LabProvider.tsx` — how the
+laboratory context is *derived* — and neither of the two screens that decide which controls a worker is
+offered. `LabOrdersPage.tsx` and `LabHomePage.tsx` are now in it; both already pass, and NC-LR-12 proves
+the guard bites rather than merely being present.
 
 **Specimens are untouched — D-3 remains entirely open.** So do **D-4** (identity-confirmation
 attributes), **D-8** (successful-read auditing) and **D-11**.

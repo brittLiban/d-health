@@ -199,7 +199,7 @@ ADR-067 turned the gate into a capability: the authority, privacy and tenant cla
 never been asserted at the HTTP edge, and the concurrency claims were **green for the wrong reason** —
 DH-EX-006's three races all run on SQLite, where SQLAlchemy omits `FOR UPDATE` entirely, so the row
 lock they exist to exercise was never taken. 23 new adapter tests at the edge, 8 against a disposable
-PostgreSQL 16.15 container, 10 browser phases against real Keycloak, 11 negative controls. With the
+PostgreSQL 16.15 container, 10 browser phases against real Keycloak, 12 negative controls. With the
 lock removed the SQLite races **still passed** while PostgreSQL caught 7 of 25 concurrent accepts
 transitioning instead of 1.
 

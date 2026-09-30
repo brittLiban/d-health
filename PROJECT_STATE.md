@@ -22917,8 +22917,10 @@ GitHub Actions untouched.
 
 **No ADR. No migration. No new capability. No new order state.** Alembic head unchanged at
 `0038_visit_check_in`. One behavioural change — a sort order — plus the evidence that everything around
-it was already true. Three commits from `3e4b69b`: `722877d`, `44a839c`, `aa3c14e`, and a fourth for
-documentation.
+it was already true. From `3e4b69b`: `722877d` (the sort fix and the edge tests), `44a839c` (the
+PostgreSQL qualification), `aa3c14e` (the browser qualification), `1da5331` (this documentation),
+`33beb13` (a dated annotation that said tomorrow), plus the correction commit that carries this
+sentence and the structural guard below.
 
 ### The scoping finding, first, because it changes how the rest reads
 
@@ -23018,7 +23020,7 @@ wrong order.
 | Check | Result |
 |---|---|
 | `tests/test_dhealthlabreception001_intake.py` (new) | **23 passed** |
-| **Whole adapter suite** (`pytest`, including `tests/integration`) | **2009 passed, 234 skipped** in 16m45s, exit 0. Exactly the prior 1986 plus this ticket's 23; the skips are the env-gated PostgreSQL suites |
+| **Whole adapter suite** (`pytest`, including `tests/integration`) | **2009 passed, 234 skipped** in 16m45s, exit 0. Measured, not inferred: `pytest tests/integration` alone with no `DH*_PG_*` set is **0 passed, 233 skipped**, so 2009 = the prior ticket's 1986 plus this one's 23, and 234 = those 233 plus the 1 skip that suite already had |
 | `tests/test_exchange_lab_workflow.py` + `test_dhealthlabblocked001_blocked_orders.py` (existing, unchanged) | **78 passed** (44 + 34) |
 | Real PostgreSQL 16.15 intake concurrency qualification (new, `DHLR_PG_*`) | **8 passed** |
 | `ruff check` · `ruff format --check` | **clean** · **256 files formatted** |
@@ -23042,7 +23044,7 @@ that verifies it.
 
 ### §NC — the negative controls, executed and reverted
 
-Eleven. Each was applied to the committed tree by **exact string replacement, never a regex over code**, by
+Twelve. Each was applied to the committed tree by **exact string replacement, never a regex over code**, by
 a driver that refuses a replacement matching anything other than exactly once and that `ast.parse`s the
 result before writing — so a control reddening from a `SyntaxError` or a `NameError` is impossible by
 construction rather than caught afterwards. Each was reverted with `git checkout --` and the tree verified
@@ -23061,6 +23063,7 @@ clean by `git status --porcelain` **and** `git diff --stat`, both empty, after e
 | **NC-LR-9** | `if current != from_status:` becomes `if False and …` | the state precondition on every transition | `an_invalid_intake_transition_is_a_409_not_a_500` and `declining_is_terminal_and_does_not_return_to_incoming` — **2 failed** (409 → **200**) | an already-accepted order can be declined; a terminal refusal is reopened; the lifecycle stops being a lifecycle |
 | **NC-LR-10** | `if current == to_status:` becomes `if False and …` | the idempotent-replay branch | `a_retried_acceptance_neither_transitions_twice_nor_audits_twice` — **1 failed**: the retry became a **409** where the product promises **200** | a lost HTTP response makes the worker's second click an error; the work looks refused when it was taken |
 | **NC-LR-11** | **NC-LR-7 again, with the adapter image rebuilt**, against the running stack | the browser evidence being load-bearing | **LR-B5 red** on *"the order routed first must appear above the one routed after it"*; LR-B1–B4 green, B6–B10 skipped. In-container `selected_at.asc` count confirmed **0** | the browser suite could have been passing against a stale image and nobody would know |
+| **NC-LR-12** | `LabOrdersPage.tsx`'s `if (!capabilities.canWorkOrders)` becomes `if (!activeLab.roles.includes('LAB_TECH'))` | no frontend authorization on a role name, on the laboratory side | the AST/regex guard's `test_no_navigation_or_capability_module_authorizes_on_a_role_name` — **1 failed**, naming `features/lab/pages/LabOrdersPage.tsx:914` | the intake screen stops following authority: a granted capability is invisible and a withdrawn one still shown, so the browser and the server disagree about who may take work |
 
 **NC-LR-5 is the single most valuable control in this ticket.** SQLite green and PostgreSQL red, from the
 same mutation, is the "green for the wrong reason" gap measured rather than argued.
@@ -23080,6 +23083,30 @@ real way to leave a repository broken while reporting success.
 `LabSelection`'s write-once guarantee, because the guarantee is the *absence* of an `onupdate` and there is
 no line to break — breaking it would mean adding one, which tests a hypothetical rather than removing a
 protection.
+
+
+### The structural guard the ticket asked for, and the hole it was covering
+
+The ticket asked for narrow assertions preventing **role-name authorization in lab reception**. The
+behavioural half was already covered — NC-LR-3 reddens two tests by swapping the capability gate for
+`require_role(..., LAB_TECH)`. The *frontend* half was not, and checking rather than assuming is what
+found it: `test_dhealthaccesscap001_no_role_hardcoding.py`'s `TS_GUARDED` listed
+`features/lab/LabProvider.tsx`, which covers how the laboratory context is **derived**, and **neither of
+the two screens that decide which controls a laboratory worker is offered.**
+
+So "shows the wrong person the wrong control" had no structural guard on the laboratory side at all —
+the same allowlist-shaped hole `DHEALTH-FRONT-DESK-001` found in that list's `ClinicContext` entry, where
+a `.tsx`/`.ts` typo made an entry match nothing while reading as covered. Worse than an absent guard,
+because the list is what a reader trusts.
+
+`features/lab/pages/LabOrdersPage.tsx` and `features/lab/pages/LabHomePage.tsx` are now in the list. Both
+pass today — they already ask `capabilities.canWorkOrders` — and **NC-LR-12** above proves the guard
+bites rather than merely being present. `test_every_guarded_frontend_file_exists` validates both paths, so
+neither can become a silent hole the way the `ClinicContext` entry did.
+
+**This is the one place this ticket widened a guard beyond its own files**, and it is recorded rather than
+folded in quietly: the two screens are the laboratory reception surface, so a guard that omitted them left
+this ticket's own claim structurally unenforced on the side the user actually sees.
 
 ### One thing this ticket got wrong and fixed
 
