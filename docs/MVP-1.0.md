@@ -1045,7 +1045,7 @@ interaction changed. Law 3 is untouched and still a validated target here too โ€
 administrator has used the capability sheet and nothing has been timed.
 
 **ยง10 gaps: none closed.** The admin gap entry stands. This is also **not** an answer to the Front
-Desk authority question (**D-1**): no `FRONT_DESK` template was invented, because choosing what such
+Desk authority question (**D-1**) **[Corrected 2026-09-30, DHEALTH-FRONT-DESK-001 / ADR-069: the Front Desk half is now **resolved**, and the answer was not a role. Reception authority is three independently grantable capabilities -- `patient.directory.read`, `patient.register` and the new `visit.check_in`. No `FRONT_DESK` template was invented then and none was invented now; nothing gates on one, and `ORG_ADMIN` plus a direct `visit.check_in` grant runs reception with no role change. The prediction in this paragraph -- that answering it later would be a choice of which capabilities to grant rather than a change to authorization code -- held, with one exception worth naming: `require_clinician` was narrowed from six capabilities to four, because its any-of included the two patient capabilities a receptionist legitimately holds.]**: no `FRONT_DESK` template was invented, because choosing what such
 a role may do is a product decision, and the ticket that created the seam explicitly forbade
 guessing it. What changed is that answering it later is a choice of which capabilities go in a
 template, not a change to Billing, Visits or patient-directory authorization code. **D-8** (auditing

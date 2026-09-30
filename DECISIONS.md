@@ -9717,10 +9717,7 @@ narrows are exactly those granted one patient capability directly and no clinica
 composition this ADR exists to make possible.
 
 **Twenty-one route gates were retargeted** from `_require_clinician` to the specific capability the
-catalog already documented for them. **A residual any-of surface remains and is named rather than
-hidden:** roughly seventeen order/result *read* routes still use the narrowed `require_clinician`, so
-a member granted `visit.read` alone can still reach them. That is narrower than before and is
-recorded as follow-up work, not as done.
+catalog already documented for them. **A residual any-of surface remains and is named rather than hidden.** **19 call sites still use the narrowed `require_clinician` any-of** -- the order, routing, patient-access, notification and result-review surface: 15 reads and **4 mutations** (lab assignment, patient-access issue and revoke, notification retry). A member granted `visit.read` alone can still reach them. Narrower than before, and recorded as follow-up work rather than as done.
 
 ### 4. `CHECKED_IN` is the one waiting fact; the queue is a projection, not a domain
 

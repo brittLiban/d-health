@@ -2141,7 +2141,7 @@ bank, calls no mobile-money API and authorises no card; there is no payment prov
 account and no secret anywhere in this domain.
 
 **Two decisions were raised rather than guessed.** D-1's Billing portion is resolved — billing has its
-own authority and administration does not confer it — but **the Front Desk half is still open**. D-2a
+own authority and administration does not confer it — but ~~**the Front Desk half is still open**~~. **[Corrected 2026-09-30, DHEALTH-FRONT-DESK-001 / ADR-069: the Front Desk half is now **resolved**, and the answer was not a role. Reception authority is three independently grantable capabilities -- `patient.directory.read`, `patient.register` and the new `visit.check_in`. No `FRONT_DESK` template was invented then and none was invented now; nothing gates on one, and `ORG_ADMIN` plus a direct `visit.check_in` grant runs reception with no role change. The prediction in this paragraph -- that answering it later would be a choice of which capabilities to grant rather than a change to authorization code -- held, with one exception worth naming: `require_clinician` was narrowed from six capabilities to four, because its any-of included the two patient capabilities a receptionist legitimately holds.]** D-2a
 has an interim answer only, and every inter-facility commercial arrangement is deliberately unbuilt.
 **D-8 is still open**: the new patient lookup is not audited as a successful read, because a
 read-audit regime introduced for one endpoint inside a billing ticket would have pre-empted it.
@@ -2228,7 +2228,7 @@ does not.
 capability sheet and nothing has been timed, so product law 3 remains a validated target. Six green
 browser phases say the mechanism works, not that an administrator finds it obvious.
 
-**D-1 is still open, and this does not resolve it.** Front Desk has no backend authority and **no
+~~**D-1 is still open, and this does not resolve it.**~~ **[Corrected 2026-09-30, DHEALTH-FRONT-DESK-001 / ADR-069: the Front Desk half is now **resolved**, and the answer was not a role. Reception authority is three independently grantable capabilities -- `patient.directory.read`, `patient.register` and the new `visit.check_in`. No `FRONT_DESK` template was invented then and none was invented now; nothing gates on one, and `ORG_ADMIN` plus a direct `visit.check_in` grant runs reception with no role change. The prediction in this paragraph -- that answering it later would be a choice of which capabilities to grant rather than a change to authorization code -- held, with one exception worth naming: `require_clinician` was narrowed from six capabilities to four, because its any-of included the two patient capabilities a receptionist legitimately holds.]** Front Desk had no backend authority at the time of this entry, and **no
 speculative `FRONT_DESK` template was created** — inventing the contents of that role is the product
 decision the ticket explicitly forbade guessing. What changed is the cost of answering it later: it
 is now a choice of which capabilities go in a template, touching no Billing, Visits or patient-

@@ -3188,8 +3188,10 @@ patient-directory and registration routes ask for their own capabilities directl
 
 **Twenty-one route gates** were retargeted from the any-of to the specific capability
 `exchange/capabilities.py` already documented for them. Nobody holding a role template was affected.
-**Roughly seventeen order/result read routes still use the narrowed any-of** — named here rather than
-left to be discovered, and recorded as remaining work in `PROJECT_STATE.md`.
+**19 call sites still use the narrowed `require_clinician` any-of** — the order, routing,
+patient-access, notification and result-review surface: 15 reads and **4 mutations** (lab assignment,
+patient-access issue and revoke, notification retry). A member granted `visit.read` alone can still
+reach them. Named here rather than left to be discovered, and recorded in `PROJECT_STATE.md`.
 
 ### Two projections over one table, and why
 

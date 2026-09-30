@@ -22842,7 +22842,7 @@ portion by ADR-069. The **waiting-duration** blocker above is the new one.
 |---|---|---|
 | 1 | **Waiting duration** | 🛑 **BLOCKED** — the decision above |
 | 2 | **Rendez-vous (calendar), `PLANNED`, `NO_SHOW`** | P1, unchanged. Designed so the future calendar feeds this same check-in operation |
-| 3 | **The residual `require_clinician` any-of surface** | ~17 order/result *read* routes still accept any of four clinical capabilities. Narrower than before; not per-capability yet |
+| 3 | **The residual `require_clinician` any-of surface** | **19 call sites** still accept any of the four clinical capabilities -- the order, routing, patient-access, notification and result-review surface: 15 reads and **4 mutations** (lab assignment, patient-access issue and revoke, notification retry). Narrower than before; not per-capability yet |
 | 4 | **A reception-facing "is a result ready" signal** | §7 of the operating specification permits it (*that* a result exists, never its values); not built |
 | 5 | **Realtime waiting-list updates** | Refetch-on-mutation only. WebSockets are explicitly out of scope (§66); the honest limitation is that a colleague's check-in appears on the next fetch, not pushed |
 | 6 | **Human usability qualification** | **OPEN** — see below |

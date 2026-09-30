@@ -52,6 +52,7 @@ from daher_adapter.exchange.capabilities import (
     SYSTEM_ROLE_TEMPLATES,
     Capability,
 )
+from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.models import (
     ExchangeSecurityAuditEvent,
     OrganizationRole,
@@ -95,6 +96,14 @@ def client(sessions: sessionmaker[Session], keypair, audit_path) -> TestClient:
 @pytest.fixture
 def organizations(sessions: sessionmaker[Session]) -> OrganizationRepository:
     return OrganizationRepository(sessions)
+
+
+@pytest.fixture
+def catalog(
+    sessions: sessionmaker[Session], organizations: OrganizationRepository
+) -> CatalogRepository:
+    """Only FD-12 needs it: a diagnostic order has to name a real catalogue entry."""
+    return CatalogRepository(sessions, organizations)
 
 
 # -- harness --------------------------------------------------------------------------------------
@@ -317,6 +326,9 @@ def world(client: TestClient, keypair, organizations: OrganizationRepository):
         "outsider_token": outsider_token,
         "platform_token": platform_token,
         "patient_id": patient["id"],
+        # Only FD-12 needs it: an order intent names a `PatientReference`, not a `Patient`, and
+        # `PatientRepository.create` makes one alongside the patient.
+        "patient_reference_id": patient["primary_patient_reference_id"],
         "patient_z_id": patient_z["id"],
     }
 
@@ -888,6 +900,65 @@ def test_fd_9_to_12_the_existing_clinical_workflow_still_works_on_a_desk_checked
 
     # A completed visit is out of the waiting projection entirely.
     assert _waiting(client, world["reception_token"], provider).json() == []
+
+
+def test_fd_12_a_diagnostic_order_can_be_raised_from_a_desk_checked_in_visit(
+    client, world, catalog, sessions
+):
+    """FD-12/§39: the order → intent → visit linkage still works on a visit the desk created.
+
+    Separate from the note-and-complete test above because it is the one place a desk-created visit
+    could plausibly differ downstream: its ``reason_for_visit`` is **NULL**, which no visit could be
+    before ADR-069. ``require_visit_can_receive_order`` reads the visit's status and patient and
+    nothing else, so nothing should care -- and this is what says so rather than assuming it.
+
+    Asserted through the intent **and** the commit, because the intent is where the value is
+    captured and ``commit`` copies it forward: a linkage that survived one and not the other would
+    put the order on the wrong consultation. The visit aggregate is then read back, so the round
+    trip is closed rather than inferred from the write."""
+    provider = world["provider_id"]
+    entry, _ = catalog.create_entry(code="DH-FD-CBC", display_name="CBC (synthetic)")
+
+    # The arrival is registered by somebody with no clinical authority at all...
+    visit_id = _check_in(client, world["reception_token"], provider, world["patient_id"]).json()[
+        "id"
+    ]
+    assert _visit_row(sessions, visit_id).reason_for_visit is None
+    # ...and a clinician takes it before any order can be raised (§39's precondition, unchanged).
+    client.post(
+        f"/exchange/v1/organizations/{provider}/visits/{visit_id}/take",
+        headers=_auth(world["clinician_token"]),
+    )
+
+    intent = client.post(
+        f"/exchange/v1/organizations/{provider}/order-intents",
+        headers={**_auth(world["clinician_token"]), "Idempotency-Key": _key()},
+        json={
+            "patient_reference_id": world["patient_reference_id"],
+            "catalog_entry_ids": [str(entry.id)],
+            "visit_id": visit_id,
+        },
+    )
+    assert intent.status_code == 201, intent.text
+    assert intent.json()["visit_id"] == visit_id
+
+    committed = client.post(
+        f"/exchange/v1/organizations/{provider}/order-intents/{intent.json()['id']}/commit",
+        headers=_auth(world["clinician_token"]),
+    )
+    assert committed.status_code in (200, 201), committed.text
+    assert committed.json()["visit_id"] == visit_id, "commit must carry the visit forward"
+
+    # The visit aggregate names the order, so the linkage is readable from both ends.
+    detail = client.get(
+        f"/exchange/v1/organizations/{provider}/visits/{visit_id}",
+        headers=_auth(world["clinician_token"]),
+    ).json()
+    assert [order["id"] for order in detail["orders"]] == [committed.json()["id"]]
+
+    # And the desk still cannot see any of it: the arrival projection has no order field at all.
+    rows = _waiting(client, world["reception_token"], provider).json()
+    assert set(rows[0]) == WAITING_FIELDS
 
 
 def test_fd_13_an_arrival_can_be_cancelled_before_clinical_contact(client, world):

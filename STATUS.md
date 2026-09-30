@@ -31,8 +31,7 @@ same day, so no clinician's authority changed.
 any-of over every provider capability, including the two a receptionist legitimately holds — so
 before today a reception member would have passed every gate in that list: order creation, doctor
 review, the whole visit surface. Twenty-one route gates now name the capability they need. Nobody
-holding a role template is affected. **Roughly seventeen order/result *read* routes still use the
-narrowed any-of**, which is narrower than before and is recorded as remaining work, not as done.
+holding a role template is affected. **19 call sites still use the narrowed `require_clinician` any-of** -- the order, routing, patient-access, notification and result-review surface: 15 reads and **4 mutations** (lab assignment, patient-access issue and revoke, notification retry). A member granted `visit.read` alone can still reach them. Narrower than before, and recorded as follow-up work rather than as done.
 
 **`CHECKED_IN` stays the one waiting fact.** No `WAITING` status, no `PLANNED`, no `NO_SHOW`, no
 appointment table — still four states. The queue is a projection over the two live states, oldest

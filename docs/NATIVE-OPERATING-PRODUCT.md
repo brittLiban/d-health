@@ -2203,9 +2203,10 @@ licence to read it, and that asymmetry is the point of the split rather than an 
 any-of over every provider capability, **including the two a receptionist legitimately holds**. So
 until 2026-09-30 a reception member would have passed every gate behind it — order creation, doctor
 review, the whole visit surface. That is now four capabilities rather than six, twenty-one route gates
-name the capability they need, and **roughly seventeen order/result read routes still use the narrowed
-any-of** — narrower than before, named here rather than left to be discovered, and recorded as
-remaining work.
+name the capability they need, and **19 call sites still use the narrowed any-of** — the order,
+routing, patient-access, notification and result-review surface: 15 reads and **4 mutations** (lab
+assignment, patient-access issue and revoke, notification retry). Narrower than before, named here
+rather than left to be discovered, and recorded as remaining work.
 
 ### What this does not make true
 

@@ -335,3 +335,77 @@ Whether successful reads of sensitive data should be audited (**D-8**) remains u
 capability work deliberately did not answer it: capability *mutations* are audited
 (`capability_granted`, `capability_denied`, `capability_override_cleared`), and reading a member's
 capability sheet is not.
+
+---
+
+## 11. Authority narrowing at the visit and patient surface (DHEALTH-FRONT-DESK-001, ADR-069) — added 2026-09-30
+
+Recorded here because it is a **security-boundary change**, not merely a feature: the set of
+capabilities that open the provider-clinical surface got smaller, and twenty-one route gates stopped
+asking a broad question and started asking a specific one.
+
+### What `require_clinician` was, and why it was too wide
+
+It was an any-of over **all six** provider capabilities, including `patient.directory.read` and
+`patient.register`. Those two are exactly what a reception desk legitimately needs — so the question
+the gate actually asked was *"do you hold any provider capability at all"*, and a member granted only
+the two patient capabilities would have passed **every** gate behind it: diagnostic order creation,
+doctor review, the whole visit surface including clinical notes.
+
+Nobody was exposed by this in practice, because before ADR-069 no composition granted those two
+without the rest: `CLINICIAN` carried all six and was the only template that carried any of them. The
+exposure would have appeared the moment a facility used ADR-067's direct grants to build a
+receptionist — which is precisely what ADR-069 makes possible. So the narrowing is a **prerequisite**
+of the feature rather than a repair of a live defect, and is stated that way rather than as either an
+incident or a nicety.
+
+### What it is now
+
+`require_clinician` asks for any of `visit.read` / `visit.document` / `order.manage` /
+`result.review`. The patient-directory and registration routes ask for `patient.directory.read` and
+`patient.register` directly. **Twenty-one route gates** were retargeted to the specific capability
+`exchange/capabilities.py` already documented for them.
+
+**No role template lost anything.** `CLINICIAN` carries all of these and more, so no existing member's
+authority changed on the day of the split — the same §18 discipline ADR-067 applied to its own
+migration.
+
+### The residual any-of surface, measured rather than estimated
+
+**19 call sites still use the narrowed `require_clinician`**: the order, routing, patient-access,
+notification and result-review surface — 15 reads and **4 mutations** (lab assignment, patient-access
+issue and revoke, notification retry). A member granted `visit.read` alone can still reach them.
+
+That is narrower than before and is **not** claimed as finished. It is recorded as remaining work in
+`PROJECT_STATE.md`. Counted by walking `api.py`'s route decorators, not by grepping.
+
+### The new capability carries no clinical read, and that is qualified
+
+`visit.check_in` is the arrival authority. A member holding it and nothing clinical is refused the
+visit detail, the visit list, the patient visit history, the note append, the reason amendment, the
+consultation start, completion, result review, diagnostic ordering, billing and every laboratory
+surface — **including for a visit they created themselves.** Creating a record is not a licence to
+read it.
+
+Qualified three ways: over HTTP (`test_fd_auth_7` through `test_fd_auth_12`), as a response-shape
+contract (`test_fd_57_*`, which asserts the arrival projection's exact key set and separately proves
+a stored reason does not leak into it), and in a real browser against real Keycloak (FD-B6, which
+gets 403 on four endpoints and finds no control on screen).
+
+### The same-token revocation invariant still holds, now for the arrival capability
+
+`test_fd_auth_4` removes `visit.check_in` through the product's own Team & Access endpoint, keeps the
+**same** Keycloak session and the same token, and the next check-in request is refused.
+`test_fd_auth_5` does the DENY half: the role stays assigned, an individual DENY removes the
+authority, clearing it restores it. **NC-FD-7** breaks it by memoizing the resolver and reddens both.
+
+### What this section does not claim
+
+- The narrowing was **not** driven by an observed exploit. No member holding only the patient
+  capabilities existed before this ticket created the possibility.
+- **D-8 is untouched.** Whether successful reads of sensitive data should be audited remains
+  unanswered, and this ticket deliberately did not answer it. The arrival projection's *reads* are not
+  audited; its mutations reuse `visit_created` / `visit_started` / `visit_cancelled`.
+- No penetration testing, no threat model, and no review by anyone other than the advisor loop this
+  session used in place of the `dhealth_advisor` agent `AGENTS.md`'s Codex block names (that agent
+  does not exist in this harness).

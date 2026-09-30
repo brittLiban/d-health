@@ -49,9 +49,17 @@ import { waitForEdge } from '../support/edgeReadiness'
  *   FD-B5  a new patient is registered and flows straight into check-in -- no second search
  *   FD-B6  the clerk is refused the clinical record, by API and by the absence of any control
  *   FD-B7  a clinician sees the waiting patient and starts the SAME visit; it leaves the queue
- *   FD-B8  the clinician documents and completes that visit, and orders diagnostics from it
- *   FD-B9  the capability is withdrawn: the API refuses on the clerk's live session, and the
- *          control disappears -- with no role change and no re-authentication
+ *   FD-B8  the clinician documents and completes that visit
+ *   FD-B9  the capability is withdrawn: the API refuses, and the arrival control disappears --
+ *          with no role change, and with billing untouched
+ *
+ * **Diagnostic ordering from the visit is deliberately not a phase here.** The wizard reached from
+ * `Patients` creates an order with *no* visit, by design; the visit-carrying path is
+ * `Visites` -> `Demander des analyses`, which `08-clinic-visit.spec.ts` already qualifies in a
+ * browser on a clinician-created visit. What this ticket needed to add was the same linkage on a
+ * **desk-created** visit -- whose `reason_for_visit` is NULL, which no visit could be before ADR-069
+ * -- and that is `test_fd_12_a_diagnostic_order_can_be_raised_from_a_desk_checked_in_visit`, over
+ * HTTP. Rebuilding the wizard journey here would have re-qualified the wrong half.
  *
  * ── State this suite leaves behind: none, and that is load-bearing ──
  *
@@ -91,9 +99,6 @@ const RECEPTION_CAPABILITIES = [
   { key: 'patient.register', label: 'Enregistrer un patient' },
   { key: 'visit.check_in', label: 'Accueillir un patient' },
 ] as const
-
-/** The all-zero UUID, used only to keep a `COALESCE` well-typed before any visit id is known. */
-const ZERO_UUID = '00000000-0000-4000-8000-000000000000'
 
 /** Unique per run, so a database still holding an earlier run's visits yields unambiguous rows. */
 const RUN = Date.now().toString().slice(-6)
@@ -256,16 +261,26 @@ async function openSheet(page: Page, username: string) {
  * for this suite's synthetic patient and then failed looking for a row naming the baseline one.
  *
  * Naming the patient to sort later cannot fix it, because the ordering is by creation time. Deleting
- * it can, and **four** tables reference it, all of which had to be found the hard way:
+ * it can, and the `RESTRICT` chain has to come apart in this order — every link found by a delete
+ * failing on it:
  *
- *   exchange_visit_notes            -> exchange_visits
- *   exchange_visits                 -> exchange_patients   (composite, RESTRICT)
- *   exchange_patient_references     -> exchange_patients
- *   exchange_patient_registration_requests -> exchange_patients   (the registration idempotency row)
+ *   exchange_visit_notes                   -> exchange_visits
+ *   exchange_visits                        -> exchange_patients (composite, RESTRICT)
+ *   exchange_patient_references            -> exchange_patients
+ *   exchange_patient_registration_requests -> exchange_patients (the idempotency row)
  *
- * The last one is the one a reasonable person misses: registering through the product writes an
+ * The last is the one a reasonable person misses: registering through the product writes an
  * idempotency record, and the first version of this helper deleted the reference successfully and
  * then failed on the patient itself.
+ *
+ * No lab order or intent is deleted, because this suite raises none — see the phase list above for
+ * why diagnostic ordering is qualified elsewhere. If a phase ever does raise one, the order, its
+ * items and its selection have to be removed *before* the visits, since all three hold `RESTRICT`
+ * references to it.
+ *
+ * The visits are matched by `reason_for_visit IS NULL` rather than by collected ids: that is exactly
+ * the signature of a desk-registered arrival (§15 — reception is never asked for a reason), it cannot
+ * match a seeded or clinician-created row, and it survives a phase aborting before its id was stored.
  *
  * Targeted, never a truncate: it removes this suite's own rows and nothing else, so running it can
  * never destroy a demo's deliberate configuration or another suite's evidence. It is also deliberately
@@ -274,15 +289,16 @@ async function openSheet(page: Page, username: string) {
  */
 function clearOwnRows() {
   const owned = `SELECT id FROM exchange_patients WHERE display_name = '${NEW_PATIENT}'`
+  // Every visit this suite created: the ones belonging to its own registered patient, plus the ones
+  // it created against the *baseline* patient (FD-B3 and FD-B8b). Matched by "has no stated reason",
+  // which is exactly the signature of a desk-registered arrival and cannot match a seeded row.
   const ownedVisits =
-    `SELECT id FROM exchange_visits WHERE patient_id IN (${owned}) ` +
-    `OR id = COALESCE(NULLIF('${checkedInVisitId}', '')::uuid, '${ZERO_UUID}'::uuid)`
+    `SELECT id FROM exchange_visits ` +
+    `WHERE patient_id IN (${owned}) OR reason_for_visit IS NULL`
 
   exchangeSql(`DELETE FROM exchange_visit_notes WHERE visit_id IN (${ownedVisits})`)
   exchangeSql(
-    `DELETE FROM exchange_visits
-      WHERE patient_id IN (${owned})
-         OR id = COALESCE(NULLIF('${checkedInVisitId}', '')::uuid, '${ZERO_UUID}'::uuid)`,
+    `DELETE FROM exchange_visits WHERE patient_id IN (${owned}) OR reason_for_visit IS NULL`,
   )
   exchangeSql(`DELETE FROM exchange_patient_registration_requests WHERE patient_id IN (${owned})`)
   exchangeSql(`DELETE FROM exchange_patient_references WHERE patient_id IN (${owned})`)
@@ -674,6 +690,16 @@ test.describe('DHEALTH-FRONT-DESK-001 — a clinic day begins at the desk', () =
     const clerk = await freshSignIn(browser, CLERK)
     expect(await capabilities(clerk.session.token, providerId)).not.toContain('visit.check_in')
     expect(await waitingStatus(clerk.session.token, providerId)).toBe(403)
+
+    // **§26 step 13, the UI half.** Only `visit.check_in` was withdrawn, so `patient.directory.read`
+    // still unlocks `Aujourd'hui` — the section stays and the *arrival region inside it* goes. That
+    // is the more precise assertion of the two: it shows the control tracking one capability rather
+    // than the person losing access generally.
+    await nav(clerk.page).getByRole('button', { name: "Aujourd'hui", exact: true }).click()
+    await expect(clerk.page.getByRole('region', { name: 'Patients en attente' })).toHaveCount(0)
+    await expect(
+      clerk.page.getByRole('button', { name: 'Accueillir un patient' }),
+    ).toHaveCount(0)
 
     // The role never moved, in either direction.
     expect(
