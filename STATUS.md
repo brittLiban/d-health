@@ -6,6 +6,81 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-30, DHEALTH-FRONT-DESK-001, directly on `master`.** From `4ad7508`. **A clinic day can now
+begin at the desk, and the desk sees no clinical record.** Until today DHealth could run a
+consultation but had no beginning: nobody could tell who was in the waiting room, so a clinic kept a
+paper register beside DHealth — double entry, and product law 2 broken. A walk-in arrival now exists,
+and the authority to perform it is a **capability, not a job title**. **ADR-069.** Alembic head is now
+**`0038_visit_check_in`**.
+
+**D-1's Front Desk portion is resolved, and there is no `FRONT_DESK` role.** Reception authority is
+three independently grantable capabilities — `patient.directory.read`, `patient.register`, and the new
+**`visit.check_in`** — so a facility composes the job and DHealth ships no job title. The browser
+qualification proves it the hard way: the persona is `demo-clerk`, who holds `BILLING_CLERK` and
+nothing else, handed the three capabilities by an administrator clicking `Équipe et accès`, with the
+role provably untouched. §28's "one employee does reception and the till" is therefore exercised
+rather than described.
+
+**`visit.check_in` carries no clinical read, and that is the point of the split.** A holder can
+register an arrival, see who is waiting, and cancel an arrival before clinical contact. They are
+refused the visit, its note history and its stated reason — **even for a visit they created
+themselves**. Creating a record is not a licence to read it. `CLINICIAN` gained `visit.check_in` the
+same day, so no clinician's authority changed.
+
+**`require_clinician` narrowed from six capabilities to four, and that is a security fix.** It was an
+any-of over every provider capability, including the two a receptionist legitimately holds — so
+before today a reception member would have passed every gate in that list: order creation, doctor
+review, the whole visit surface. Twenty-one route gates now name the capability they need. Nobody
+holding a role template is affected. **Roughly seventeen order/result *read* routes still use the
+narrowed any-of**, which is narrower than before and is recorded as remaining work, not as done.
+
+**`CHECKED_IN` stays the one waiting fact.** No `WAITING` status, no `PLANNED`, no `NO_SHOW`, no
+appointment table — still four states. The queue is a projection over the two live states, oldest
+arrival first, and the future calendar ticket will feed this same operation.
+
+**The arrival projection is a privacy boundary rather than a convenience.** Six enumerated fields over
+a query that selects exactly those columns, because a shared model leaks the moment somebody adds a
+field to it and a narrow model over a wide query leaks the moment somebody reuses the row. The stated
+reason for visit is absent from the *response*, not merely unrendered.
+
+**The desk never becomes the clinician.** `clinician_identity_id` was already nullable and already
+paired with the two states that require one, so the semantics were already in the database. What is
+new is that the request accepts no clinician identity at all: an attempt to send one is a 422 rather
+than a silently ignored field.
+
+**At most one active visit per patient per provider**, enforced by a partial unique index rather than
+by the service's pre-read — two reception workers submitting at the same instant both pass a pre-read.
+Partial, so a returning patient is never blocked. A replayed idempotency key returns the existing
+visit; a different key for a patient already waiting is a 409.
+
+**🛑 The waiting duration the ticket asked for is NOT built.** `AGENTS.md` (2026-09-27) and
+`docs/NATIVE-OPERATING-PRODUCT.md` §38 both forbid deriving a waiting time from visit timestamps
+without the clinical lead's sign-off, because a number a clinic would act on is an operational signal
+DHealth must not produce even when arithmetic produced it. The recorded arrival time is shown; the
+subtraction happens nowhere, and two tests assert its absence. Recorded in `PROJECT_STATE.md` as
+**`Human Decision Required: Yes`** with four options and no code written for any of them.
+
+**Evidence actually executed:** 43 new backend tests; the full adapter suite **1985 passed, 1
+skipped**; 11 new real-PostgreSQL-16.15 concurrency and migration tests; the existing visit
+PostgreSQL qualification re-run green on the post-0038 schema; the full `0001 → 0038 → downgrade →
+0038` cycle against real PostgreSQL with **both refusal paths observed**; **9 of 9 browser phases
+green** against real Chromium, Caddy, Keycloak 26.7.1 and PostgreSQL 16; 69 frontend tests; ruff,
+ruff format, `tsc -b` and oxlint clean; **eight negative controls executed and reverted byte-for-byte**
+(two of them redone after the first attempt reddened for the wrong reason).
+
+**The real-PostgreSQL qualification earned its existence**: it found that `start()`'s `IntegrityError`
+branch called `session.expunge` on an instance the SAVEPOINT rollback had already evicted, turning the
+409 into a 500. SQLite never saw it. It also found that the branch only re-checked one of the two
+uniqueness rules, so the ordinary two-receptionists race would have 500'd.
+
+**Human usability is not claimed.** No receptionist and no clinician has used this surface, and no
+timing has been measured against the paper register it replaces, so law 3 remains a validated target
+rather than a current claim. **Pilot-ready is still not clinically live.** All data synthetic; no real
+patient data anywhere; GitHub Actions untouched.
+
+### Previous as-of — 2026-09-29, DHEALTH-LAB-BLOCKED-001
+
+
 **2026-09-29, DHEALTH-LAB-BLOCKED-001, directly on `master`.** From `eecf4a0`. **A laboratory can
 say "we cannot continue this order", and the software stops claiming otherwise.** Until today a
 haemolysed tube left an order sitting in `ACCEPTED` — a queue state that claims work is progressing

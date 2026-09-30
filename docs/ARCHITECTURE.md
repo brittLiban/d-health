@@ -3122,3 +3122,122 @@ a patient is told is a typecheck failure.
   order-centric like every other laboratory event. Neither carries the reason key (the episode row
   is the single authority) nor the free-text note (a laboratory's working note belongs nowhere near
   a security log — `VisitNote.body`'s rule).
+
+---
+
+## 33. Walk-in arrival, and where a waiting queue actually lives (DHEALTH-FRONT-DESK-001, ADR-069) — added 2026-09-30
+
+`exchange/visits.py` · `exchange/capabilities.py` · `exchange/api.py` · migration
+`0038_visit_check_in` · `ui/src/features/visits/ClinicArrivals.tsx`
+
+### The shape
+
+```
+   patient walks in
+        |
+   [visit.check_in]  register the arrival  ---------------------> Visit(CHECKED_IN)
+        |                                                          clinician_identity_id = NULL
+        |                                                          created_at = the arrival
+        |
+   the waiting queue is a PROJECTION over this, not a domain:
+        GET /organizations/{id}/visits/waiting
+        -> WaitingArrivalRecord x N, oldest created_at first
+           six fields, no reason_for_visit, no clinician, no note, no result
+        |
+   [visit.document]  a clinician takes it  ---------------------> Visit(IN_PROGRESS)
+        |                                                          clinician = the acting membership,
+        |                                                          server-derived, never from the body
+        |
+   the existing lifecycle continues unchanged: note, orders, complete
+```
+
+### The one waiting fact
+
+`CHECKED_IN` **is** the waiting list, as §30 (ADR-065) already recorded. This ticket added no
+`WAITING` status, because a second status meaning the identical thing would make two state machines
+describe one patient and leave "is this patient waiting" with two answers. The queue endpoint is
+therefore a read, and the only new thing about it is how narrow it is.
+
+`PLANNED` and `NO_SHOW` remain absent: still four states, still no appointment table. The future
+calendar ticket feeds this same check-in operation rather than a parallel one, which is why nothing
+about walk-in arrival is structurally conditional on there being no appointment.
+
+### Three capabilities where there used to be one authority
+
+| Authority | Capability | Reads clinical content? |
+|---|---|---|
+| register an arrival, read the waiting projection, cancel an arrival | **`visit.check_in`** *(new)* | **no** |
+| take a waiting patient, write a note, amend the reason, complete | `visit.document` | yes |
+| read a visit, its note history, its orders | `visit.read` | yes |
+
+`visit.check_in` was split out of `visit.document`; `CLINICIAN` gained it the same day, so no
+clinician's authority changed. **A holder of `visit.check_in` alone cannot read a visit it created
+itself** — creating a record is not a licence to read it, and that asymmetry is the whole reason the
+split exists.
+
+There is no `FRONT_DESK` role. A facility composes the job from these plus
+`patient.directory.read` / `patient.register`, and `billing.operate` stays independent (ADR-066).
+
+### `require_clinician` is now four capabilities, not six
+
+It was an any-of over every provider capability, including `patient.directory.read` and
+`patient.register` — so the question it actually asked was *"do you hold any provider capability at
+all"*, and a reception member who legitimately holds those two would have passed every gate behind it.
+It now asks for any of `visit.read` / `visit.document` / `order.manage` / `result.review`, and the
+patient-directory and registration routes ask for their own capabilities directly.
+
+**Twenty-one route gates** were retargeted from the any-of to the specific capability
+`exchange/capabilities.py` already documented for them. Nobody holding a role template was affected.
+**Roughly seventeen order/result read routes still use the narrowed any-of** — named here rather than
+left to be discovered, and recorded as remaining work in `PROJECT_STATE.md`.
+
+### Two projections over one table, and why
+
+`VisitRecord` carries the whole visit and is served behind `visit.read`. `WaitingArrivalRecord`
+carries six fields and is served behind `visit.check_in` **or** `visit.document`. They are separate
+types over separate queries, and both halves of that are load-bearing:
+
+- a **shared type** would leak the moment somebody added a field to it;
+- a **narrow type over a wide query** would leak the moment somebody reused the row.
+
+`list_waiting` therefore selects exactly six columns and `_to_waiting_arrival_response` assigns them
+one by one, with no spread and no `model_validate`. `test_fd_57_*` asserts the response's exact key
+set, and `test_fd_57b_*` stores a real reason first so the absence is a filter rather than an empty
+database.
+
+`checked_in_at` is `Visit.created_at` renamed at the boundary. A visit row is created by the check-in
+operation and by nothing else, so the two are the same moment for every row ever written — which is
+why no `checked_in_at` column exists, and why no backfill was needed.
+
+### Who checked the patient in
+
+The `visit_created` audit event's `actor_identity_id`, truthfully and for every historical row. No
+`checked_in_by` column was added: it would have been a second, weaker copy of an audit row, and for
+every pre-0038 visit it could only have been filled by guessing. 0034's audit CHECK constraint is
+untouched — **this ticket added no audit event type**.
+
+### One active visit per patient per provider
+
+`uq_exchange_visits_one_active_per_patient`, a **partial** unique index over
+`(provider_organization_id, patient_id) WHERE status IN ('CHECKED_IN','IN_PROGRESS')`. Partial
+because completed and cancelled history must stay unlimited, so a returning patient is never blocked.
+
+The index is the guarantee and the service's pre-read is only an optimisation: two reception workers
+submitting at the same instant both pass the read. The recovery path distinguishes the two conflicts
+that can land there — the same idempotency key (a replay: return the existing visit) and a different
+key for an already-active patient (`ActiveVisitAlreadyExists`, 409). Getting that wrong is a 500, and
+it *was* a 500 until the real-PostgreSQL qualification found it.
+
+### Where the arrival surface lives, and why it had to
+
+`Aujourd'hui` (`ClinicHomePage` → `ClinicArrivals`), not `Visites`. That placement is forced rather
+than chosen: `Visites` requires `visit.read` or `visit.document`, which a reception-only membership
+deliberately lacks, so a waiting list that lived only there would be invisible to the person who runs
+it. `Aujourd'hui` is the one surface a receptionist and a clinician both reach — and its order tiles
+are now fetched only when the caller holds `order.manage`, because otherwise a reception member's
+whole home screen would render an error state over a 403.
+
+**Nothing on that surface derives a waiting time, a priority or a triage order.** The server sends the
+recorded arrival time and no duration; the browser performs no arithmetic on it. `AGENTS.md`
+(2026-09-27) and §38 of `docs/NATIVE-OPERATING-PRODUCT.md` both forbid it, and it is recorded as an
+open decision in `PROJECT_STATE.md` rather than filled in.

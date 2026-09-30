@@ -22700,6 +22700,135 @@ reading as covered. Fixed, and `test_every_guarded_frontend_file_exists` now mak
 impossible (the Python half has had the equivalent check since day one; the frontend half never got
 one).
 
+
+### §59 — the negative controls, executed and reverted
+
+Each mutation was applied to the committed tree, the tests that claim to guard the violated invariant
+were run, and the file was restored with `git checkout --` and verified **byte-for-byte by
+`git hash-object`**. The working tree was clean afterwards.
+
+| # | Exact mutation | Invariant removed | What went red | Bad real-world outcome |
+|---|---|---|---|---|
+| **NC-FD-1** | the check-in gate becomes `authz.require_role(..., CLINICIAN)` instead of `_require_caps(..., VISIT_CHECK_IN)` | authority is a capability, not a job title | `fd_auth_3` (direct grant), `fd_auth_4` (same-token revocation), `fd_auth_5` (explicit DENY), `fd_auth_12` (ORG_ADMIN composition) — **4 failed** | a facility could not create a receptionist at all without inventing a job title, which is the combinatorial explosion ADR-067 removed |
+| **NC-FD-2** | `start()` drops `patient.provider_organization_id != provider_organization_id` | the tenant boundary on check-in | `fd_auth_6` — **1 failed** (a cross-org check-in returned **201**) | a guessed patient UUID from another clinic creates a visit in yours; one facility's patient appears in another's waiting room |
+| **NC-FD-3** | the waiting route returns `_to_visit_response` over `list_for_organization`, and its `response_model` and return annotation are removed so FastAPI cannot re-filter | the arrival projection's narrowness | `fd_57` and `fd_57b` — **2 failed**, and the response body literally contained `"reason_for_visit":"motif-confidentiel-xyz"` | every receptionist reads what every patient said about why they came |
+| **NC-FD-4** | `VisitCreateRequest` gains `clinician_identity_id` and the route writes it onto the visit | the treating clinician is server-derived | `may_not_name_the_treating_clinician` — **1 failed** (the 422 became a **201**) | a desk worker's request decides who the record says treated the patient — a false clinical record |
+| **NC-FD-5** | the partial unique index is removed from `models.py` **and** the service pre-read deleted | one active visit per patient | `second_arrival_for_a_waiting_patient` and `invariant_covers_a_started_visit` — **2 failed** | the same patient is in the waiting list twice; a clinician takes one row and the other is abandoned |
+| **NC-FD-6** | the `take` gate becomes `_require_caps(..., VISIT_DOCUMENT, VISIT_CHECK_IN)` | only clinical authority starts a consultation | `fd_auth_8` — **1 failed** (the 403 became a **200**) | reception starts consultations, and the desk worker becomes the clinician of record |
+| **NC-FD-7** | `_effective` memoizes per membership, so a grant or deny written afterwards is never seen | authority is read per request, not cached | `fd_auth_4`, `fd_auth_5`, `registration_is_separately_permissioned` — **3 failed** | revoking somebody's access does nothing until they sign out; a dismissed employee keeps working |
+| **NC-FD-8** | `ClinicArrivals` decides the check-in control from `activeProvider.roles.includes('CLINICIAN')` | no frontend authorization on a role name | the AST/regex guard's `test_no_navigation_or_capability_module_authorizes_on_a_role_name` — **1 failed**, naming `ClinicArrivals.tsx:41` | the screen stops following authority; a granted capability is invisible and a removed one still shown |
+
+**Two of these were redone, because the first attempt reddened for the wrong reason** — which is not a
+negative control but the exact "red for an unrelated cause" failure `AGENTS.md`'s evidence discipline
+names. Recording the first attempt as a pass would have been worse than skipping it:
+
+- **NC-FD-3, first attempt:** the injected helper raised `NameError`, so the projection never ran. Re-expressed as §59's literal instruction (*return the full Visit model*), which needs no new code and therefore cannot fail to compile. It then reddened on the leaked reason text.
+- **NC-FD-7, first attempt:** replacing the resolver with a role-template lookup broke the `world` fixture, so pytest reported **ERROR at setup** rather than a failed assertion about stale authority. Re-expressed as a genuine cache, which leaves the fixture working — so the failures are assertions.
+
+**NC-FD-8 reddened only the structural guard, not a behavioural test.** The AST guard does not cover
+`api.py` (legitimately allowlisted, since it owns the role endpoints), and the UI test file is not in
+the guarded list. The guard is therefore load-bearing here rather than belt-and-braces — the same
+honest limitation DHEALTH-LAB-BLOCKED-001 recorded for NC-BLOCK-8.
+
+**Not attempted, and why:** no mutation was made to an unused helper (§59's own prohibition), and no
+control was run against the PostgreSQL concurrency races by removing the row lock. The deterministic
+half — dropping the partial unique index — is covered by `test_the_database_itself_refuses_a_second_
+active_visit`; the *threaded* races use a `threading.Barrier`, which maximizes overlap but cannot
+guarantee the worst interleaving, so no deterministic claim is made for them either way.
+
+### The real-browser qualification (added after the first commit)
+
+`ui/e2e/native/12-front-desk.spec.ts` · `ui/e2e/native-front-desk.config.ts` ·
+`scripts/demo/qualify-front-desk.sh`. Real Chromium, real Caddy edge, real Keycloak 26.7.1, real
+Exchange adapter, real PostgreSQL 16.15. No token fabricated, no session injected. **9 of 9 phases
+green.**
+
+**The persona is `demo-clerk`, who holds `BILLING_CLERK` and nothing else.** There is no reception
+account in the demo baseline and none was added: §26 asks for a member who is *not* relying on a
+front-desk role, and a cashier handed the three reception capabilities through `Équipe et accès` is a
+stronger answer than a purpose-built persona. It also exercises §28's "one employee does reception and
+the till" for real rather than describing it.
+
+| Phase | What it establishes |
+|---|---|
+| FD-B1 | the cashier holds none of the three capabilities; `visits/waiting` is **403** and `Aujourd'hui` is not even in their navigation |
+| FD-B2 | an administrator grants all three **by clicking**, and `exchange_organization_role_assignments` still reads exactly `BILLING_CLERK` |
+| FD-B3 | the cashier checks a baseline patient in. The visit's `clinician_identity_id` is **NULL** and its `reason_for_visit` is **NULL**, read straight from PostgreSQL. The response's key set is asserted to be exactly the six arrival fields |
+| FD-B4 | a reload returns the same `visit_id` |
+| FD-B5 | a patient who does not exist → `Nouveau patient` → register → straight back to the arrival flow → checked in. **No second search** |
+| FD-B6 | the same cashier gets **403** on the visit detail, the visit list, `result-reviews` and `take`; and the waiting card offers **no `Ouvrir`** and no `Commencer la consultation` |
+| FD-B7 | a clinician clicks `Commencer la consultation`; **the same `visit_id`** becomes `IN_PROGRESS`, `clinician_identity_id` equals the *clinician's* identity and not the desk's, and exactly one active visit exists |
+| FD-B8 | note appended, visit detail shows it, visit completed — on a visit whose creator held no clinical authority — and it leaves the waiting projection |
+| FD-B9 | `Suivre le rôle` withdraws the grant: the capability is gone from `/me`, `visits/waiting` is 403 again, the role still reads `BILLING_CLERK`, **and billing still returns 200** |
+
+**What FD-B9 does not claim.** The same-token half of §26 (a token minted *before* the withdrawal
+refused on the next request) is proved exhaustively in
+`test_fd_auth_4_same_token_revocation_refuses_the_next_request` over HTTP, not here: a Playwright
+browser context cannot outlive its own test in this harness. The browser phase proves the
+administrator's click takes effect and that the role never moved. Stated rather than blurred.
+
+### A defect this suite introduced, found by running the whole regression, and fixed
+
+**The first version of the suite broke two of its siblings**, and the failure was silent in a way
+worth recording.
+
+`demo_seed reset` deliberately does **not** clear `exchange_patients` — the seed's own comment says a
+patient is "configuration a demo needs to exist" while visits are "what a demo produces". So the
+patient FD-B5 registers survived every reset. `PatientRepository.list_for_organization` orders by
+`created_at DESC`, and both `01-golden-journey` and `11-lab-blocked` select a patient with
+`getByRole('button', { name: /^Ouvrir/ }).first()`.
+
+Consequence: both suites silently prescribed for **this suite's synthetic patient**, then failed
+looking for a row naming the baseline one. The symptom ("no order row in `Ordres`") pointed nowhere
+near the cause, and the first read of the evidence — 0 orders in the database — was itself misleading,
+because a *later* run of the same suite had produced one.
+
+Fixed by making the suite restore what it creates. Four tables reference the patient and all four had
+to be found: `exchange_visit_notes` → `exchange_visits` → `exchange_patients`, plus
+`exchange_patient_references` and — the one a reasonable person misses —
+`exchange_patient_registration_requests`, the idempotency row registration writes. The first attempt
+deleted the reference successfully and then failed on the patient itself.
+
+**Verified, in this order and deliberately without a reset between the first two:**
+
+| Step | Result |
+|---|---|
+| purge the five leftover synthetic patients earlier runs left behind | patients back to **1** (the baseline) |
+| front-desk suite | **9 passed** |
+| residue check | patients **1**, visits **0**, capability overrides **0**, no synthetic patient left |
+| golden journey, **no reset in between** | **12 passed** — the decisive proof the pollution is gone |
+| lab-blocked, after a reset | **13 passed** |
+
+Naming the patient to sort later would not have worked: the ordering is by creation time.
+
+### §61 — the existing Native browser suites, on the stack carrying this ticket
+
+| Suite | Result |
+|---|---|
+| `01-golden-journey` + `02-authorization` (diagnostic golden journey) | **12 passed** |
+| `08-clinic-visit` (Visits) | **9 passed** |
+| `09-billing` | **6 passed** |
+| `10-capabilities` (access/capabilities) | **6 passed** |
+| `07-access-lifecycle` | **16 passed** |
+| `05-security-edge` + `06-security-identity` | **31 passed** |
+| `11-lab-blocked` | **13 passed** |
+| `12-front-desk` (new) | **9 passed** |
+
+`03-recovery-source` / `04-recovery-proof` were **not run**: they qualify a just-restored deployment
+and need their own restore drill, which this ticket did not perform and does not claim.
+
+**The adapter image and the UI image were rebuilt from this ticket's source** and the running adapter
+reports `0038_visit_check_in (head)` — so these are runs against the new code, not the old image.
+
+### Environment notes, for whoever runs this next
+
+- The Docker daemon in this environment restarts every container roughly every fifteen minutes. One
+  golden-journey diagnosis was confounded by a mid-run `psycopg.errors.AdminShutdown: terminating
+  connection due to administrator command`; the qualification scripts' existing edge-readiness loop
+  handles the ordinary case.
+- Playwright's browsers are installed for the **normal** WSL user, not `root`, while `docker` needs
+  `sudo`. The suites therefore run as the normal user with `SEC_DOCKER="sudo -n docker"`.
+
 ### Still open
 
 **D-3** (specimen entity) · **D-4** (Lab Reception identity attributes) · **D-6** (walk-in laboratory

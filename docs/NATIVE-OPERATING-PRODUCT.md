@@ -41,7 +41,7 @@ Each is tied to a concrete operating failure, not to what comparable products co
 | # | Blocker | The concrete failure without it |
 |---|---|---|
 | **P0-1** | **Visits / Encounters** (§11) | A returning patient's record is a list of lab orders with no clinical thread. Nothing records why they came, what was found, or what to do next. A clinician cannot answer "what happened last time?" |
-| **P0-2** | **Arrival and a waiting list** (§9, §14) | Nobody can tell who is in the waiting room. The clinician has no queue and must be told verbally who is next. The clinic keeps a paper register alongside DHealth — double entry, and Law 2 broken. |
+| ~~**P0-2**~~ **CLOSED 2026-09-30, ADR-069** | **Arrival and a waiting list** (§9, §14) | Nobody can tell who is in the waiting room. The clinician has no queue and must be told verbally who is next. The clinic keeps a paper register alongside DHealth — double entry, and Law 2 broken. |
 | **P0-3** | **Minimal billing: invoice, payment, receipt** (§18) | A private clinic or laboratory that cannot issue a receipt cannot take money. This is not a convenience; it is the transaction the facility exists on. DHealth has **no** invoice, payment or receipt concept at all. |
 | **P0-4** | **An honest "cannot proceed" state on an accepted order** (§16) | A haemolysed tube today has nowhere to be recorded. The order stays `ACCEPTED`/`IN_PROGRESS` while nothing happens, the queue entry lies, and nobody monitors it. Rejecting the whole order is the wrong tool for one bad tube. |
 | **P0-5** | **Patient-directory migration** (§20) | A clinic with four thousand existing patients cannot begin. Re-registering each one at the desk on arrival is the only path, which means months of degraded operation. |
@@ -223,7 +223,7 @@ Verified by reading code during this ticket. Evidence levels:
 | Clinician review with follow-up disposition | BUILT + RUNTIME-QUALIFIED | `DoctorReview`, version-scoped |
 | Patient-access handoff: issue, QR, printable sheet, revoke | BUILT + RUNTIME-QUALIFIED (print not paper-tested) | Order-scoped opaque grant |
 | **Visits / encounters** | **NOT BUILT** | No `Visit`, `Encounter` or `Appointment` model exists — verified |
-| **Arrival / check-in / waiting list** | **NOT BUILT** | — |
+| **Arrival / check-in / waiting list** | ~~**NOT BUILT**~~ **BUILT + RUNTIME-QUALIFIED 2026-09-30** (ADR-069, migration `0038_visit_check_in`) | `visit.check_in` + the `visits/waiting` projection. `CHECKED_IN` is the waiting fact; no new state. **Waiting *duration* is deliberately not built** — §38 |
 | **Appointments / calendar** | **NOT BUILT** | — |
 | **Billing: invoice, payment, receipt** | **NOT BUILT** | No `Invoice`, `Payment`, `Receipt`, `Charge` or `Service` model exists — verified |
 
@@ -586,7 +586,7 @@ Five states plus `CANCELLED`. Each earns its place:
 | State | Why it is necessary | Who may enter it |
 |---|---|---|
 | `PLANNED` | A booked appointment that has not arrived. Only exists with a calendar; omit until §10 ships. | Front Desk *(D-1)* |
-| `CHECKED_IN` | **The waiting list is this state.** P0-2 exists because of it. | Front Desk *(D-1)*; clinician |
+| `CHECKED_IN` | **The waiting list is this state.** P0-2 exists because of it, and was closed by it (ADR-069). | `visit.check_in`; clinician |
 | `IN_PROGRESS` | Distinguishes "waiting" from "being seen" — the difference the waiting room cares about. | Clinician |
 | `COMPLETED` | Terminal. The clinician says so; nothing auto-completes. | Clinician |
 | `NO_SHOW` | Operationally real and needed for `PLANNED` to be honest. | Front Desk *(D-1)* |
@@ -1277,7 +1277,7 @@ Only where different answers materially change architecture or workflow.
 
 | # | Decision | Kind | Why it blocks |
 |---|---|---|---|
-| **D-1** | **Which new backend authority does Front Desk need**, and does Billing share it or need its own? Introducing it changes what guards patient-directory reads. **Billing portion RESOLVED 2026-09-28, ADR-066**: Billing needs its own — `BILLING_CLERK`, valid at PROVIDER and LAB, asked for as a *capability* rather than a role name. The **Front Desk portion remains open** and ADR-066 says so explicitly. | **BACKEND AUTHORITY DECISION REQUIRED** (Front Desk portion only) | Still blocks Front Desk and Reception. **No longer blocks Billing.** |
+| **D-1** | ~~**Which new backend authority does Front Desk need**, and does Billing share it or need its own?~~ **RESOLVED IN FULL.** Billing portion 2026-09-28 (ADR-066): its own — `BILLING_CLERK`, asked for as a *capability* rather than a role name. **Front Desk portion RESOLVED 2026-09-30, ADR-069**: three independently grantable capabilities and **no role** — `patient.directory.read`, `patient.register`, and the new **`visit.check_in`**. There is no `FRONT_DESK` role and nothing gates on one; `ORG_ADMIN` + a direct `visit.check_in` grant runs reception with no role change, which is how the browser qualification proves it. `visit.check_in` carries **no clinical read**: a holder cannot open a visit, its note history or its stated reason, even one they created. The answer to "does introducing it change what guards patient-directory reads" is yes, and in the safe direction — `require_clinician` narrowed from six capabilities to four, and the patient-directory routes now ask for `patient.directory.read` directly. | **RESOLVED** (ADR-066 + ADR-069) | **No longer blocks anything.** |
 | **D-2a** | **Who pays whom in a routed order** — lab bills patient, lab bills clinic, or clinic bills patient and settles with lab. **Interim answer 2026-09-28, ADR-066 §3**: each organization invoices only what it actually performed, enforced server-side at the invoice line. **Still open** for commercial arrangements over routed external laboratory work — settlement, commissions, referral fees, revenue sharing, pass-through billing, markup and inter-facility AP/AR are all deliberately unbuilt. | Product / commercial | No longer blocks the billing ticket. Blocks any inter-facility commercial model. |
 | **D-2b** | **What happens when payment is incomplete.** If anyone proposes unpaid → no release, that is clinical policy. | **HUMAN DECISION REQUIRED / CLINICAL POLICY** | Must never be encoded casually. Default until decided: billing never gates clinical release. |
 | **D-3** | **Is a first-class specimen entity required for Launch-1?** ~~(The order-level `BLOCKED` state, P0-4, is needed regardless.)~~ **P0-4 is now BUILT (2026-09-29, ADR-068) and D-3 is unaffected by it** — order-level blocking deliberately models no specimen, so this question is exactly as open as it was. | Product, needs a laboratory participant | Determines whether the lab ticket is small or large. |
@@ -1330,10 +1330,10 @@ Status: **BUILT** · **PARTIAL** · **NOT BUILT**. Every row names the data it m
 
 | Screen | Roles | Primary task | Minimum data | Primary action | Not shown | Backend | Status |
 |---|---|---|---|---|---|---|---|
-| Aujourd'hui (clinic) | Clinician; FD *(D-1)* | Answer "what needs me now" | Waiting visits, own in-progress, reviews owed | Open the next item | Other clinicians' notes; totals | Visits + review queue | **PARTIAL** — exists, lacks visits |
-| Liste d'attente | FD *(D-1)*; Clinician | See who is waiting | Name, arrival time, reason, waited-for | Take the visit | Clinical note; results | Visits | **NOT BUILT** |
-| Patients (search) | Clinician; FD *(D-1)* | Find the right patient | Name, DOB, last visit date | Open patient | Result values; notes | `Patient` search | **BUILT** |
-| Enregistrer un patient | Clinician; FD *(D-1)* | Register a new patient | **Name only** (law 7) | Create | everything else | `Patient` create | **BUILT** (form not browser-exercised) |
+| Aujourd'hui (clinic) | `visit.check_in` and/or `visit.document`; order tiles need `order.manage` | Answer "what needs me now" | Waiting arrivals, own in-progress, reviews owed | Open the next item | Other clinicians' notes; totals | Visits + review queue | **BUILT 2026-09-30** (ADR-069) — the arrival and waiting surface lives here |
+| Liste d'attente | `visit.check_in` and/or `visit.document` | See who is waiting | Name, DOB, arrival time, coarse status | Take the visit | Clinical note; results; **the stated reason**; ~~waited-for~~ | Visits | **BUILT 2026-09-30** as part of `Aujourd'hui`, not a separate screen (ADR-069 §4). **Two deliberate narrowings of this row:** the *reason* is withheld though §7 permits it (law 9, minimum necessary), and **"waited-for" is not built at all** — see §38 and the `PROJECT_STATE.md` blocker |
+| Patients (search) | `patient.directory.read` | Find the right patient | Name, DOB, last visit date | Open patient | Result values; notes | `Patient` search | **BUILT** |
+| Enregistrer un patient | `patient.register` | Register a new patient | **Name only** (law 7) | Create | everything else | `Patient` create | **BUILT**; browser-exercised 2026-09-30 by ADR-069's FD-B5, which registers a patient and checks them in without a second search |
 | Dossier patient | Clinician | See the patient's history | Identity, visits, orders, released results | Start a visit | Other facilities' data | Visits + orders + results | **PARTIAL** |
 | Visite (open) | Clinician | Document this encounter | Reason, note, orders, results | Complete the visit | Billing internals | Visits | **NOT BUILT** |
 | Nouvel ordre | Clinician | Order diagnostics | Catalog, patient, target lab | Commit the order | Prices (Native path) | Order intent → order | **BUILT** |
@@ -1646,7 +1646,7 @@ never to what mature EMRs contain.
 | # | Gap | Operating failure | Facility |
 |---|---|---|---|
 | P0-1 | Visits / encounters | No record of why a patient came or what happened; no clinical thread | Clinic |
-| P0-2 | Arrival + waiting list | Nobody knows who is waiting; a paper register runs alongside DHealth (Law 2) | Clinic |
+| ~~P0-2~~ **CLOSED 2026-09-30** | Arrival + waiting list | ~~Nobody knows who is waiting; a paper register runs alongside DHealth (Law 2)~~ Built and runtime-qualified (ADR-069). **Human usability still unqualified** — no receptionist has used it, so "no paper register" is not yet a measured claim | Clinic |
 | P0-3 | Invoice, payment, receipt | Cannot take money or prove payment | Both |
 | ~~P0-4~~ | ~~Honest `BLOCKED` state on an accepted order~~ **DONE 2026-09-29, ADR-068** | ~~A queue entry claims progress that is not happening; nobody owns it~~ | Lab |
 | P0-5 | Patient-directory import | A facility with an existing patient list cannot begin | Both |
@@ -1728,7 +1728,7 @@ Eight tickets. Each is independently useful and testable; none is a rewrite.
 |---|---|---|---|
 | 1 | ~~**`DHEALTH-CLINIC-VISIT-001`**~~ — Visits/Encounters, clinician-only | Patient directory (built) | **DONE** 2026-09-27, ADR-065 |
 | 2 | ~~**`DHEALTH-LAB-BLOCKED-001`**~~ — honest cannot-proceed state | Lab workflow (built) | **DONE** 2026-09-29, ADR-068 |
-| 3 | **`DHEALTH-CLINIC-FRONTDESK-001`** — arrival, waiting list, Front Desk role | Ticket 1 | **D-1** (Front Desk portion) |
+| ~~3~~ **DONE 2026-09-30** | **`DHEALTH-FRONT-DESK-001`** — arrival, waiting list, ~~Front Desk role~~ **and deliberately no Front Desk role**: three independently grantable capabilities instead (ADR-069) | Ticket 1 | ~~**D-1** (Front Desk portion)~~ **resolved by this ticket** |
 | 4 | ~~**`DHEALTH-BILLING-001`**~~ — services, invoice, payment, receipt | Ticket 1 | **DONE** 2026-09-28, ADR-066 |
 | 5 | **`DHEALTH-MIGRATE-PATIENTS-001`** — CSV/XLSX directory import | Patient directory | No |
 | 6 | **`DHEALTH-LAB-RECEPTION-001`** — lab reception; specimen entity if D-3 says so | Ticket 2 | **D-1**, **D-3**, **D-4** |
@@ -1954,7 +1954,7 @@ a small additive change.
 | **`PLANNED` / `NO_SHOW` / appointments.** | Ticket 7. See departure 1. |
 | **Who may register an arrival.** | **D-1**, unchanged and still not blocking. Today it needs `CLINICIAN` because that is the only clinical authority the backend has. `canRunVisits` in `workspaceCapabilities.ts` is the single place a front-desk answer will land, and the state model does not change when it does. |
 | **Any structured clinical field** — vitals, SOAP, examination template, problem list, diagnosis code. | Clinical content, requiring the clinical lead's sign-off (`AGENTS.md`). **D-5** for coding specifically. The free-text note is unaffected. |
-| **Waiting time, priority, triage order.** | Not a gap to be filled: a waiting time computed in a browser from two clocks is an operational signal DHealth must not produce, and triage is an explicit non-goal (§29). |
+| **Waiting time, priority, triage order.** | Not a gap to be filled: a waiting time computed in a browser from two clocks is an operational signal DHealth must not produce, and triage is an explicit non-goal (§29). **[Tested against 2026-09-30, DHEALTH-FRONT-DESK-001.** That ticket's brief asked for a waiting duration explicitly, and §30's own screen inventory listed "waited-for". This rule won: the duration is **not built**, the recorded arrival time is shown instead, the subtraction is performed nowhere on the server or in the browser, and two tests assert the absence so a later contributor who reads the brief and helps is stopped by a failing test rather than by review. Raised as `Human Decision Required: Yes` in `PROJECT_STATE.md` with four options and no code written for any of them. This row is no longer only a principle — it has refused a real request.]** |
 
 ### What this does not make true
 
@@ -2125,3 +2125,100 @@ Visits, patient-directory or check-in authorization code. That was the point.
 
 **Pilot-ready is still not clinically live.** No staff member's access changed, and nothing here is
 authorization to use DHealth on a real patient.
+
+---
+
+## 41. `DHEALTH-FRONT-DESK-001` as delivered (2026-09-30)
+
+**ADR-069.** Migration `0038_visit_check_in`, `visit.check_in`, the arrival projection and its
+endpoint, twenty-one route gates retargeted, the arrival surface on `Aujourd'hui`. **P0-2 is closed
+and D-1 is resolved in full.** What follows is the delta between this specification's own brief and
+what was actually built — the departures first, because they are the part a reader needs.
+
+### Departures from this specification's own text, each deliberate
+
+**1. There is no Front Desk *role*, and §6's matrix columns are wrong about that.** §7's role
+visibility matrix has an `FD (D-1)` column and §30's screen inventory says `FD (D-1)` for five rows.
+The answer turned out not to be a role at all: it is three independently grantable capabilities
+(`patient.directory.read`, `patient.register`, `visit.check_in`), and §6's own §319 heading — *"Why
+Front Desk cannot be a UI persona"* — was closer to the truth than the matrix that follows it. The
+matrix rows are updated to name capabilities. **Nothing gates on a job title**, and the browser
+qualification proves it by composing a *cashier* into a receptionist with three grants and the role
+provably untouched.
+
+**2. `Liste d'attente` is not a separate screen.** §30 lists it as its own row. It ships as part of
+`Aujourd'hui`, and that is forced rather than chosen: `Visites` requires `visit.read` or
+`visit.document`, which a reception-only membership deliberately lacks, so a waiting list living there
+would be invisible to the person who runs it. `Aujourd'hui` is the one surface a receptionist and a
+clinician both reach.
+
+**3. Reception does not see the stated reason, though §7 permits it.** §7's minimum-data rules say
+*"Front Desk sees the visit's reason but not its note"*. The arrival projection omits the reason too.
+That is **narrower than this specification's ceiling**, not a contradiction of it: law 9 is minimum
+necessary, a waiting room has no operational need for what the patient said about why they came, and
+§7's own sentence ends *"If a facility disagrees, that is a policy decision, not a default."* This
+ticket declines to make it the default. Re-adding it is a one-field change to
+`WaitingArrivalResponse` plus the contract test, and a decision.
+
+**4. Reception is not asked for a reason at all.** Following from 3: `reason_for_visit` became
+nullable and the arrival form does not offer the field. A chief complaint typed at a reception desk is
+clinical documentation under another name, which `AGENTS.md` puts behind the clinical lead's sign-off.
+A clinician still records one, and still may correct it.
+
+**5. 🛑 "Waited-for" is NOT built.** §30's `Liste d'attente` row lists it as minimum data and §25
+lists "longest wait" as a reporting metric. §38 of this same document forbids it, `AGENTS.md`
+(2026-09-27) forbids it, and both are more recent and more specific. The recorded arrival time is
+shown; the subtraction is performed nowhere. **Raised as `Human Decision Required: Yes`** in
+`PROJECT_STATE.md` with four options and no code written for any of them. Two tests assert the
+absence, so the rule is pinned rather than merely observed. §38's row is annotated to record that it
+has now refused a real request rather than only stated a principle.
+
+**6. §49's "waiting duration not colour-only" is moot.** There is no duration to colour. Status
+(`En attente` / `En consultation`) is rendered by `StatusBadge`, which pairs tone with a text label,
+so the one distinction this surface draws is never colour-only.
+
+### What §12's state table gained, and what it did not
+
+Nothing. Still four states. `CHECKED_IN` **is** the waiting fact, as §12 already said, and this ticket
+added no `WAITING` status — a second status meaning the identical thing would make two state machines
+describe one patient. `PLANNED` and `NO_SHOW` remain absent with no appointment table; the future
+calendar ticket feeds this *same* check-in operation.
+
+### The authority boundary, as qualified
+
+| A member holding… | can | cannot |
+|---|---|---|
+| `visit.check_in` only | register an arrival, read the waiting projection, cancel an arrival before clinical contact | open a visit, read a note, read the stated reason, start a consultation, complete, document, order, review, bill, touch the laboratory |
+| `+ patient.directory.read` | find the right patient | — |
+| `+ patient.register` | create a patient record | — |
+| `+ billing.operate` | run the till as well (§28's one employee, both jobs) | — |
+| `visit.document` | take a waiting patient, note, amend the reason, complete | — |
+
+**A holder of `visit.check_in` cannot read a visit it created itself.** Creating a record is not a
+licence to read it, and that asymmetry is the point of the split rather than an artefact of it.
+
+### One correction this ticket owes §5's inventory
+
+§5 and §7 both implied that "clinician authority" was one thing. It was: `require_clinician` was an
+any-of over every provider capability, **including the two a receptionist legitimately holds**. So
+until 2026-09-30 a reception member would have passed every gate behind it — order creation, doctor
+review, the whole visit surface. That is now four capabilities rather than six, twenty-one route gates
+name the capability they need, and **roughly seventeen order/result read routes still use the narrowed
+any-of** — narrower than before, named here rather than left to be discovered, and recorded as
+remaining work.
+
+### What this does not make true
+
+**Human usability is not claimed.** §32's usability qualification has not been run for this surface:
+no receptionist and no clinician has used it, no timing has been measured against the paper register
+it is meant to replace, and product law 3 ("faster than what it replaces") therefore remains a
+**validated target, not a current claim**. P0-2's own problem statement — *"the clinic keeps a paper
+register alongside DHealth"* — is addressed in software and **not yet demonstrated to be addressed in
+a clinic**.
+
+What *is* demonstrated is that the workflow completes end to end in a real browser against a real
+stack, performed by a member with no clinical role and no role named for a front desk.
+
+**Pilot-ready is still not clinically live.** This adds a place to record that somebody walked in. It
+adds no clinical sign-off on any order set or structured field, and nothing here is authorization to
+use DHealth on a real patient.

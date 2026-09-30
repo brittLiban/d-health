@@ -84,3 +84,8 @@ native-capabilities-results.json
 # by scripts/demo/qualify-blocked.sh. Evidence of a run, not part of the source -- same treatment
 # as its seven siblings above.
 native-blocked-results.json
+
+# DHEALTH-FRONT-DESK-001: the front-desk arrival qualification report, written at the repository root
+# by scripts/demo/qualify-front-desk.sh. Evidence of a run, not part of the source -- same treatment
+# as its eight siblings above.
+native-front-desk-results.json
