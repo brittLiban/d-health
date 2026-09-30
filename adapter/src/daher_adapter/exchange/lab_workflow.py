@@ -235,10 +235,19 @@ class LabWorkflowRepository:
         limit: int = 50,
         status_filter: LabOrderStatus | None = None,
     ) -> list[LabWorkflowOrderRecord]:
-        """Bounded, deterministically-ordered work-queue listing: most-recently-updated first
-        (``LabOrder.updated_at`` carries ``onupdate=utc_now``, so every status transition already
-        reliably advances it -- no extra bookkeeping column needed), order UUID as a stable
-        tie-break for two orders updated in the same instant.
+        """Bounded, deterministically-ordered work-queue listing, with **two sort orders**.
+
+        ``status=SELECTED`` -- the incoming/intake queue -- sorts **oldest-routed-first** by
+        ``LabSelection.selected_at``, order UUID as the stable tie-break. Every other view sorts
+        most-recently-updated first (``LabOrder.updated_at`` carries ``onupdate=utc_now``, so every
+        status transition already reliably advances it -- no extra bookkeeping column needed), order
+        UUID as a stable tie-break for two orders updated in the same instant.
+
+        **[Changed 2026-10-01, DHEALTH-LAB-RECEPTION-001.** The incoming half used to sort
+        newest-first with everything else, which buried the order that had been waiting longest --
+        see the inline comment at the ``order_by`` for why a backlog and a review list want opposite
+        orders, and why ``selected_at`` is the only timestamp that truthfully means "when this
+        became this laboratory's work".]**
 
         DH-EX-011: collection state is folded into this same query via ``outerjoin`` -- never a
         second per-row query -- so exposing ``collection_recorded_at`` here introduces zero N+1
@@ -275,7 +284,37 @@ class LabWorkflowRepository:
             )
             if status_filter is not None:
                 query = query.where(LabOrder.status == status_filter.value)
-            query = query.order_by(LabOrder.updated_at.desc(), LabOrder.id.desc()).limit(limit)
+            # DHEALTH-LAB-RECEPTION-001: the **incoming** queue sorts oldest-routed-first; every
+            # other view keeps `updated_at DESC`. Two sort orders in one method, deliberately, and
+            # the asymmetry is the point rather than an inconsistency:
+            #
+            # * `SELECTED` is the only *actionable backlog* this laboratory holds -- work routed to
+            #   it that nobody has yet accepted or declined. Newest-first buries the order that has
+            #   been waiting longest underneath everything that arrived since, which is precisely
+            #   how a routed order gets forgotten. Oldest-first is what a queue of owed work means.
+            # * Every other filter is a *review* view -- `Terminés`, `Refusés`, `En cours`,
+            #   `Bloqués` -- where the question is "what changed recently", and `updated_at DESC`
+            #   answers it correctly. Reversing those would be a regression, so they are untouched.
+            #
+            # **`selected_at`, not `updated_at`, and not `created_at`.** `LabSelection.selected_at`
+            # is the routing fact: the instant this order became *this* laboratory's work. It is
+            # written once (`default=utc_now`, no `onupdate`) on a row whose `lab_order_id` is
+            # `unique=True`, so no later event rewrites it and no reroute can exist to move it.
+            # `updated_at` carries `onupdate=utc_now` and advances on every mutation, so ordering a
+            # backlog by it would reshuffle the queue for reasons unrelated to how long the work has
+            # been owed. `LabOrder.created_at` is when the *clinic* raised the order, which is a
+            # different fact and is not when this laboratory became responsible for it.
+            #
+            # No duration is computed from it, here or anywhere: `AGENTS.md` (2026-09-27) and
+            # `docs/NATIVE-OPERATING-PRODUCT.md` §38 forbid deriving a waiting time from timestamps
+            # without the clinical lead's sign-off, and DHEALTH-FRONT-DESK-001 refused the same
+            # thing on the clinic side. Ordering *by* a recorded instant is not deriving a number
+            # from it.
+            if status_filter is LabOrderStatus.SELECTED:
+                query = query.order_by(LabSelection.selected_at.asc(), LabOrder.id.asc())
+            else:
+                query = query.order_by(LabOrder.updated_at.desc(), LabOrder.id.desc())
+            query = query.limit(limit)
             rows = session.execute(query).all()
             return [
                 _to_record(order, selection, collection, block)
