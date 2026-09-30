@@ -16,7 +16,7 @@ import { waitForEdge } from '../support/edgeReadiness'
  * ── The question this file answers ──
  *
  * Not "does `visit.check_in` gate the endpoint" — `test_dhealthfrontdesk001_arrival.py` answers that
- * in 43 tests, and the PostgreSQL qualification answers the concurrency half in 11 more. This file
+ * in 44 tests, and the PostgreSQL qualification answers the concurrency half in 11 more. This file
  * answers the thing only a browser can: **can a facility worker who holds no clinical role, and no
  * role named for a front desk, actually walk a patient from the door into a clinician's
  * consultation — and is that same person genuinely unable to reach the clinical record?**

@@ -59,7 +59,7 @@ DHealth must not produce even when arithmetic produced it. The recorded arrival 
 subtraction happens nowhere, and two tests assert its absence. Recorded in `PROJECT_STATE.md` as
 **`Human Decision Required: Yes`** with four options and no code written for any of them.
 
-**Evidence actually executed:** 43 new backend tests; the full adapter suite **1985 passed, 1
+**Evidence actually executed:** 44 new backend tests; the full adapter suite **1986 passed, 1
 skipped**; 11 new real-PostgreSQL-16.15 concurrency and migration tests; the existing visit
 PostgreSQL qualification re-run green on the post-0038 schema; the full `0001 → 0038 → downgrade →
 0038` cycle against real PostgreSQL with **both refusal paths observed**; **9 of 9 browser phases

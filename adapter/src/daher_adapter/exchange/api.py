@@ -5451,8 +5451,9 @@ def build_exchange_router(
 
     # -- DHEALTH-CLINIC-VISIT-001: the native clinic visit ----------------------------------------
     #
-    # **Ten routes since DHEALTH-FRONT-DESK-001/ADR-069** (was nine): seven mutations and three
-    # reads, plus the narrow waiting projection. Every one of them calls its gate as its first
+    # **Ten routes since DHEALTH-FRONT-DESK-001/ADR-069** (was nine): six mutations and four
+    # reads, the fourth read being the narrow waiting projection. Every one calls its gate as
+    # its first
     # statement, before any lookup, so a caller with no claim on this organization learns nothing
     # about whether a visit or a patient id is real (the same ordering `list_patient_orders`
     # documents above). No gate here admits a platform administrator: a platform realm role is for

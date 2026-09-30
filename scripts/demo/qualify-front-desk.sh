@@ -7,7 +7,7 @@
 # into a clinician's consultation** -- and is that same person genuinely unable to read the clinical
 # record afterwards?
 #
-# `test_dhealthfrontdesk001_arrival.py` proves every rule the workflow has (43 tests) and the
+# `test_dhealthfrontdesk001_arrival.py` proves every rule the workflow has (44 tests) and the
 # PostgreSQL qualification proves the concurrency and migration halves (11 more). Neither can prove
 # that a receptionist can reach any of it through a real browser against real Keycloak. That is this
 # file.
@@ -23,20 +23,19 @@
 #   scripts/demo/qualify-front-desk.sh    # run the front-desk arrival qualification
 #   scripts/demo/reset.sh                 # restore the baseline before running it again
 #
-# ── This suite cannot clean up after itself, and that is by design ──
+# ── This suite restores everything it creates, and that is not optional ──
 #
-# Every foreign key pointing at a visit is `RESTRICT`, deliberately: a completed consultation is not
-# erasable, and no delete endpoint exists. So this suite leaves real visits, notes and a registered
-# synthetic patient in the demo database. scripts/demo/reset.sh clears them as workflow state
-# (`demo_seed._WORKFLOW_TABLES`) -- that is the supported way back to the baseline.
+# The spec's own afterAll removes its capability overrides, its visits, and the patient FD-B5
+# registers. The patient is the one that matters and the least obvious: `demo_seed reset`
+# deliberately keeps `exchange_patients` as baseline, the patient list is ordered newest-first, and
+# both 01-golden-journey and 11-lab-blocked select a patient with `.first()`. A patient left behind
+# here silently redirects those suites onto it, and they then fail looking for the baseline patient --
+# which is exactly how it was found, by running the whole browser regression after this suite.
 #
-# It *does* clean up the capability overrides it grants, in the spec's own beforeAll and afterAll: an
-# arrival authority left behind would make the next run's FD-B1 find the capability already held and
-# fail with a message about the wrong thing.
-#
-# FD-B3 asserts the waiting queue is empty before it checks anybody in, so a re-run without a reset
-# fails there -- correctly, and loudly, rather than quietly passing against leftover state. Patient
-# and note text are made unique per run for the same reason.
+# FD-B3 additionally asserts the waiting queue is empty before it checks anybody in, so a run against
+# state an aborted earlier run left behind fails there -- correctly, and loudly, rather than quietly
+# passing. scripts/demo/reset.sh is still the supported way back to a known baseline, and patient and
+# note text are unique per run so a polluted database yields unambiguous selectors.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

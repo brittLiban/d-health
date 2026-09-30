@@ -8,8 +8,9 @@ product and a clinic that could actually stop using its current software, and th
 narrowest thing that closes it.
 
 Six operations, and deliberately only six: start a visit, take it, append a note revision, amend the
-stated reason, complete it, cancel it. Reads are three: the organization's worklist, one patient's
-visit history, one visit with its notes.
+stated reason, complete it, cancel it. Reads are **four** since ADR-069: the organization's
+worklist, one patient's visit history, one visit with its notes, and the narrow arrival
+projection (`list_waiting`) that carries no clinical field at all.
 
 ── Four states, not five ──
 

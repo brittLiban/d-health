@@ -22641,7 +22641,8 @@ clinician handoff are complete without it.
 
 | Check | Result |
 |---|---|
-| `tests/test_dhealthfrontdesk001_arrival.py` (new) | **43 passed** |
+| `tests/test_dhealthfrontdesk001_arrival.py` (new) | **44 passed** |
+| **Whole adapter suite** (`pytest tests/ --ignore=tests/integration`) | **1986 passed, 1 skipped** in 18m04s. Run against `0cc9aa1`; the two commits since are docstring and documentation only |
 | `tests/test_dhealthvisit001_clinic_visits.py` (existing, unchanged) | **63 passed** |
 | Capability / access / matrix / staff-access / migration-hygiene suites | **159 passed, 1 skipped** |
 | Real PostgreSQL 16.15 qualification (new, `DHFD_PG_*`) | **11 passed** |
@@ -22865,6 +22866,17 @@ and removed rather than left in: the wizard reached from `Patients` deliberately
 
 **The two recovery browser suites were not run.** `03-recovery-source` / `04-recovery-proof` qualify a
 just-restored deployment and require a restore drill this ticket did not perform.
+
+**The frontend suite reports "1 error" alongside 0 test failures, and it is the catalogued flake.**
+`[vitest-pool]: Failed to start forks worker … Timeout waiting for worker to respond` — a worker that
+never starts, not a failing assertion. Re-running the same file paired differently passes. Reported as
+"0 failed, 1 unhandled worker-start error" rather than as silence, and rather than as a pass.
+
+**The browser evidence was re-gathered after the design-token fix.** The first nine-phase run used a
+`daher-ui` image built before `ClinicArrivals.module.css` moved from `var(--x, fallback)` to the real
+tokens. That change is functionally inert — the fallbacks resolved to the same colours — but both
+images were rebuilt from the final source and the suite re-run rather than reasoned about: **9 of 9
+again, residue still zero, running adapter still reporting `0038_visit_check_in (head)`.**
 
 **Nothing here is human-qualified.** No receptionist and no clinician has used the arrival surface. No
 timing was measured against the paper register P0-2 names. Product law 3 remains a validated target.
