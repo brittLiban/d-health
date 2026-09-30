@@ -20,9 +20,19 @@ nothing is decoration -- §12's own words about the states it rejected.
 
 ── Who may act, and the one thing that is refused for a different reason ──
 
-**Authority is organization-scoped and role-scoped, exactly like every other clinical operation in
-this package.** Any ACTIVE ``CLINICIAN`` of the provider organization may act on that organization's
-visits. This is not a new authority concept and deliberately not a per-row ownership model: no such
+**[Superseded in part, 2026-09-30, DHEALTH-FRONT-DESK-001/ADR-069.** Authority is now
+capability-scoped, not role-scoped, and it is no longer one authority. Registering an arrival is
+``visit.check_in``; taking a waiting patient, writing a note, amending the reason and completing are
+``visit.document``; reading a visit and its notes is ``visit.read``; cancelling an arrival is either
+of the first two. A person may hold ``visit.check_in`` alone, put patients into the waiting list,
+and be refused every clinical operation and every clinical read in this module -- which is the point
+of the split. The paragraph below is otherwise unchanged and still governs: what follows is about
+*which* holder of a clinical capability may act on *which* visit, and the answer is still "any of
+them, in their own organization".]**
+
+**Authority is organization-scoped, exactly like every other clinical operation in this package.**
+Any ACTIVE member with the relevant capability at the provider organization may act on that
+organization's visits. This is deliberately not a per-row ownership model: no such
 model exists anywhere in this codebase (any clinician may read any patient in their organization and
 order for them -- ``exchange/api.py``'s patient directory and order endpoints), and inventing one
 here would be the "obviously should" instinct ``AGENTS.md`` names as the failure mode. A real clinic
@@ -158,6 +168,23 @@ class VisitCannotReceiveOrder(RuntimeError):
     exactly the kind of identity guesswork ADR-051 forbids."""
 
 
+class ActiveVisitAlreadyExists(RuntimeError):
+    """This patient already has an active visit (``CHECKED_IN`` or ``IN_PROGRESS``) at this provider
+    organization. Maps to HTTP 409.
+
+    **Distinct from ``VisitIdempotencyKeyConflict``, and the difference is the whole reason both
+    exist.** A replayed idempotency key is the *same* arrival arriving twice, and the right answer
+    is
+    to hand back the visit that already exists. A *different* key for a patient who is already
+    waiting is a *different* arrival for somebody already in the building -- two reception workers
+    checking the same person in, or one worker who did not see that a colleague already had.
+    Returning the existing visit there would silently tell the second worker their action succeeded,
+    and the honest answer is that this patient is already waiting.
+
+    DHEALTH-FRONT-DESK-001/ADR-069. Enforced by ``uq_exchange_visits_one_active_per_patient``, not
+    only by the pre-read that raises this first -- see ``VisitRepository.start``."""
+
+
 class VisitIdempotencyKeyConflict(RuntimeError):
     """This ``(provider_organization_id, idempotency_key)`` pair already started a visit for a
     different patient or with a different stated reason. Maps to HTTP 409, and deliberately does not
@@ -191,11 +218,63 @@ class VisitRecord:
     patient_date_of_birth: date | None
     clinician_identity_id: uuid.UUID | None
     status: str
-    reason_for_visit: str
+    #: ``None`` when nobody stated a reason -- the ordinary case for an arrival registered by
+    #: somebody holding only ``visit.check_in`` (ADR-069 §15: a chief complaint typed at reception
+    #: is clinical documentation under another name). Never an empty string; the service refuses
+    #: one.
+    reason_for_visit: str | None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
     cancelled_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class WaitingArrivalRecord:
+    """One waiting arrival, as the **arrival** workflow is allowed to see it. Six fields, and the
+    absences are the specification.
+
+    DHEALTH-FRONT-DESK-001/ADR-069 §12. A person holding ``visit.check_in`` and no clinical
+    capability must be able to identify the right patient and see that they are waiting -- and must
+    not be able to read the encounter. So this is a separate, deliberately enumerated projection
+    rather than ``VisitRecord`` with fields the frontend happens not to render: "the browser does
+    not
+    show it" is not a privacy boundary, because the response is what the caller actually receives.
+
+    **Excluded on purpose, each for a stated reason:**
+
+    * ``reason_for_visit`` -- what the patient said about why they are here. The single most
+      sensitive field on the row, and the one a waiting list has no operational need for.
+    * ``clinician_identity_id`` -- who is treating them. Not needed to run a waiting room, and it
+      turns the queue into a record of which clinician sees which patient.
+    * ``started_at`` / ``completed_at`` / ``cancelled_at`` -- the consultation's own history.
+    * notes, orders, results, review dispositions -- structurally unreachable: this record has no
+      field for them and the query that builds it joins no such table.
+
+    **``checked_in_at`` is ``Visit.created_at``**, renamed at the boundary rather than stored twice.
+    A visit row is created by the check-in operation and by nothing else, so the moment it was
+    created *is* the moment the arrival was recorded -- for every row, including every row that
+    predates ADR-069. The name says what the field means to the caller; the column keeps its own.
+
+    **There is no waiting duration here, and that is a recorded decision rather than an omission.**
+    ``AGENTS.md`` (2026-09-27) and ``docs/NATIVE-OPERATING-PRODUCT.md`` §38 both forbid deriving a
+    waiting time from visit timestamps without the clinical lead's sign-off: a number a clinic would
+    act on is an operational signal DHealth must not produce, even when arithmetic produced it. The
+    recorded arrival time is a fact and is returned; the subtraction is not performed here, and must
+    not be performed in the browser either. See ``PROJECT_STATE.md``'s DHEALTH-FRONT-DESK-001
+    blocker."""
+
+    visit_id: uuid.UUID
+    patient_id: uuid.UUID
+    patient_display_name: str | None
+    #: The wrong-patient safeguard. ADR-051 allows two patients with identical names to coexist, so
+    #: a queue showing only names can be genuinely ambiguous and a worker resolving that by guessing
+    #: is exactly the risk this field removes (`docs/NATIVE-OPERATING-PRODUCT.md` §9).
+    patient_date_of_birth: date | None
+    #: ``CHECKED_IN`` or ``IN_PROGRESS`` -- coarse state, so the desk can tell "still waiting" from
+    #: "already with the clinician" (§23). Nothing finer, and no clinical content either way.
+    status: str
+    checked_in_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,17 +402,34 @@ class VisitRepository:
         principal: AuthenticatedPrincipal,
         provider_organization_id: uuid.UUID,
         patient_id: uuid.UUID,
-        reason_for_visit: str,
+        reason_for_visit: str | None,
         idempotency_key: str,
     ) -> StartVisitResult:
         """Register a patient as present and waiting. ``CHECKED_IN``, with no clinician yet.
 
         The waiting list *is* this state (§12), which is why no clinician is recorded: at check-in,
         who will see the patient is genuinely not known, and a placeholder would be a guess written
-        into a clinical record."""
-        reason = reason_for_visit.strip()
-        if not reason:
-            raise ValueError("reason_for_visit is required")
+        into a clinical record. DHEALTH-FRONT-DESK-001/ADR-069 makes that the *operative* reason
+        rather than an incidental one: the caller here may hold ``visit.check_in`` and nothing
+        clinical, so the clinician of record is not merely unknown -- the caller has no standing to
+        name one, and the endpoint accepts no clinician identity from the request at all.
+
+        ``reason_for_visit`` is **optional**. ``None`` records that nobody stated one, which is the
+        ordinary outcome at a reception desk (§15). A string that is empty once stripped is refused
+        rather than quietly stored as ``None``: "nobody was asked" and "somebody submitted an empty
+        field" are different, and only the first is a fact worth recording.
+
+        Two distinct conflicts can refuse this, and they are not the same event:
+
+        * the same ``idempotency_key`` again -> the *same* arrival, replayed. Returns the existing
+          visit (``created=False``). A double click, a retry, a lost response.
+        * a *different* key for a patient who already has an active visit -> a *different* arrival
+          for somebody already in the building. ``ActiveVisitAlreadyExists``, a 409. The pre-read
+          below catches the ordinary case and ``uq_exchange_visits_one_active_per_patient`` catches
+          the race the pre-read cannot -- two workers submitting at the same instant."""
+        reason = reason_for_visit.strip() if reason_for_visit is not None else None
+        if reason == "":
+            raise ValueError("reason_for_visit must not be blank when it is provided")
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
 
@@ -355,6 +451,13 @@ class VisitRepository:
             if existing is not None:
                 return self._replay(existing, patient, patient_id, reason, idempotency_key)
 
+            # ADR-069 §18. An optimisation and a better error message, never the guarantee: two
+            # simultaneous check-ins both pass this, which is why the unique index below exists.
+            if self._active_visit_id(session, provider_organization_id, patient_id) is not None:
+                raise ActiveVisitAlreadyExists(
+                    "this patient already has an active visit at this organization"
+                )
+
             visit = Visit(
                 idempotency_key=idempotency_key,
                 provider_organization_id=provider_organization_id,
@@ -374,19 +477,41 @@ class VisitRepository:
                     session.add(visit)
                     session.flush()
             except IntegrityError:
-                session.expunge(visit)
+                # `if visit in session` rather than a bare `expunge`, and the guard is load-bearing:
+                # rolling the SAVEPOINT back restores the session to its state at `begin_nested()`,
+                # which **already** evicts anything added inside it -- so the instance may be gone
+                # and `expunge` then raises `InvalidRequestError`, masking the conflict with an
+                # unrelated 500. The bare call survived DHEALTH-CLINIC-VISIT-001 only because that
+                # ticket's one race was usually short-circuited by the pre-read; ADR-069's second
+                # uniqueness rule reaches this line reliably, and the real-PostgreSQL qualification
+                # (`test_pg_fd_1_*`) is what exposed it.
+                if visit in session:
+                    session.expunge(visit)
+                # **Two** uniqueness rules can land here since ADR-069, and they mean opposite
+                # things, so both are re-checked before anything is re-raised. Checking only the
+                # idempotency one -- as this branch did before ADR-069, when it was the only one --
+                # would turn the ordinary two-receptionists race into a 500, because the loser's key
+                # is its own and finds nothing.
                 committed = session.scalar(
                     select(Visit).where(
                         Visit.provider_organization_id == provider_organization_id,
                         Visit.idempotency_key == idempotency_key,
                     )
                 )
-                if committed is None:
-                    # The uniqueness constraint was not what refused this. Never swallowed: a
-                    # composite-foreign-key or CHECK violation must surface, not be reported as a
-                    # replay of a visit that does not exist.
-                    raise
-                return self._replay(committed, patient, patient_id, reason, idempotency_key)
+                if committed is not None:
+                    # The same arrival, replayed: the pre-read missed it because the other
+                    # transaction had not committed yet.
+                    return self._replay(committed, patient, patient_id, reason, idempotency_key)
+                if self._active_visit_id(session, provider_organization_id, patient_id) is not None:
+                    # A different arrival for a patient somebody else just checked in. The index
+                    # refused it; the caller is told, not 500'd.
+                    raise ActiveVisitAlreadyExists(
+                        "this patient already has an active visit at this organization"
+                    ) from None
+                # Neither uniqueness rule explains this. Never swallowed: a composite-foreign-key or
+                # CHECK violation must surface rather than be reported as a conflict that is not
+                # one.
+                raise
 
             self._record(
                 session,
@@ -402,7 +527,7 @@ class VisitRepository:
         existing: Visit,
         patient: Patient,
         patient_id: uuid.UUID,
-        reason: str,
+        reason: str | None,
         idempotency_key: str,
     ) -> StartVisitResult:
         """The same canonical-request comparison ``LabOrderIntent`` makes, for the same reason its
@@ -620,6 +745,66 @@ class VisitRepository:
                 stmt = stmt.where(Visit.status.in_(sorted(statuses)))
             return [_to_record(visit, patient) for visit, patient in session.execute(stmt)]
 
+    def list_waiting(
+        self,
+        provider_organization_id: uuid.UUID,
+        *,
+        limit: int = 100,
+    ) -> list[WaitingArrivalRecord]:
+        """The arrival/waiting projection. **Oldest arrival first**, and narrow by construction.
+
+        DHEALTH-FRONT-DESK-001/ADR-069 §16. A separate method rather than
+        ``list_for_organization(statuses={CHECKED_IN})`` for one reason that matters: that method
+        returns ``VisitRecord``, which carries ``reason_for_visit``. A caller holding only
+        ``visit.check_in`` must never receive it, and the safe way to guarantee that is a query that
+        never selects the column -- not a caller remembering to strip it. See
+        ``WaitingArrivalRecord`` for the full list of what is excluded and why.
+
+        **Oldest first**, which is the opposite of ``list_for_organization``'s newest-first
+        worklist, and deliberately so: a worklist answers "what changed", a waiting room answers
+        "who has been here longest". ``docs/NATIVE-OPERATING-PRODUCT.md`` §8 specifies oldest-first
+        for exactly this surface.
+
+        **Ordering by the recorded arrival time is not a triage order** (§43). It is the order
+        people
+        arrived in, which is the order a waiting room already runs in; nothing here scores, weights,
+        or reorders by anything about the patient, and no urgency, acuity or priority exists to sort
+        by. ``visit_id`` breaks ties so two arrivals recorded in the same clock tick have a stable
+        order rather than a database-dependent one.
+
+        Both live states are returned so the desk can see that a patient it checked in has been
+        taken
+        (§23) without being able to see anything about the consultation."""
+        with self._sessions() as session:
+            rows = session.execute(
+                select(
+                    Visit.id,
+                    Visit.patient_id,
+                    Patient.display_name,
+                    Patient.date_of_birth,
+                    Visit.status,
+                    Visit.created_at,
+                )
+                .join(Patient, Patient.id == Visit.patient_id)
+                .where(
+                    Visit.provider_organization_id == provider_organization_id,
+                    Visit.status.in_((VisitStatus.CHECKED_IN.value, VisitStatus.IN_PROGRESS.value)),
+                )
+                .order_by(Visit.created_at.asc(), Visit.id.asc())
+                .limit(limit)
+            ).all()
+            return [
+                WaitingArrivalRecord(
+                    visit_id=visit_id,
+                    patient_id=patient_id,
+                    patient_display_name=display_name,
+                    patient_date_of_birth=date_of_birth,
+                    status=status,
+                    checked_in_at=created_at,
+                )
+                for visit_id, patient_id, display_name, date_of_birth, status, created_at in rows
+            ]
+
     def list_for_patient(
         self,
         provider_organization_id: uuid.UUID,
@@ -700,6 +885,24 @@ class VisitRepository:
         if patient is None:  # pragma: no cover - RESTRICT foreign keys make this unreachable
             raise VisitNotFound("visit not found")
         return visit, patient
+
+    def _active_visit_id(
+        self, session: Session, provider_organization_id: uuid.UUID, patient_id: uuid.UUID
+    ) -> uuid.UUID | None:
+        """This patient's active visit at this organization, if they have one.
+
+        ADR-069 §18's invariant expressed once, so the pre-read and the ``IntegrityError`` recovery
+        path cannot drift about what "already waiting" means. The status set is exactly the one
+        ``uq_exchange_visits_one_active_per_patient`` indexes on -- if the two disagreed, the
+        service
+        would raise a conflict the database permits, or 500 on one the database refuses."""
+        return session.scalar(
+            select(Visit.id).where(
+                Visit.provider_organization_id == provider_organization_id,
+                Visit.patient_id == patient_id,
+                Visit.status.in_((VisitStatus.CHECKED_IN.value, VisitStatus.IN_PROGRESS.value)),
+            )
+        )
 
     def _require_transition(self, current: str, target: str) -> None:
         if (current, target) not in LEGAL_TRANSITIONS:

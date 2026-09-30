@@ -49,6 +49,7 @@ export const Capability = {
   PATIENT_DIRECTORY_READ: 'patient.directory.read',
   PATIENT_REGISTER: 'patient.register',
   VISIT_READ: 'visit.read',
+  VISIT_CHECK_IN: 'visit.check_in',
   VISIT_DOCUMENT: 'visit.document',
   ORDER_MANAGE: 'order.manage',
   RESULT_REVIEW: 'result.review',

@@ -100,9 +100,18 @@ class Capability(StrEnum):
     PATIENT_DIRECTORY_READ = "patient.directory.read"
     #: Register a new patient, or bind a new patient reference.
     PATIENT_REGISTER = "patient.register"
-    #: Read visits and their history.
+    #: Read visits and their history, including the clinician's note. **Clinical.**
     VISIT_READ = "visit.read"
-    #: Run a consultation: register an arrival, take a waiting patient, write notes, finish, cancel.
+    #: Register a patient's arrival, see who is waiting, and cancel an arrival that ends before
+    #: clinical contact. DHEALTH-FRONT-DESK-001/ADR-069 split this out of `VISIT_DOCUMENT`: an
+    #: ordinary clinic day begins with somebody at the desk putting a patient into the waiting
+    #: list, and that person needs no authority over the consultation that follows. It carries
+    #: **no** clinical read — a holder cannot open a note, cannot see the stated reason, and
+    #: cannot start a consultation.
+    VISIT_CHECK_IN = "visit.check_in"
+    #: Run a consultation: take a waiting patient, write notes, amend the stated reason, finish.
+    #: Registering the arrival is `VISIT_CHECK_IN`; the `CLINICIAN` template carries both, so the
+    #: authority a clinician held before ADR-069 is unchanged.
     VISIT_DOCUMENT = "visit.document"
     #: Create diagnostic orders and route them, and read the order surface that goes with doing so —
     #: intents, eligible labs, release versions, patient-access grants, notification retries.
@@ -199,11 +208,21 @@ CAPABILITY_CATALOG: tuple[CapabilityDefinition, ...] = (
         organization_types=_PROVIDER,
     ),
     CapabilityDefinition(
+        key=Capability.VISIT_CHECK_IN,
+        label="Accueillir un patient",
+        description=(
+            "Enregistrer l'arrivée d'un patient, voir qui attend, et annuler une arrivée avant le "
+            "début de la consultation. Ne donne accès à aucune information clinique."
+        ),
+        group="Visites",
+        organization_types=_PROVIDER,
+    ),
+    CapabilityDefinition(
         key=Capability.VISIT_DOCUMENT,
         label="Documenter une visite",
         description=(
-            "Enregistrer une arrivée, prendre un patient en consultation, rédiger une note, "
-            "terminer ou annuler une visite."
+            "Prendre un patient en consultation, rédiger une note, corriger le motif indiqué et "
+            "terminer la visite."
         ),
         group="Visites",
         organization_types=_PROVIDER,
@@ -303,8 +322,10 @@ if len(CAPABILITY_BY_KEY) != len(Capability):  # pragma: no cover - import-time 
 #:
 #: * `CLINICIAN` held `require_clinician`, which guarded the patient directory, patient
 #:   registration, the whole visit lifecycle, order creation and routing, the order read surface and
-#:   doctor review. All six pieces, and nothing else — notably no billing and no staff
+#:   doctor review. Every piece of it, and nothing else — notably no billing and no staff
 #:   administration, which is why a clinician needing the till is granted it rather than promoted.
+#:   It was six capabilities until ADR-069 split `VISIT_CHECK_IN` out of `VISIT_DOCUMENT`; the
+#:   template gained the new one the same day, so no clinician's authority changed then either.
 #: * `ORG_ADMIN` held `require_org_admin`, which guarded staff memberships *and* facility
 #:   configuration, plus `BILLING_CONFIGURE_PRICES` from ADR-066. Deliberately **not**
 #:   `BILLING_OPERATE`: administering a facility is not handling its money, and §31 says so.
@@ -323,6 +344,10 @@ SYSTEM_ROLE_TEMPLATES: dict[OrganizationRole, frozenset[Capability]] = {
             Capability.PATIENT_DIRECTORY_READ,
             Capability.PATIENT_REGISTER,
             Capability.VISIT_READ,
+            # DHEALTH-FRONT-DESK-001 §5/ADR-069: compatibility, not authority expansion.
+            # Registering an arrival was part of `VISIT_DOCUMENT` until ADR-069 split it out; a
+            # clinician who could check a patient in the day before must still be able to.
+            Capability.VISIT_CHECK_IN,
             Capability.VISIT_DOCUMENT,
             Capability.ORDER_MANAGE,
             Capability.RESULT_REVIEW,

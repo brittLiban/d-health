@@ -268,6 +268,7 @@ from daher_adapter.exchange.staff_access import (
     StaffAccessTargetNotFound,
 )
 from daher_adapter.exchange.visits import (
+    ActiveVisitAlreadyExists,
     VisitAlreadyTaken,
     VisitCannotReceiveOrder,
     VisitIdempotencyKeyConflict,
@@ -277,6 +278,7 @@ from daher_adapter.exchange.visits import (
     VisitRepository,
     VisitTransitionRefused,
     VisitTransitionResult,
+    WaitingArrivalRecord,
 )
 
 # DH-NOTIFY-001. A top-level import, unlike the connect boundary's deliberately lazy one: the
@@ -2882,7 +2884,20 @@ class VisitCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     patient_id: uuid.UUID
-    reason_for_visit: str = Field(min_length=1, max_length=500)
+    #: **Optional since DHEALTH-FRONT-DESK-001/ADR-069.** Omitted -- or explicitly ``null`` -- when
+    #: nobody stated a reason, which is the ordinary case for an arrival registered at a reception
+    #: desk: §15 forbids requiring a chief complaint there, because a reason typed by a
+    #: non-clinician into a clinical record is clinical documentation under another name. A
+    #: clinician registering an arrival still sends it. ``min_length=1`` survives so that
+    #: *submitting* an empty string is a 422 rather than being silently stored as "nobody stated
+    #: one" -- the two are different facts and only the second is worth recording.
+    #:
+    #: **There is no ``clinician_id`` field here and there never will be.** The treating clinician
+    #: is server-derived when a clinician takes the visit (``POST .../take``), and a request may not
+    #: name one: a desk worker choosing a clinician to satisfy a field would be writing a false
+    #: clinical record, and the ``extra="forbid"`` above is what makes an attempt to send one a 422
+    #: rather than a silently ignored field.
+    reason_for_visit: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class VisitNoteCreateRequest(BaseModel):
@@ -2939,11 +2954,58 @@ class VisitResponse(BaseModel):
     patient_date_of_birth: date | None
     clinician_identity_id: uuid.UUID | None
     status: str
-    reason_for_visit: str
+    #: ``None`` when nobody stated a reason (ADR-069). This response is behind ``visit.read``; the
+    #: arrival workflow's own projection is ``WaitingArrivalResponse``, which has no such field.
+    reason_for_visit: str | None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
     cancelled_at: datetime | None
+
+
+class WaitingArrivalResponse(BaseModel):
+    """One waiting arrival. **Six fields, enumerated deliberately, and the absences are the point.**
+
+    DHEALTH-FRONT-DESK-001/ADR-069 §12/§57. This is the response a person holding ``visit.check_in``
+    and no clinical capability receives, so it is a **privacy boundary and not a convenience**: what
+    it omits, it omits because the caller may not have it, not because the browser has no use for
+    it.
+
+    It is a separate model rather than ``VisitResponse`` with fields the frontend skips, and
+    ``exchange/visits.py``'s ``list_waiting`` builds it from a query that selects exactly these
+    columns. Both halves matter: a shared model would leak the moment somebody added a field to it,
+    and a narrow model over a wide query would leak the moment somebody reused the row.
+
+    **Not here, each for its own reason:**
+
+    * ``reason_for_visit`` -- what the patient said about why they came. The most sensitive field on
+      the visit row and the one a waiting room has no operational need for. §7 of
+      ``docs/NATIVE-OPERATING-PRODUCT.md`` *permits* a facility to show reception the stated reason;
+      this ticket deliberately does not, which is narrower than the ceiling rather than a
+      contradiction of it (law 9, minimum necessary).
+    * ``clinician_identity_id`` -- who is treating the patient. Not needed to run a waiting room.
+    * ``started_at``/``completed_at``/``cancelled_at`` -- the consultation's own history.
+    * notes, orders, results, release versions, review dispositions -- structurally absent: no field
+      exists for them and no join produces them.
+
+    ``checked_in_at`` is ``Visit.created_at`` named for what it means to this caller. A visit row is
+    created by the check-in operation and by nothing else, so the two are the same moment for every
+    row ever written, including every row that predates this ticket.
+
+    **No waiting duration, by recorded decision.** ``AGENTS.md`` (2026-09-27) and §38 of the
+    operating specification both forbid deriving a waiting time from visit timestamps without the
+    clinical lead's sign-off -- a number a clinic would act on is an operational signal DHealth must
+    not produce, even when arithmetic produced it. The recorded arrival time is a fact and is
+    returned; the subtraction is performed nowhere, here or in the browser."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    visit_id: uuid.UUID
+    patient_id: uuid.UUID
+    patient_display_name: str | None
+    patient_date_of_birth: date | None
+    status: str
+    checked_in_at: datetime
 
 
 class VisitDetailResponse(BaseModel):
@@ -3493,6 +3555,36 @@ def build_exchange_router(
         # `require_role` -- platform admin must NOT bypass this one (see its docstring).
         try:
             return authz.require_clinician(principal, organization_id)
+        except ResourceNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
+            ) from error
+        except NotAuthorized as error:
+            _audit_refused(principal, organization_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="not authorized"
+            ) from error
+
+    def _require_caps(
+        principal: AuthenticatedPrincipal,
+        organization_id: uuid.UUID,
+        *capabilities: Capability,
+    ) -> OrganizationAccessContext:
+        """Require **any one** of these capabilities, with `_require_clinician`'s exact HTTP and
+        audit behaviour.
+
+        DHEALTH-FRONT-DESK-001/ADR-069. `_require_clinician` asks "do you hold any clinical
+        authority here", which was the only question the backend could ask while authority was a
+        job title. This asks the specific one, so a member granted `patient.directory.read` alone
+        can search the directory without thereby being able to create an order, and a member
+        granted `visit.check_in` alone can register an arrival without being able to read the note.
+
+        Identical refusal mapping to `_require_clinician`, deliberately: a caller with no claim on
+        the organization gets 404 (anti-enumeration), a caller who belongs but lacks the capability
+        gets 403 and an audited refusal, and no platform administrator bypasses either -- ADR-063's
+        rule that a network administrator is not clinical staff applies to every one of these."""
+        try:
+            return authz.require_capability(principal, organization_id, *capabilities)
         except ResourceNotFound as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="organization not found"
@@ -4599,7 +4691,7 @@ def build_exchange_router(
         # CLINICIAN specifically, same gate and same reasoning as `create_lab_order` below --
         # binding the patient a clinician is about to order for is part of that same clinical
         # ordering authority, not a separate receptionist/integration role this ticket invents.
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.PATIENT_REGISTER)
 
         # Exact-identity, insert-first-wins binding, and its authoritative audit event, commit or
         # roll back together in one transaction -- the same pattern `create_lab_order` already
@@ -4654,7 +4746,7 @@ def build_exchange_router(
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
     ) -> list[ProviderPatientReferenceSummary]:
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.PATIENT_DIRECTORY_READ)
         records = patients.list_for_organization(provider_id, limit=limit)
         return [
             ProviderPatientReferenceSummary(
@@ -4676,7 +4768,7 @@ def build_exchange_router(
         body: ProviderPatientReferenceSearchRequest,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> list[ProviderPatientReferenceSummary]:
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.PATIENT_DIRECTORY_READ)
         records = patients.list_for_organization(provider_id, query=body.query, limit=body.limit)
         return [
             ProviderPatientReferenceSummary(
@@ -4698,7 +4790,7 @@ def build_exchange_router(
         reference_id: uuid.UUID,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> ProviderPatientReferenceSummary:
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.PATIENT_DIRECTORY_READ)
         record = patients.get_for_organization(reference_id, provider_id)
         if record is None:
             raise HTTPException(
@@ -4739,7 +4831,7 @@ def build_exchange_router(
     ) -> PatientDirectoryEntry:
         # CLINICIAN specifically -- native patient registration is clinical workflow authority,
         # the same gate `bind_patient_reference`/`create_lab_order` already require.
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.PATIENT_REGISTER)
 
         # The Patient, its native PatientReference, its immutable registration-request record, and
         # the authoritative `patient_created` audit row all commit or roll back together, in one
@@ -4789,7 +4881,7 @@ def build_exchange_router(
         that lost the response to a `POST .../patients` (network failure, reload) resolves its own
         opaque idempotency key to the authoritative Patient here, rather than reconstructing the
         patient payload from browser storage or silently retrying into a second registration."""
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.PATIENT_REGISTER)
         result = patient_directory.get_registration(provider_id, idempotency_key)
         if result is None:
             raise HTTPException(
@@ -4806,7 +4898,7 @@ def build_exchange_router(
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
     ) -> list[PatientDirectoryEntry]:
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.PATIENT_DIRECTORY_READ)
         return [
             _to_patient_directory_entry(record)
             for record in patient_directory.list_for_organization(provider_id, limit=limit)
@@ -4821,7 +4913,7 @@ def build_exchange_router(
         body: PatientSearchRequest,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> list[PatientDirectoryEntry]:
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.PATIENT_DIRECTORY_READ)
         records = patient_directory.list_for_organization(
             provider_id, query=body.query, limit=body.limit
         )
@@ -4836,7 +4928,7 @@ def build_exchange_router(
         patient_id: uuid.UUID,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
     ) -> PatientDirectoryEntry:
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.PATIENT_DIRECTORY_READ)
         record = patient_directory.get_for_organization(patient_id, provider_id)
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="patient not found")
@@ -4903,7 +4995,7 @@ def build_exchange_router(
         # LAB org's ORG_ADMIN, and platform admin acting alone are all refused here, never just
         # untested (see `AuthorizationService.require_clinician`'s docstring for why platform
         # admin does not bypass this one check).
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.ORDER_MANAGE)
 
         # Tenant-scoped, read-only pre-validation -- outside any write transaction, matching the
         # marketplace endpoint's own pattern -- before anything is mutated. A patient reference
@@ -5122,7 +5214,7 @@ def build_exchange_router(
         Enforces provider-scoped idempotency: exact match returns existing intent (200 OK),
         mismatched payload for same key returns 409 Conflict.
         """
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.ORDER_MANAGE)
 
         if patients.get_for_organization(body.patient_reference_id, provider_id) is None:
             raise HTTPException(
@@ -5271,7 +5363,7 @@ def build_exchange_router(
         - Row-level locking ensures concurrent commits converge cleanly to exactly one LabOrder
         - Audits lab_order_created on creation
         """
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.ORDER_MANAGE)
         identity = identities.get(principal.identity_id)
 
         try:
@@ -5359,19 +5451,29 @@ def build_exchange_router(
 
     # -- DHEALTH-CLINIC-VISIT-001: the native clinic visit ----------------------------------------
     #
-    # Nine routes: six mutations and three reads. Every one of them calls `_require_clinician` as
-    # its first statement, before any lookup, so a caller with no claim on this organization learns
-    # nothing about whether a visit or a patient id is real (the same ordering `list_patient_orders`
-    # documents above). `_require_clinician` delegates to `authz.require_clinician`, which
-    # deliberately does **not** admit a platform administrator: a platform realm role is for
+    # **Ten routes since DHEALTH-FRONT-DESK-001/ADR-069** (was nine): seven mutations and three
+    # reads, plus the narrow waiting projection. Every one of them calls its gate as its first
+    # statement, before any lookup, so a caller with no claim on this organization learns nothing
+    # about whether a visit or a patient id is real (the same ordering `list_patient_orders`
+    # documents above). No gate here admits a platform administrator: a platform realm role is for
     # configuring the network, never for reading or writing clinical records, and ADR-063's
     # reasoning about platform authority not silently widening applies here unchanged.
     #
-    # There is deliberately no front-desk/reception path. `require_clinician` is the only gate that
-    # exists, D-1 in `docs/NATIVE-OPERATING-PRODUCT.md` §28 is the open question of whether a
-    # non-clinician may register arrivals, and inventing a role to answer it here is exactly what
-    # this ticket's §32 forbids. Until D-1 is decided the clinician performs every transition, which
-    # is what §12 already says.
+    # **[Superseded 2026-09-30, ADR-069.** The paragraph here used to say there was deliberately no
+    # front-desk path, that `require_clinician` was the only gate, and that D-1 was open. All three
+    # have changed, so it is replaced rather than trimmed.
+    #
+    # There is an arrival path, and it is a capability rather than a job title. D-1's Front Desk
+    # portion is resolved as independently grantable capabilities:
+    #
+    #   * `visit.check_in`  -- register an arrival; read the waiting projection; cancel an arrival.
+    #   * `visit.document`  -- take a waiting patient, write a note, amend the reason, complete.
+    #   * `visit.read`      -- read a visit, its note history and its orders.
+    #
+    # `cancel` accepts either of the first two, because an arrival that ends before clinical contact
+    # is a desk correction and a clinician must not lose the ability either. Nothing below asks
+    # whether anybody is a clinician, and there is no `FRONT_DESK` role: the composition
+    # `ORG_ADMIN` + a direct `visit.check_in` grant works, which is the proof the model is real.]**
 
     def _to_visit_response(visit: VisitRecord) -> VisitResponse:
         return VisitResponse(
@@ -5387,6 +5489,23 @@ def build_exchange_router(
             started_at=visit.started_at,
             completed_at=visit.completed_at,
             cancelled_at=visit.cancelled_at,
+        )
+
+    def _to_waiting_arrival_response(arrival: WaitingArrivalRecord) -> WaitingArrivalResponse:
+        """Field by field, deliberately, with no ``dataclasses.asdict`` spread and no
+        ``model_validate`` over the record.
+
+        ADR-069 §57: the point of this projection is that adding a field to ``WaitingArrivalRecord``
+        must not silently start publishing it. A spread would do exactly that. Six assignments are
+        the price of the guarantee, and the contract test asserts the response has exactly these
+        keys."""
+        return WaitingArrivalResponse(
+            visit_id=arrival.visit_id,
+            patient_id=arrival.patient_id,
+            patient_display_name=arrival.patient_display_name,
+            patient_date_of_birth=arrival.patient_date_of_birth,
+            status=arrival.status,
+            checked_in_at=arrival.checked_in_at,
         )
 
     def _run_visit_operation(
@@ -5434,11 +5553,24 @@ def build_exchange_router(
         """Register a patient as present and waiting. The visit starts ``CHECKED_IN``, with no
         clinician recorded -- at check-in, who will see the patient is genuinely not known yet.
 
+        **The whole arrival, in one request that asks for nothing it can derive** (ADR-069 §13). The
+        organization comes from the path, the acting staff member from the token, the timestamp from
+        the server, the visit id from the database, and the treating clinician from whoever later
+        takes the visit. The body carries a patient and, optionally, a stated reason -- nothing else
+        is accepted, and ``extra="forbid"`` means an attempt to send a clinician identity is a 422
+        rather than a silently ignored field. A desk worker naming the treating clinician to satisfy
+        a field would be writing a false clinical record.
+
         Idempotent on the ``Idempotency-Key`` header, the same contract order creation already has:
         a retried or double-clicked check-in returns 200 with the existing visit rather than putting
         the same patient in the waiting list twice. A key reused for a *different* patient or reason
-        is a 409, never a silent return of the other visit."""
-        _require_clinician(principal, provider_id)
+        is a 409, never a silent return of the other visit.
+
+        A **different** key naming a patient who already has an active visit is also a 409
+        (``ActiveVisitAlreadyExists``) and not a replay -- see that exception for why the two are
+        not
+        the same event."""
+        _require_caps(principal, provider_id, Capability.VISIT_CHECK_IN)
         try:
             result = visits.start(
                 principal=principal,
@@ -5452,6 +5584,13 @@ def build_exchange_router(
                 status_code=status.HTTP_404_NOT_FOUND, detail="patient not found"
             ) from error
         except VisitIdempotencyKeyConflict as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ActiveVisitAlreadyExists as error:
+            # ADR-069 §18/§20. A *different* arrival for a patient who is already in the building --
+            # two reception workers, or one who did not see that a colleague had already done it.
+            # 409 and not a silent 200 with the other visit: telling the second worker their action
+            # succeeded when it did not is how a waiting list stops being believed. The UI's answer
+            # is to say the patient is already waiting and refresh the queue, which is the truth.
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except (InvalidOrganizationType, OrganizationNotFound) as error:
             # A lab organization has no outpatient consultation. 404 rather than 422: to a caller
@@ -5491,13 +5630,63 @@ def build_exchange_router(
         like "no patients are waiting". Omitting it returns every state -- the filter is the
         caller's choice because §13's worklist wants the live states while a clinician reviewing the
         day wants the finished ones."""
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.VISIT_READ)
         page = visits.list_for_organization(
             provider_id,
             statuses=frozenset(status_filter) if status_filter else None,
             limit=limit,
         )
         return [_to_visit_response(visit) for visit in page]
+
+    @router.get(
+        "/organizations/{provider_id}/visits/waiting",
+        response_model=list[WaitingArrivalResponse],
+    )
+    def list_waiting_arrivals(
+        provider_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    ) -> list[WaitingArrivalResponse]:
+        """Who is in the building, oldest arrival first. **The arrival workflow's own projection.**
+
+        DHEALTH-FRONT-DESK-001/ADR-069 §16. Deliberately **not** ``GET /visits?status=CHECKED_IN``,
+        for a reason that is the whole ticket: that endpoint returns ``VisitResponse``, which
+        carries
+        the stated reason for visit, and it is therefore behind ``visit.read``. A person who runs
+        the
+        waiting room needs to know who is here; they do not need to know what anybody said about
+        why.
+        So this is a second, narrower route with a narrower response and a narrower gate -- see
+        ``WaitingArrivalResponse`` for the enumerated field list and every deliberate absence.
+
+        **Gate:** either arrival or consultation authority. The desk needs it to see who it checked
+        in; the clinician needs it to see who is waiting for them, and requiring a clinician to hold
+        the *desk's* capability to see their own queue would be exactly the role-shaped thinking
+        ADR-067 removed. ``visit.read`` is **not** accepted -- it is the clinical read, and this is
+        not a clinical surface; anybody holding it also holds one of these two in every template.
+
+        **Both live states, oldest first.** ``IN_PROGRESS`` rows stay so the desk can see that
+        somebody it checked in has been taken (§23) without learning anything about the
+        consultation.
+        Ordering is by the recorded arrival time, which is the order people arrived in -- **not a
+        triage order** (§43): nothing scores, weights or reorders anything, and no urgency or acuity
+        exists in this product to sort by.
+
+        **No waiting duration is returned.** A recorded arrival time is a fact; the subtraction is
+        an
+        operational signal ``AGENTS.md`` (2026-09-27) and §38 of the operating specification forbid
+        DHealth from producing without the clinical lead's sign-off. Recorded as a blocker in
+        ``PROJECT_STATE.md`` rather than filled in here."""
+        _require_caps(
+            principal,
+            provider_id,
+            Capability.VISIT_CHECK_IN,
+            Capability.VISIT_DOCUMENT,
+        )
+        return [
+            _to_waiting_arrival_response(arrival)
+            for arrival in visits.list_waiting(provider_id, limit=limit)
+        ]
 
     @router.get(
         "/organizations/{provider_id}/patients/{patient_id}/visits",
@@ -5513,7 +5702,7 @@ def build_exchange_router(
 
         Scoped by organization as well as patient: this is one provider's record of its own contacts
         with this person, never a cross-provider longitudinal history (ADR-051)."""
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.VISIT_READ)
         # `patient_directory`, not `patients`: this path takes a native `Patient` id, and `patients`
         # is the `PatientReference` repository. Checked before listing so an id from another tenant
         # gets the same 404 as one that does not exist, rather than an empty list that would confirm
@@ -5538,7 +5727,7 @@ def build_exchange_router(
         ``orders`` is the existing order summary projection, resolved through the same helpers the
         order list uses. No result values are inlined -- see ``VisitDetailResponse`` for why that is
         a deliberate refusal rather than an omission."""
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.VISIT_READ)
         visit = visits.get_for_organization(provider_id, visit_id)
         if visit is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="visit not found")
@@ -5586,7 +5775,7 @@ def build_exchange_router(
         holds is a 409 -- not because you lack authority over it (you may still write notes on it
         and complete it), but because overwriting who saw the patient would make the record false.
         See ``exchange/visits.py``'s docstring."""
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.VISIT_DOCUMENT)
         return _run_visit_operation(
             principal,
             provider_id,
@@ -5609,7 +5798,7 @@ def build_exchange_router(
         finished with the patient completes the visit now; results arriving days later are reached
         from the order and from the patient chart. Blocking completion on a lab reply would make the
         waiting list lie about who is still in the building."""
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.VISIT_DOCUMENT)
         return _run_visit_operation(
             principal,
             provider_id,
@@ -5631,7 +5820,12 @@ def build_exchange_router(
         A visit already in progress is a 409 here on purpose: §12 records that a started visit is
         completed-with-a-note, never cancelled, because contact with the patient happened and no
         status may say otherwise."""
-        _require_clinician(principal, provider_id)
+        _require_caps(
+            principal,
+            provider_id,
+            Capability.VISIT_CHECK_IN,
+            Capability.VISIT_DOCUMENT,
+        )
         return _run_visit_operation(
             principal,
             provider_id,
@@ -5655,7 +5849,7 @@ def build_exchange_router(
         are reached by their own transitions, and a general partial-update endpoint would be a
         second
         way to change status that bypasses the state machine entirely."""
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.VISIT_DOCUMENT)
         return _run_visit_operation(
             principal,
             provider_id,
@@ -5686,7 +5880,7 @@ def build_exchange_router(
         visit's note is a real need that is deliberately **not** built here rather than given a
         weaker second amendment mechanism than the one ADR-048 already defines for results. It is
         recorded as a named gap, not filled by guesswork."""
-        _require_clinician(principal, provider_id)
+        _require_caps(principal, provider_id, Capability.VISIT_DOCUMENT)
         try:
             note = visits.append_note(
                 principal=principal,

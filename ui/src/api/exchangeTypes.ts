@@ -1460,11 +1460,42 @@ export interface Visit {
   /** `null` while `CHECKED_IN` — at check-in, who will see the patient is not yet known. */
   clinician_identity_id: string | null
   status: VisitStatus
-  reason_for_visit: string
+  /** `null` when nobody stated a reason — the ordinary case for an arrival registered by somebody
+   * holding only `visit.check_in` (ADR-069 §15: a chief complaint typed at reception is clinical
+   * documentation under another name). A clinician may record one afterwards. */
+  reason_for_visit: string | null
   created_at: string
   started_at: string | null
   completed_at: string | null
   cancelled_at: string | null
+}
+
+/**
+ * DHEALTH-FRONT-DESK-001/ADR-069 — one waiting arrival, and **six fields on purpose.**
+ *
+ * This is what the arrival endpoint returns, and the type mirrors it exactly rather than reusing
+ * `Visit` with optional fields. The distinction is a privacy boundary, not a modelling preference:
+ * a person holding `visit.check_in` and no clinical capability receives this and nothing wider, so
+ * `reason_for_visit`, the clinician, the consultation's own timestamps, notes, orders and results
+ * are all absent from the *response* rather than merely unrendered. The backend's
+ * `WaitingArrivalResponse` is the contract; `test_fd_57_*` pins it.
+ *
+ * `checked_in_at` is the server-recorded arrival time. **There is no waiting duration here, and none
+ * may be computed from it** — `AGENTS.md` (2026-09-27) and `docs/NATIVE-OPERATING-PRODUCT.md` §38
+ * forbid deriving a waiting time from visit timestamps without the clinical lead's sign-off, because
+ * a number a clinic would act on is an operational signal DHealth must not produce. Subtracting two
+ * clocks in a browser is exactly the case those rules name.
+ */
+export interface WaitingArrival {
+  visit_id: string
+  patient_id: string
+  patient_display_name: string | null
+  /** The wrong-patient safeguard: ADR-051 lets two patients share a name, so a queue showing only
+   * names can be genuinely ambiguous. Optional, and never invented. */
+  patient_date_of_birth: string | null
+  /** `CHECKED_IN` (waiting) or `IN_PROGRESS` (with the clinician). Coarse by design. */
+  status: Extract<VisitStatus, 'CHECKED_IN' | 'IN_PROGRESS'>
+  checked_in_at: string
 }
 
 /** One append-only revision of a visit's clinical note. The highest `revision_number` is current;
@@ -1490,7 +1521,11 @@ export interface VisitDetail {
 
 export interface VisitCreateRequest {
   patient_id: string
-  reason_for_visit: string
+  /** **Optional since ADR-069.** Omit it for an arrival registered at a desk: §15 forbids requiring
+   * a chief complaint there. A clinician registering an arrival still sends it. There is deliberately
+   * no `clinician_identity_id` field — the treating clinician is server-derived when a clinician takes
+   * the visit, and the endpoint rejects the key outright rather than ignoring it. */
+  reason_for_visit?: string
 }
 
 export interface VisitCreateOutcome {

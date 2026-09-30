@@ -132,6 +132,13 @@ export function availableSections(
     capabilities,
     Capability.PATIENT_DIRECTORY_READ,
     Capability.VISIT_READ,
+    // DHEALTH-FRONT-DESK-001/ADR-069. `Aujourd'hui` is where the arrival and waiting surface lives
+    // (§24), and it is the *only* section a reception-only membership reaches: `Visites` needs
+    // `visit.read` or `visit.document`, which that membership deliberately does not hold. Without
+    // this line somebody granted exactly the three reception capabilities would sign in, see
+    // `Patients` alone, and have nowhere to check anybody in -- the same empty-workspace failure
+    // this file's own comment records happening twice before.
+    Capability.VISIT_CHECK_IN,
     Capability.ORDER_MANAGE,
     Capability.RESULT_REVIEW,
     Capability.LAB_QUEUE_WORK,

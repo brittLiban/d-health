@@ -1,0 +1,213 @@
+/*
+ * DHEALTH-FRONT-DESK-001/ADR-069 — the arrival and waiting surface on `Aujourd'hui`.
+ *
+ * ── Widths ──
+ *
+ * §49 names 1280 and 768 as the staff widths that must work, and 390 as one that must not
+ * catastrophically break. The waiting card is a three-part row (identity · state · actions) at the
+ * wide widths and stacks at 768, where a three-column row would either wrap the patient's name or
+ * push the actions off screen. Nothing here uses a fixed pixel width, so there is no horizontal page
+ * overflow at 768 or at 390 -- the row simply becomes taller.
+ *
+ * ── Colour ──
+ *
+ * No status colour is defined in this file. Status is rendered by `StatusBadge`, which pairs its tone
+ * with a text label, so the two states this surface distinguishes (`En attente` / `En consultation`)
+ * are never colour-only -- §49, and the design system's own rule. The arrival time is plain text for
+ * the same reason, and nothing anywhere is tinted by how long somebody has been waiting: no such
+ * number exists in this product (`AGENTS.md`, 2026-09-27).
+ */
+
+.arrivals {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.heading {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.problem {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-50, var(--color-neutral-100));
+  color: var(--color-neutral-900);
+}
+
+/* -- the arrival flow -- */
+
+.arrivalForm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.hint {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/*
+ * A real `<button>` per result, not a clickable div: it is keyboard-reachable, it announces itself,
+ * and it is what §49's "keyboard focus" and "buttons reachable" actually require. Choosing a result
+ * opens the confirmation -- it never creates the visit (§31).
+ */
+.resultButton {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.resultButton:hover {
+  border-color: var(--color-primary-500, var(--color-neutral-400));
+}
+
+.resultName {
+  font-weight: 600;
+}
+
+.resultDob {
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.notFound {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted, var(--color-neutral-50));
+}
+
+/* Name and date of birth both prominent: the wrong-patient safeguard is only a safeguard if it is
+ * readable at a glance (§31, and §9 of the operating specification). */
+.confirmName {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.confirmDob {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.confirmActions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+
+/* -- the waiting list -- */
+
+.queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.card {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.identity {
+  min-width: 0;
+}
+
+.name {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  /* The name wraps rather than truncating: a half-shown name is a wrong-patient risk, and there is
+   * no tooltip on a touch device to recover the rest of it. */
+  overflow-wrap: anywhere;
+}
+
+.dob {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* The recorded arrival time. Tabular figures so a column of times aligns; no duration, ever. */
+.time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@media (max-width: 768px) {
+  .card {
+    grid-template-columns: 1fr;
+    gap: var(--space-3);
+  }
+
+  .state {
+    justify-content: space-between;
+  }
+
+  .actions {
+    justify-content: flex-start;
+  }
+}

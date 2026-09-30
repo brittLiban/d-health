@@ -22562,3 +22562,166 @@ validated by one.
 **Human usability is not claimed.** No laboratory worker has used this screen. Automated browser
 evidence is not human usability evidence. **Pilot-ready is still not clinically live.** All data
 synthetic; no real patient data used; GitHub Actions untouched.
+
+---
+
+## DHEALTH-FRONT-DESK-001 — walk-in arrival, the waiting queue, and the clinician handoff (2026-09-30)
+
+**ADR-069.** Migration `0038_visit_check_in`, `visit.check_in`, the arrival projection and its
+endpoint, twenty-one route gates retargeted, `Aujourd'hui`'s arrival surface. **D-1's Front Desk
+portion is resolved** — as three independently grantable capabilities, not a role.
+
+### 🛑 BLOCKER — waiting duration · **Human Decision Required: Yes** · raised 2026-09-30
+
+**The ticket asked for a waiting duration. It is not built, and the refusal is deliberate.**
+
+The brief asked the arrival surface to answer *"How long have they been waiting?"* (its §16), to show
+a waiting duration "not colour-only" (§49), and `docs/NATIVE-OPERATING-PRODUCT.md` §30's screen
+inventory lists "waited-for" among `Liste d'attente`'s minimum data. §25 likewise lists "Patients
+waiting, longest wait" as a reporting metric.
+
+**Three recorded decisions forbid it**, and all three are more recent and more specific than the
+requests above:
+
+1. `AGENTS.md`, amended **2026-09-27** by DHEALTH-CLINIC-VISIT-001, under the rule that binds
+   decision support and clinical interpretation: *"Also forbidden without a decision: deriving a
+   waiting time, priority, or triage order from visit timestamps — a number a clinic would act on is
+   a clinical signal even when arithmetic produced it."*
+2. `docs/NATIVE-OPERATING-PRODUCT.md` **§38**'s named-gaps table: *"**Waiting time, priority, triage
+   order.** Not a gap to be filled: a waiting time computed in a browser from two clocks is an
+   operational signal DHealth must not produce, and triage is an explicit non-goal (§29)."*
+3. `ui/src/features/visits/ClinicVisitsPage.tsx`'s own header, which states the same rule for the
+   surface it governs.
+
+Following `AGENTS.md`'s working rule ("follow recorded decisions — do not re-litigate"), the recorded
+decision wins over the ticket text, and this is recorded rather than resolved.
+
+**What was built instead:** the **recorded arrival time** is returned by the API and rendered by the
+interface. It is a fact the server wrote. The subtraction is performed nowhere — not on the server,
+not in the browser. Two tests assert the *absence*
+(`test_the_waiting_projection_publishes_no_derived_waiting_time`, plus the frontend's own), so a later
+contributor who reads the ticket's §16 and helpfully adds the field is stopped by a failing test
+rather than by review.
+
+**§49's "waiting duration not colour-only" is therefore moot** — there is no duration to colour.
+Status (`En attente` / `En consultation`) is rendered by `StatusBadge`, which pairs tone with a text
+label, so the one distinction this surface draws is never colour-only.
+
+**The question for Liban, stated narrowly:** may DHealth display a derived waiting duration on the
+arrival surface — and if so, as what? The options, none implemented:
+
+| Option | What it means |
+|---|---|
+| **(a) leave it out** (current state) | The desk reads arrival times and does the arithmetic itself, as it does on paper. No signal is produced. |
+| **(b) a plain elapsed time, no thresholds** | "09:12 · 34 min". Still a derived number a clinic would act on, so it still needs the sign-off; but it carries no judgement about whether 34 minutes is long. |
+| **(c) elapsed time with a threshold or colour** | Adds a judgement about what "too long" is. That is closest to the alerting `AGENTS.md` puts behind the clinical lead, and the furthest from "records and routes". |
+| **(d) an operational report rather than a per-patient badge** | §25's "longest wait" as a facility count, away from the individual patient row. Different privacy and different failure mode; still a derived signal. |
+
+Whichever is chosen, **triage, urgency, acuity and priority ordering remain out of scope by separate
+decision** (the ticket's §43, §29 of the operating specification) and are not part of this question.
+
+**This blocker does not block the rest of the ticket** — arrival, waiting, cancellation and the
+clinician handoff are complete without it.
+
+### What was built
+
+| Piece | Where |
+|---|---|
+| `visit.check_in` capability, provider-only, French label/description | `exchange/capabilities.py` |
+| `CLINICIAN` template gains it (compatibility, §5) | `exchange/capabilities.py` |
+| `require_clinician` narrowed six capabilities → four | `exchange/authorization.py` |
+| `_require_caps` helper; **21** route gates retargeted to specific capabilities | `exchange/api.py` |
+| `GET /organizations/{id}/visits/waiting` + `WaitingArrivalResponse` (6 fields) | `exchange/api.py` |
+| `list_waiting` / `WaitingArrivalRecord` / `ActiveVisitAlreadyExists` / `_active_visit_id` | `exchange/visits.py` |
+| `reason_for_visit` nullable; one-active-visit partial unique index | `models.py`, `0038_visit_check_in` |
+| `Aujourd'hui` arrival + waiting surface, capability-driven | `ui/src/features/visits/ClinicArrivals.tsx` |
+| Frontend catalog, client method, `WaitingArrival` type, navigation | `ui/src/api/*`, `staffSections.ts` |
+
+### Evidence actually executed
+
+| Check | Result |
+|---|---|
+| `tests/test_dhealthfrontdesk001_arrival.py` (new) | **43 passed** |
+| `tests/test_dhealthvisit001_clinic_visits.py` (existing, unchanged) | **63 passed** |
+| Capability / access / matrix / staff-access / migration-hygiene suites | **159 passed, 1 skipped** |
+| Real PostgreSQL 16.15 qualification (new, `DHFD_PG_*`) | **11 passed** |
+| Real PostgreSQL 16.15, DHEALTH-CLINIC-VISIT-001's own qualification, on the post-0038 schema | **11 passed** |
+| Migration `0001 → 0037 → 0038 → downgrade → 0037 → 0038` on real PostgreSQL 16.15 | **passed**, with both refusal paths observed |
+| `ruff check` · `ruff format --check` | **clean** · **254 files formatted** |
+| `tsc -b --noEmit` | **clean** |
+| `oxlint` (UI) | **0 errors**, 59 warnings (one in the new file, the same fetch-on-mount shape as the pre-existing ones) |
+| `ClinicArrivals.test.tsx` (new) + `ClinicVisitsPage.test.tsx` | **30 passed** |
+| `staffSections` + `workspaceCapabilities` UI tests | **39 passed** |
+
+### The migration, qualified against real PostgreSQL 16.15
+
+Run against a disposable container, never a facility database. Observed in order:
+
+1. `0001 → 0037`: `reason_for_visit` `is_nullable = NO`, the new index absent.
+2. Two synthetic historical visits written **at 0037** — one `COMPLETED` with a clinician, one
+   `CANCELLED` without one, the two populations §53 requires to survive.
+3. `0037 → 0038` applied.
+4. **Both historical visits intact**: reason text unchanged, the completed one still has its
+   clinician, the cancelled one still has NULL. `reason_for_visit` now `YES` and still
+   `VARCHAR(500)` — relaxed, not retyped. All ten `exchange_visits` constraints still present, so
+   `batch_alter_table` dropped none.
+5. The index is genuinely partial: `WHERE status = ANY ('CHECKED_IN','IN_PROGRESS')`. A patient with
+   completed history checked in fine; a second active arrival for that patient was refused with
+   `duplicate key value violates unique constraint uq_exchange_visits_one_active_per_patient`.
+6. **The upgrade's refusal path**: with the index dropped and a duplicate active pair fabricated, the
+   upgrade raised `0038_visit_check_in cannot apply: 1 patient/organization pair(s) currently hold
+   more than one active … visit`. Schema unchanged, nothing deleted, **no patient data in the
+   message**.
+7. Operator resolves it deliberately → upgrade succeeds.
+8. **The downgrade's refusal path**: with one reasonless arrival present, the downgrade raised
+   `NotNullViolation: column "reason_for_visit" … contains null values`. Nothing was invented to make
+   it pass, and the reasonless visit was not rewritten.
+9. Clean `downgrade → upgrade` cycle: `NOT NULL` restored, index dropped then recreated, all
+   historical visits survived.
+
+### One real defect found by the PostgreSQL qualification, and fixed
+
+`VisitRepository.start`'s `IntegrityError` branch called `session.expunge(visit)` unguarded. Rolling
+the SAVEPOINT back **already** evicts anything added inside it, so `expunge` raised
+`InvalidRequestError` and masked the 409 with an unrelated 500. The bare call survived
+DHEALTH-CLINIC-VISIT-001 because that ticket's single race was usually short-circuited by the
+pre-read; ADR-069's second uniqueness rule reaches the line reliably. The SQLite unit suite never saw
+it. `test_pg_fd_1_*` is what exposed it — the qualification earning its existence.
+
+Also fixed: the same branch only re-checked the *idempotency* uniqueness before re-raising, so the
+ordinary two-receptionists race would have been a 500. It now re-checks both rules.
+
+### One latent defect found in another ticket's guard, and fixed
+
+`test_dhealthaccesscap001_no_role_hardcoding.py`'s `TS_GUARDED` listed
+`features/clinic/ClinicContext.tsx`. The file is, and always was, `ClinicContext.ts` — so that entry
+matched nothing and was silently skipped from DHEALTH-ACCESS-CAPABILITIES-001 until now, while
+reading as covered. Fixed, and `test_every_guarded_frontend_file_exists` now makes that class of typo
+impossible (the Python half has had the equivalent check since day one; the frontend half never got
+one).
+
+### Still open
+
+**D-3** (specimen entity) · **D-4** (Lab Reception identity attributes) · **D-6** (walk-in laboratory
+patient) · **D-8** (auditing successful sensitive reads) · **D-11** (block-reason catalog validation)
+— all untouched. **D-1 is now resolved in full**: the Billing portion by ADR-066, the Front Desk
+portion by ADR-069. The **waiting-duration** blocker above is the new one.
+
+**Remaining Front Desk / Clinic gaps, in full:**
+
+| # | Remaining | Status |
+|---|---|---|
+| 1 | **Waiting duration** | 🛑 **BLOCKED** — the decision above |
+| 2 | **Rendez-vous (calendar), `PLANNED`, `NO_SHOW`** | P1, unchanged. Designed so the future calendar feeds this same check-in operation |
+| 3 | **The residual `require_clinician` any-of surface** | ~17 order/result *read* routes still accept any of four clinical capabilities. Narrower than before; not per-capability yet |
+| 4 | **A reception-facing "is a result ready" signal** | §7 of the operating specification permits it (*that* a result exists, never its values); not built |
+| 5 | **Realtime waiting-list updates** | Refetch-on-mutation only. WebSockets are explicitly out of scope (§66); the honest limitation is that a colleague's check-in appears on the next fetch, not pushed |
+| 6 | **Human usability qualification** | **OPEN** — see below |
+
+**Human usability is not claimed.** No receptionist and no clinician has used this surface. No timing
+has been measured against the paper register it is meant to replace. Automated browser evidence is not
+human usability evidence, and product law 3 ("faster than what it replaces") remains a **validated
+target, not a current claim**.
+
+**Pilot-ready is still not clinically live.** All data synthetic; no real patient data used anywhere;
+GitHub Actions untouched.

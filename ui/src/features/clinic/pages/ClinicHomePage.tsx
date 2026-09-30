@@ -10,13 +10,29 @@ import {
 } from '../../../design-system'
 import { useClinic } from '../ClinicContext'
 import type { StaffSectionId } from '../../staff/staffSections'
+import { ClinicArrivals } from '../../visits/ClinicArrivals'
+import { Capability, can, capabilitiesFor } from '../../workspace/workspaceCapabilities'
 
 interface ClinicHomePageProps {
   onNavigate: (section: StaffSectionId) => void
+  /** DHEALTH-FRONT-DESK-001: opens one visit in the clinical workspace. Passed through to
+   * `ClinicArrivals`, which only ever offers the control to somebody holding `visit.read`. */
+  onOpenVisit?: (visitId: string) => void
 }
 
-export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
+export function ClinicHomePage({ onNavigate, onOpenVisit }: ClinicHomePageProps) {
   const { status, activeProvider, client, error, reload } = useClinic()
+  const capabilities = capabilitiesFor(activeProvider)
+  /**
+   * DHEALTH-FRONT-DESK-001/ADR-069. The order tiles below need `order.manage`, and a reception-only
+   * membership does not hold it. Fetching anyway would 403 and this page would render `ErrorState`
+   * for its whole body -- hiding the arrival surface that is the only reason that person opened the
+   * application. So the fetch is conditional, and `Aujourd'hui` shows each person the part of itself
+   * their authority can answer.
+   */
+  const mayManageOrders = can(capabilities, Capability.ORDER_MANAGE)
+  const mayWorkArrivals =
+    can(capabilities, Capability.VISIT_CHECK_IN) || can(capabilities, Capability.VISIT_DOCUMENT)
   const [ordersState, setOrdersState] = useState<{
     orders: LabOrderSummary[]
     loading: boolean
@@ -29,6 +45,12 @@ export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
 
   useEffect(() => {
     if (status !== 'ready' || !activeProvider) {
+      return
+    }
+    if (!mayManageOrders) {
+      // Nothing to load and nothing to report: the tiles this would fill are not rendered for a
+      // membership without `order.manage`, so a "loading" state that never resolves would be a lie.
+      setOrdersState({ orders: [], loading: false, error: null })
       return
     }
 
@@ -54,7 +76,7 @@ export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
     return () => {
       isMounted = false
     }
-  }, [client, activeProvider, status])
+  }, [client, activeProvider, status, mayManageOrders])
 
   const { orders, loading: ordersLoading, error: ordersError } = ordersState
 
@@ -79,8 +101,13 @@ export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
   if (status === 'no_clinics') {
     return (
       <div style={{ padding: 'var(--space-5)' }}>
+        {/* DHEALTH-FRONT-DESK-001/ADR-069: the old wording named the CLINICIAN *role*, which has not
+            been the authority since ADR-067 and is actively misleading now that a reception
+            membership with no role at all is a supported way to work here. `ClinicProvider` filters
+            on organization type, never on a role. */}
         <EmptyState title="Aucune organisation clinique active">
-          Votre compte n'est rattaché à aucune organisation de soins avec le rôle prescripteur (CLINICIAN).
+          Votre compte n'est rattaché à aucun établissement de soins. Demandez à un administrateur
+          de votre établissement de vous donner accès.
         </EmptyState>
       </div>
     )
@@ -125,7 +152,28 @@ export function ClinicHomePage({ onNavigate }: ClinicHomePageProps) {
         ) : null}
       </header>
 
-      {ordersLoading ? (
+      {/*
+        DHEALTH-FRONT-DESK-001/ADR-069 — the arrival and waiting surface, and it comes **first.**
+
+        A clinic day begins with who is in the building, so it is above the order tiles rather than
+        below them (§24/§46). It is also rendered independently of the order fetch: for a
+        reception-only membership that fetch does not happen at all, and a layout that nested the
+        waiting list inside the orders block would have hidden it behind a state that never resolves.
+
+        Shown for `visit.check_in` **or** `visit.document`: the desk to run it, the clinician to see
+        who is waiting for them. Somebody with neither -- an administrator, a cashier -- sees nothing
+        here, which is the honest rendering of having no part in the arrival workflow.
+      */}
+      {mayWorkArrivals ? (
+        <div style={{ marginBottom: 'var(--space-6)' }}>
+          <ClinicArrivals
+            onOpenVisit={onOpenVisit}
+            onRegisterPatient={() => onNavigate('patients')}
+          />
+        </div>
+      ) : null}
+
+      {!mayManageOrders ? null : ordersLoading ? (
         <LoadingSkeleton />
       ) : ordersError ? (
         <ErrorState

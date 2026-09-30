@@ -216,6 +216,9 @@ describe('the catalog mirrors the server', () => {
         'patient.register',
         'result.review',
         'staff.access.manage',
+        // DHEALTH-FRONT-DESK-001/ADR-069 split the arrival out of `visit.document`, so a person may
+        // register arrivals without any authority over the consultation that follows.
+        'visit.check_in',
         'visit.document',
         'visit.read',
       ].sort(),

@@ -9651,3 +9651,187 @@ qualified; it does not mean the vocabulary that mechanism puts in front of a lab
 validated by one. **Human usability remains unqualified** and the Lab product remains **not
 switch-ready** — Réception, the specimen entity (**D-3**), labels, facility-owned offerings and
 configuration, a printable result report, and this item all remain.
+
+---
+
+## ADR-069 — ACCEPTED / IMPLEMENTED (2026-09-30, DHEALTH-FRONT-DESK-001): walk-in arrival is a
+## **capability**, `CHECKED_IN` is the one waiting fact, and the desk never becomes the clinician
+
+**Date:** 2026-09-30 · **Status:** ACCEPTED (product + architecture), IMPLEMENTED (migration
+`0038_visit_check_in`, `visit.check_in` in `exchange/capabilities.py`, the arrival projection and its
+endpoint, twenty-one route gates retargeted, `Aujourd'hui`'s arrival surface) · **Decided by:** Liban
+(DHEALTH-FRONT-DESK-001 ticket) · **Fulfils:** ADR-067's prediction that answering **D-1** would be
+cheap · **Resolves:** **D-1's Front Desk portion** (the Billing portion was already resolved by
+ADR-066)
+
+**Relationship to prior decisions.** ADR-065 built the visit lifecycle and left "who may register an
+arrival" open as D-1, with `require_clinician` as the only gate. ADR-067 replaced role checks with
+capabilities and said explicitly that it did not answer D-1 but made answering it cheap. This ADR
+spends that: the answer is three independently grantable capabilities and **no new role**. ADR-051
+(no identity guesswork) is why the arrival projection carries a date of birth. ADR-063 (platform
+authority does not silently widen) is why no platform administrator can check anybody in.
+
+### 1. D-1's Front Desk portion is resolved as capabilities, not a role
+
+**There is no `FRONT_DESK` role, and this ticket deliberately did not add one.** The operational
+authority a reception desk needs is exactly three existing-or-new capabilities, each assignable on
+its own:
+
+| Capability | What it permits | New? |
+|---|---|---|
+| `patient.directory.read` | search and open the facility's own patient directory | existing |
+| `patient.register` | create a new patient record | existing |
+| **`visit.check_in`** | register an arrival; read the waiting projection; cancel an arrival before clinical contact | **new** |
+
+Billing stays independent (`billing.operate`, ADR-066). Future appointment authority stays
+independent. **A facility composes the job; DHealth does not ship the job title.** The proof that
+this is real rather than nominal is that `ORG_ADMIN` **plus a direct `visit.check_in` grant** runs
+reception with no role change, and that the backend suite's reception persona holds **no role
+template at all** — a fixture that would be impossible if any gate asked a job title.
+
+If a `FRONT_DESK` template is ever added it may only be a convenience bundle. Nothing may gate on it.
+
+### 2. `visit.check_in` carries no clinical read, and that split is the point
+
+`visit.document` previously meant "register an arrival, take a waiting patient, write notes, finish,
+cancel". That bundle is now two: `visit.check_in` for the arrival, `visit.document` for the
+consultation. `visit.read` remains the clinical read.
+
+**A holder of `visit.check_in` alone cannot read a visit, its note history, or its stated reason** —
+not even for a visit they created themselves. Creating a record is not a licence to read it. The
+`CLINICIAN` template gained `visit.check_in` the same day, so **no clinician's authority changed**;
+the split is compatibility-preserving in the only direction that matters.
+
+### 3. `require_clinician` narrowed from six capabilities to four, and this is a security fix
+
+`require_clinician` was an any-of over all six provider capabilities, including
+`patient.directory.read` and `patient.register`. A reception member legitimately holds those two — so
+before this change they would have passed **every** gate in that list: order creation, doctor review,
+the whole visit surface. The any-of question was effectively *"do you hold any provider capability at
+all"*.
+
+It now asks for any of `visit.read` / `visit.document` / `order.manage` / `result.review`, and the
+patient-directory and registration endpoints ask for their own capabilities directly. **Nobody
+holding a role template is affected** — `CLINICIAN` carries all of them. The members whose authority
+narrows are exactly those granted one patient capability directly and no clinical one, which is the
+composition this ADR exists to make possible.
+
+**Twenty-one route gates were retargeted** from `_require_clinician` to the specific capability the
+catalog already documented for them. **A residual any-of surface remains and is named rather than
+hidden:** roughly seventeen order/result *read* routes still use the narrowed `require_clinician`, so
+a member granted `visit.read` alone can still reach them. That is narrower than before and is
+recorded as follow-up work, not as done.
+
+### 4. `CHECKED_IN` is the one waiting fact; the queue is a projection, not a domain
+
+**No `WAITING` status was added.** ADR-065 already recorded that "the waiting list *is*"
+`CHECKED_IN`. A second status meaning the identical thing would make two state machines describe one
+patient. The waiting queue is a read over `CHECKED_IN` and `IN_PROGRESS`, ordered by the recorded
+arrival time, oldest first.
+
+**No `PLANNED`, no `NO_SHOW`, no appointment table.** Still four states. The future calendar ticket
+feeds the *same* check-in operation; nothing about walk-in arrival is structurally dependent on there
+being no appointment.
+
+### 5. The arrival projection is a privacy boundary, not a convenience
+
+`WaitingArrivalResponse` has **six enumerated fields**: visit id, patient id, display name, date of
+birth, coarse status, recorded arrival time. It is a separate model over a query that selects exactly
+those columns — both halves matter, because a shared model leaks the moment somebody adds a field to
+it, and a narrow model over a wide query leaks the moment somebody reuses the row.
+
+Excluded, each for a stated reason: the **stated reason for visit** (the most sensitive field on the
+row, and one a waiting room has no operational need for), the treating clinician, the consultation's
+own timestamps, and every note, order, result and review disposition. §7 of
+`docs/NATIVE-OPERATING-PRODUCT.md` *permits* a facility to show reception the stated reason; this
+ticket deliberately does not. That is **narrower than the ceiling**, named rather than silent.
+
+### 6. The desk does not name the treating clinician; the server derives it
+
+`clinician_identity_id` was already nullable (ADR-065 / `0034`), already paired with the two states
+that require one by `ck_exchange_visits_taken_visit_has_clinician`. So the semantic rule this ticket
+needed already existed in the database:
+
+    CHECKED_IN   -> clinician is NULL, truthfully: who will see the patient is not yet known
+    IN_PROGRESS  -> the clinician who took it, server-derived from the authenticated membership
+    COMPLETED    -> the same, and a row without one cannot exist
+    CANCELLED    -> NULL forever; an arrival that ended before contact had no clinician
+
+**The check-in request accepts no clinician identity at all.** `extra="forbid"` makes an attempt a
+422 rather than a silently ignored field, because a desk worker choosing a clinician to satisfy a
+field would be writing a false clinical record.
+
+### 7. `reason_for_visit` becomes nullable, and NULL is a fact rather than a gap
+
+`NOT NULL` was truthful while the only caller was a clinician. It is not truthful now: a person
+holding `visit.check_in` and no clinical authority is deliberately **not asked** for a reason,
+because a chief complaint typed at reception is clinical documentation under another name
+(`AGENTS.md` puts that behind the clinical lead's sign-off). NULL records "nobody stated one here".
+An empty string is refused, so "nobody was asked" and "somebody submitted a blank field" cannot blur.
+
+Every existing row keeps its exact value. A clinician's own arrival form still offers the field.
+
+### 8. At most one active visit per patient per provider organization
+
+A **partial** unique index over `(provider_organization_id, patient_id) WHERE status IN
+('CHECKED_IN','IN_PROGRESS')`. Partial is the whole point: completed and cancelled history is
+unlimited, so a returning patient is never blocked.
+
+The index is the guarantee, not the service's pre-read: two reception workers submitting at the same
+instant both pass a pre-read, and only a unique index can refuse the second write. The service turns
+the resulting `IntegrityError` into a **409**, distinguishing two events that are not the same:
+
+- the **same** idempotency key again — the same arrival, replayed. Returns the existing visit.
+- a **different** key for a patient already active — a different arrival for somebody already in the
+  building. Refused, because telling the second worker their action succeeded is how a waiting list
+  stops being believed.
+
+`0038`'s upgrade **refuses rather than repairing** a pre-existing duplicate, reporting a count and
+nothing that identifies a person. Which of two real arrivals is the real one is a question about what
+happened in a clinic; a migration that answered it would be fabricating clinical history.
+
+### 9. No new audit event, no new timestamp, no new provenance column
+
+`visit_created`'s `actor_identity_id` **is** "who checked the patient in" — truthfully, and for every
+historical row, which is why no `checked_in_by` column was added. `visit_started` is the clinician.
+0034's audit CHECK constraint is untouched. A column would have been a second, weaker copy of an
+audit row, fillable for old rows only by guessing.
+
+For the same reason there is **no `checked_in_at` column**: `created_at` is server-derived and a
+visit row is created by the check-in operation and by nothing else, so the two are the same moment
+for every row ever written. `WaitingArrivalRecord` renames it at the boundary rather than storing it
+twice.
+
+### 10. What this ADR does **not** decide, and one thing it refuses
+
+**Waiting duration is NOT built, and that is a recorded refusal rather than an omission.** The ticket
+asked for "how long have they been waiting" (its §16), a "waited-for" column (§30 of the operating
+specification) and a non-colour-only duration treatment (§49). `AGENTS.md` (amended 2026-09-27 by
+DHEALTH-CLINIC-VISIT-001) and §38 of `docs/NATIVE-OPERATING-PRODUCT.md` both forbid deriving a
+waiting time, priority or triage order from visit timestamps without the clinical lead's sign-off:
+*a number a clinic would act on is an operational signal DHealth must not produce, even when
+arithmetic produced it.*
+
+The recorded arrival time is a fact and is shown. The subtraction is performed nowhere — not on the
+server, not in the browser — and two tests assert the **absence**, so a later contributor who reads
+the ticket's §16 and helps is stopped by a failing test rather than by review. **Recorded as a
+blocker in `PROJECT_STATE.md`, `Human Decision Required: Yes`.**
+
+Also still open: **appointments/calendar** (unchanged, P1), **D-3** (specimen entity), **D-4** (Lab
+Reception identity attributes), **D-6** (walk-in laboratory patient), **D-8** (auditing successful
+sensitive reads), **D-11** (block-reason catalog validation). Editable and custom role templates
+remain ADR-067's follow-up.
+
+### 11. What may and may not be claimed
+
+**May:** DHealth Clinic supports a walk-in patient arrival workflow — authorized facility staff can
+identify or register a patient, check them in, place the same durable visit into a waiting state, and
+hand that exact visit to an authorized clinician who begins consultation. Arrival authority is
+capability-driven and exposes no clinical documentation. Facilities may grant or remove check-in
+authority independently of job title.
+
+**May not:** appointment scheduling, a calendar, no-show handling, clinical triage, a complete Front
+Desk product, human-qualified usability, production deployment, or a switch-ready Clinic. **Human
+usability is not claimed** — no receptionist and no clinician has used this surface, no timing has
+been measured against what it replaces, and product law 3 ("faster than what it replaces") therefore
+remains a validated target rather than a current claim.

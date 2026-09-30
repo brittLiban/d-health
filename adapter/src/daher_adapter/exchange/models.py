@@ -2729,6 +2729,30 @@ class Visit(Base):
         Index("ix_exchange_visits_provider_status", "provider_organization_id", "status"),
         # The patient-chart query: one patient's visit history.
         Index("ix_exchange_visits_provider_patient", "provider_organization_id", "patient_id"),
+        # DHEALTH-FRONT-DESK-001/ADR-069: **at most one active visit per patient per provider.**
+        #
+        # A *partial* unique index, not a constraint, because the uniqueness holds only over the
+        # two live states: a patient who was seen last week and comes back today must be able to,
+        # so `COMPLETED` and `CANCELLED` rows are unlimited and excluded from the index entirely.
+        #
+        # This is the database's half of the invariant and it is the load-bearing half. The service
+        # pre-reads for an active visit, but two reception workers checking the same patient in at
+        # the same instant both pass that read -- the classic check-then-act race -- and only a
+        # unique index can refuse the second write. `exchange/visits.py`'s `start` catches the
+        # resulting `IntegrityError` and turns it into a 409, so the loser is told rather than
+        # 500'd.
+        #
+        # Same `postgresql_where`/`sqlite_where` pair 0034's order-visit index already uses, so the
+        # unit suite (SQLite, built by `metadata.create_all`) enforces it too rather than
+        # qualifying it only against PostgreSQL.
+        Index(
+            "uq_exchange_visits_one_active_per_patient",
+            "provider_organization_id",
+            "patient_id",
+            unique=True,
+            postgresql_where=text("status IN ('CHECKED_IN', 'IN_PROGRESS')"),
+            sqlite_where=text("status IN ('CHECKED_IN', 'IN_PROGRESS')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -2746,7 +2770,15 @@ class Visit(Base):
     )
     # The patient's stated reason, as stated. Never a diagnosis, never interpreted, never coded --
     # a code system is D-5 in `docs/NATIVE-OPERATING-PRODUCT.md` §28, not this ticket's decision.
-    reason_for_visit: Mapped[str] = mapped_column(String(500), nullable=False)
+    #
+    # **Nullable since DHEALTH-FRONT-DESK-001/ADR-069**, and the nullability is the honest shape
+    # rather than a relaxation. Before ADR-069 the only caller was a clinician, who always had a
+    # reason to record. Now an arrival may be registered by somebody at the desk who holds
+    # `VISIT_CHECK_IN` and no clinical authority at all: that person is not asked for a reason
+    # (§15 -- a chief complaint collected at reception is clinical documentation by a different
+    # name), and NULL is the truthful record of "nobody stated one here". A non-empty string means
+    # somebody actually typed it; an empty string is refused by the service so the two cannot blur.
+    reason_for_visit: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )

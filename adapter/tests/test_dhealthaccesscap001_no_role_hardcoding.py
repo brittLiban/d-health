@@ -151,7 +151,17 @@ TS_GUARDED = (
     "features/workspace/workspaceCapabilities.ts",
     "features/billing/BillingPage.tsx",
     "features/lab/LabProvider.tsx",
-    "features/clinic/ClinicContext.tsx",
+    # **Was `ClinicContext.tsx` until DHEALTH-FRONT-DESK-001 found the typo.** The file is, and
+    # always was, `.ts` -- so this entry matched nothing and `continue`d silently: an
+    # allowlist-shaped hole in a guard, which is worse than an absent guard because it reads as
+    # covered. `test_every_guarded_frontend_file_exists` below makes that class of typo impossible.
+    "features/clinic/ClinicContext.ts",
+    # DHEALTH-FRONT-DESK-001/ADR-069 §60. The arrival surface and the screen that hosts it: where
+    # "shows the wrong person the wrong control" would live for the newest workflow, and where
+    # NC-FD-8 re-introduces a role check to prove the guard bites.
+    "features/visits/ClinicArrivals.tsx",
+    "features/visits/ClinicVisitsPage.tsx",
+    "features/clinic/pages/ClinicHomePage.tsx",
 )
 
 #: `roles.includes('X')`, `role === 'X'`, `hasRole('X')` -- the shapes §1 names.
@@ -194,6 +204,28 @@ def test_no_navigation_or_capability_module_authorizes_on_a_role_name():
     assert not offences, (
         "frontend authorization is reading role names again (§25/§43). Ask "
         "`can(capabilities, Capability.X)`:\n" + "\n".join(offences)
+    )
+
+
+def test_every_guarded_frontend_file_exists():
+    """The guard above skips a path it cannot find, so a typo silently exempts a file.
+
+    **This is not hypothetical.** `TS_GUARDED` carried `features/clinic/ClinicContext.tsx` from
+    DHEALTH-ACCESS-CAPABILITIES-001 until DHEALTH-FRONT-DESK-001; the real file is `.ts`, so that
+    entry matched nothing for the whole intervening period while reading as covered. The Python half
+    has had `test_the_allowlist_stays_small_and_every_entry_is_real` doing exactly this job since
+    day
+    one -- the frontend half simply never got its equivalent.
+
+    Kept as a separate test rather than an assertion inside the guard, so "a guarded file vanished"
+    and "a guarded file broke the rule" are two different failures with two different fixes."""
+    if not _UI.exists():  # pragma: no cover - the adapter checked out without the UI
+        pytest.skip("the UI tree is not present")
+
+    missing = [relative for relative in TS_GUARDED if not (_UI / relative).exists()]
+    assert not missing, (
+        "guarded frontend files do not exist, so the structural guard silently skips them. "
+        f"Fix the path or remove the entry deliberately: {missing}"
     )
 
 

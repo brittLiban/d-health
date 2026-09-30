@@ -280,16 +280,28 @@ class AuthorizationService:
         organizations), so pretending otherwise here would be an inconsistent lie, not genuine
         anti-enumeration."""
         # DHEALTH-ACCESS-CAPABILITIES-001 §17: the name and the reasoning above are unchanged;
-        # the *authority* is now any of the six clinical capabilities, which a role
+        # the *authority* is now any of the clinical capabilities, which a role
         # template happens to carry. A member granted it directly passes here without holding
         # the role, and a member denied it individually is refused while still holding the role
         # -- neither of which the role lookup this replaced could express.
+        #
+        # **Narrowed by DHEALTH-FRONT-DESK-001/ADR-069 from six capabilities to four.**
+        # `PATIENT_DIRECTORY_READ` and `PATIENT_REGISTER` were in this tuple because the single
+        # `require_clinician` gate they came from guarded the patient directory too. That made the
+        # any-of question "do you hold *any* provider capability at all", and it is the reason a
+        # reception member -- who legitimately holds the two patient capabilities -- would
+        # otherwise pass every gate in this list: order creation, result review, the whole visit
+        # surface. The patient-directory and registration endpoints ask for their own capabilities
+        # directly instead (`api.py`), so nothing lost a gate; what changed is that holding the
+        # *patient* authorities no longer implies the *clinical* ones.
+        #
+        # Nobody holding a role template is affected: `CLINICIAN` carries all of these and more.
+        # The members whose authority narrows are exactly those granted one patient capability
+        # directly and no clinical one -- the composition ADR-069 exists to make possible.
         return self._require(
             principal,
             organization_id,
             (
-                Capability.PATIENT_DIRECTORY_READ,
-                Capability.PATIENT_REGISTER,
                 Capability.VISIT_READ,
                 Capability.VISIT_DOCUMENT,
                 Capability.ORDER_MANAGE,

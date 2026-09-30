@@ -92,6 +92,8 @@ import type {
   VisitNoteCreateRequest,
   VisitReasonUpdateRequest,
   VisitStatus,
+  // DHEALTH-FRONT-DESK-001
+  WaitingArrival,
   // DHEALTH-BILLING-001
   BillableOrder,
   BillingPatient,
@@ -2099,6 +2101,32 @@ export class ExchangeClient {
       options.token,
     )
     return { visit: data, created: status === 201 }
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/visits/waiting
+   *
+   * DHEALTH-FRONT-DESK-001/ADR-069 — who is in the building, oldest arrival first.
+   *
+   * Deliberately **not** `listVisits({ statuses: ['CHECKED_IN'] })`, and the difference is the whole
+   * ticket: that call returns `Visit`, which carries the stated reason, and is therefore behind
+   * `visit.read`. This one is behind `visit.check_in` **or** `visit.document` and returns
+   * `WaitingArrival`, which has no clinical field at all. A reception-only membership can call this
+   * and is refused the other — so the narrow one is what the arrival surface uses.
+   *
+   * The server orders the rows; nothing here re-sorts them. It also returns no waiting duration, and
+   * **none may be computed here** — see `WaitingArrival`.
+   */
+  async listWaitingArrivals(
+    providerId: string,
+    options: { limit?: number; token?: string; signal?: AbortSignal } = {},
+  ): Promise<WaitingArrival[]> {
+    const query = options.limit === undefined ? '' : `?limit=${encodeURIComponent(options.limit)}`
+    return this.request<WaitingArrival[]>(
+      `/organizations/${encodeURIComponent(providerId)}/visits/waiting${query}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
   }
 
   /**
