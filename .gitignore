@@ -89,3 +89,8 @@ native-blocked-results.json
 # by scripts/demo/qualify-front-desk.sh. Evidence of a run, not part of the source -- same treatment
 # as its eight siblings above.
 native-front-desk-results.json
+
+# DHEALTH-LAB-RECEPTION-001: the laboratory work-intake qualification report, written at the
+# repository root by scripts/demo/qualify-lab-reception.sh. Evidence of a run, not part of the
+# source -- same treatment as its nine siblings above.
+native-reception-results.json
