@@ -243,7 +243,7 @@ class LabWorkflowRepository:
         status transition already reliably advances it -- no extra bookkeeping column needed), order
         UUID as a stable tie-break for two orders updated in the same instant.
 
-        **[Changed 2026-10-01, DHEALTH-LAB-RECEPTION-001.** The incoming half used to sort
+        **[Changed 2026-09-30, DHEALTH-LAB-RECEPTION-001.** The incoming half used to sort
         newest-first with everything else, which buried the order that had been waiting longest --
         see the inline comment at the ``order_by`` for why a backlog and a review list want opposite
         orders, and why ``selected_at`` is the only timestamp that truthfully means "when this
