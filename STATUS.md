@@ -6,6 +6,89 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-09-30, DHEALTH-LAB-RECEPTION-001, directly on `master`.** From `3e4b69b`. **The beginning of a
+laboratory day is now qualified rather than merely written — and the incoming queue no longer buries
+the order that has waited longest.** Alembic head is unchanged at **`0038_visit_check_in`**: this
+ticket added **no migration, no capability, no order state and no ADR.**
+
+**The honest headline is that intake was already built, and this ticket says so.** DH-EX-006 built the
+incoming queue, the order detail read, accept and reject, with the `LabOrder` row locked `FOR UPDATE`
+and idempotent replay for a lost response. ADR-067 made the gate a capability. The interface has opened
+on `Nouveaux` — `SELECTED`, the incoming queue — since DH-LAB-001, and `LabHomePage` already counted new
+orders. What had never been done was assert the authority, privacy and tenant claims **at the HTTP
+edge**, against a **real backend**, or **in a browser**.
+
+**One real defect, and it is the kind a work queue exists to prevent.** `list_for_lab` sorted every
+view `updated_at DESC`. For the six review views that is right — the question there is what changed
+recently. For `SELECTED`, the only actionable backlog a laboratory holds, it is exactly backwards:
+newest-first buries the order that has been waiting longest underneath everything that arrived since,
+which is how a routed order gets forgotten. The incoming view now sorts `LabSelection.selected_at ASC`
+with the order id as a stable tie-break, and nothing else changed. `selected_at` is written once per
+order with no `onupdate`, so no later event can rewrite it — which is why it and not `updated_at` is the
+routing instant.
+
+**No waiting duration is computed or displayed**, on the server or in the browser. Ordering by a
+recorded instant is not deriving a number from one, and the second needs the clinical lead's sign-off.
+The same refusal DHEALTH-FRONT-DESK-001 made on the clinic side, applied here for consistency rather
+than re-argued. A browser phase asserts no queue card carries an elapsed time.
+
+**No new state was invented, deliberately.** `SELECTED` already means "routed here, not yet answered",
+which is exactly what an incoming queue is. A `RECEIVED` or `AT_RECEPTION` state would have added a
+second truth about the same fact, and the reception queue is a **projection over existing truth**
+instead. **No new capability either**: `lab.queue.work` already fit, and a test pins the whole `lab.*`
+namespace to exactly two members so a later `lab.reception.*` is stopped by a failure.
+
+**`Réception` is not a new navigation section.** `docs/NATIVE-OPERATING-PRODUCT.md` §16 listed it as
+"Add — P1"; `Ordres` opening on `Nouveaux` *is* that surface, and a second entry over the same
+projection would be two doors into one room. §16's table is corrected.
+
+**The concurrency evidence was green for the wrong reason, and that predates this ticket.**
+DH-EX-006's three races all build their engine on SQLite, where SQLAlchemy **omits `FOR UPDATE`
+entirely** — so the lock they exist to exercise was never taken, and SQLite's whole-database writer
+serialization produced the right answer for an unrelated reason. Eight new tests against a disposable
+PostgreSQL 16.15 container close it. The proof: with the lock removed, the SQLite races **still
+passed** while PostgreSQL caught **7 of 25 concurrent accepts transitioning instead of 1**.
+
+**Authority is a capability, and the browser qualification proves it the hard way.** The persona is
+`demo-lab-clerk`, who holds `BILLING_CLERK` and nothing else, composed into a reception worker by an
+administrator granting **one** capability — `lab.queue.work` — through `Équipe et accès`, with the role
+row provably unchanged, and then withdrawn again. **No `LAB_RECEPTIONIST` role exists and nothing gates
+on a job title.** `lab.result.release` was never granted, and the server refused that same person a
+release with a 403 immediately after they accepted the order — ADR-044's independence demonstrated
+rather than described. `billing.operate` survives the withdrawal untouched (ADR-066).
+
+**The intake projection structurally cannot carry clinic clinical content.** `LabWorkflowOrderRecord`
+has no field naming a visit, a reason, a note, a review or a result value, so there is nothing for
+anyone to forget to filter. A laboratory also **cannot hold `patient.directory.read` at all** — the
+capability is provider-only in the catalog, so the resolver's organization-type filter drops it even if
+granted.
+
+**🛑 The laboratory decline carries no reason, and the ticket's own UI language assumed one exists.**
+`reject()` is a pure `SELECTED → REJECTED` transition: no reason column, no taxonomy, nothing
+reason-shaped reaching the clinic. This is **recorded, not filled** — inventing a vocabulary is the
+"obviously should" instinct `AGENTS.md` names, and **D-11** is already open because the *block* reason
+vocabulary has not been validated by anyone who works in a laboratory. Two tests and one browser phase
+pin the absence.
+
+**Evidence actually executed:** 23 new adapter tests at the HTTP edge; 8 new real-PostgreSQL-16.15
+concurrency tests; **10 of 10 browser phases green** against real Chromium, Caddy, Keycloak 26.7.1 and
+PostgreSQL 16, on a **rebuilt** adapter image verified to contain the change; **eleven negative controls
+executed and reverted byte-for-byte**, one of them rebuilding the stack to prove the browser evidence is
+load-bearing rather than passing against a stale image; `ruff`, `ruff format`, `tsc -b`, `tsc -p
+e2e/tsconfig.json` and `oxlint` clean; the UI build and its no-secrets check clean.
+
+**Specimens are untouched — D-3 remains entirely open.** So do **D-4** (identity-confirmation
+attributes), **D-8** (successful-read auditing) and **D-11**.
+
+**Human usability is UNQUALIFIED.** Nobody who works at a laboratory counter has used this surface, and
+no timing has been measured against whatever the laboratory does today, so law 3 remains a validated
+target rather than a current claim. Ten green browser phases are evidence that the software works, not
+that the workflow is workable. **Pilot-ready is still not clinically live.** All data synthetic; no real
+patient data anywhere; GitHub Actions untouched.
+
+### Previous as-of — 2026-09-30, DHEALTH-FRONT-DESK-001
+
+
 **2026-09-30, DHEALTH-FRONT-DESK-001, directly on `master`.** From `4ad7508`. **A clinic day can now
 begin at the desk, and the desk sees no clinical record.** Until today DHealth could run a
 consultation but had no beginning: nobody could tell who was in the waiting room, so a clinic kept a

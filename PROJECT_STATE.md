@@ -22912,3 +22912,207 @@ target, not a current claim**.
 
 **Pilot-ready is still not clinically live.** All data synthetic; no real patient data used anywhere;
 GitHub Actions untouched.
+
+## DHEALTH-LAB-RECEPTION-001 — laboratory work intake, qualified rather than built (2026-09-30)
+
+**No ADR. No migration. No new capability. No new order state.** Alembic head unchanged at
+`0038_visit_check_in`. One behavioural change — a sort order — plus the evidence that everything around
+it was already true. Three commits from `3e4b69b`: `722877d`, `44a839c`, `aa3c14e`, and a fourth for
+documentation.
+
+### The scoping finding, first, because it changes how the rest reads
+
+**Laboratory work intake was already built at `3e4b69b`.** DH-EX-006 built the incoming queue, the order
+detail read, accept and reject, with the `LabOrder` row locked `FOR UPDATE` and idempotent replay for a
+lost response. ADR-067 replaced the role check with `lab.queue.work`. `DHEALTH-LAB-BLOCKED-001` added
+`BLOCKED`. `LabOrdersPage` has defaulted to `Nouveaux` — `SELECTED`, which *is* the incoming queue — since
+DH-LAB-001, with `Accepter l'ordre` and `Refuser l'ordre` on the panel, and `LabHomePage` already counted
+`Nouveaux ordres`.
+
+So this ticket is a **qualification with one defect fixed**, and it is recorded that way. Describing the
+existing queue as newly delivered would have been the exact dishonesty `AGENTS.md`'s written/verified/
+demonstrated rule exists to prevent.
+
+### Decisions taken, and why each is the smaller option
+
+| Decision | Reasoning |
+|---|---|
+| **No new order state** | `SELECTED` already means "routed here, not yet answered". A `RECEIVED`/`AT_RECEPTION`/`QUEUED` state would be a second truth about one fact, and the reception queue is a **projection over existing truth** instead. The ticket forbade this explicitly and it would have been wrong regardless |
+| **No new capability** | `lab.queue.work` already governs exactly this. `test_intake_is_governed_by_lab_queue_work_and_no_new_capability_was_added` pins the whole `lab.*` namespace to `{lab.queue.work, lab.result.release}`, so a later `lab.reception.*` fails a test rather than passing review |
+| **No migration** | Nothing needs a column. `LabSelection.selected_at` already existed, already had `default=utc_now`, already had **no `onupdate`**, and already sat on a row whose `lab_order_id` is `unique=True` |
+| **No `Réception` navigation entry** | `Ordres` opening on `Nouveaux` already *is* the surface. A second entry over the same projection is two doors into one room and the dead-navigation failure `staffSections.ts` forbids, reached from the other direction. `docs/NATIVE-OPERATING-PRODUCT.md` §16's "Add — P1" row is corrected |
+| **Label stays `Nouveaux`** | Established vocabulary, referenced by two existing browser specs, and `Nouveaux ordres` is what `Aujourd'hui` has said since DH-LAB-001. Renaming carries regression surface and no product gain |
+| **No `LAB_RECEPTIONIST` role** | Forbidden by the ticket, and the browser qualification answers it better: a *cashier* was composed into a reception worker by one grant |
+
+### 🛑 Recorded finding — the laboratory decline carries no reason · **Human Decision Required: Yes** · raised 2026-09-30
+
+**The ticket's UI language assumes a decline reason mechanism exists. It does not.** `reject()` is a pure
+`SELECTED → REJECTED` transition: no reason column, no taxonomy, no free-text note, and nothing
+reason-shaped reaching the ordering clinic. The decline endpoint accepts **no body at all**.
+
+**This was recorded rather than filled, deliberately.** A laboratory refusing routed work arguably *should*
+say why — and `AGENTS.md`'s rule names that instinct precisely: *"Any gap that 'obviously should' be filled
+a particular way — that instinct is the failure mode being guarded against, not a green light."*
+
+The stronger reason is that this repository has already been here. **D-11 is open** because
+`DHEALTH-LAB-BLOCKED-001`'s block-reason vocabulary (`SPECIMEN_UNUSABLE`, `CLARIFICATION_REQUIRED`, and the
+rest) has never been validated by anyone who works in a laboratory, and `CURRENT_STATE.md`'s entry for that
+ticket lists eight scenarios to put to a participant. Inventing a **second** unvalidated operational
+vocabulary while the first waits on a human would compound that, not resolve it.
+
+**Two tests and one browser phase pin the absence**, so the next contributor who assumes otherwise is
+corrected by a failure:
+`test_the_decline_endpoint_accepts_no_body_and_records_no_reason` (a body is rejected; nothing
+reason-shaped is stored), `test_declining_is_terminal_and_does_not_return_to_incoming`, and **LR-B8**,
+which asserts that between clicking `Refuser l'ordre` and the refusal landing, **no textbox and no
+combobox** is offered.
+
+**The question for Liban, stated narrowly:** should a laboratory declining routed work be required to state
+a reason, and from what vocabulary? It belongs **with D-11, not ahead of it** — the same participant
+conversation answers both, and answering this one alone would produce a second vocabulary to re-validate.
+
+**This does not block anything.** Accept, decline, the queue and the handoff into collection all work
+without it.
+
+### The one real defect, and what it would have cost
+
+`list_for_lab` sorted **every** view `updated_at DESC`. For the six review views — `Terminés`, `Refusés`,
+`En cours`, `Bloqués`, `Acceptés`, `Tous` — that is correct: the question there is what changed recently.
+For `SELECTED` it is exactly backwards. `SELECTED` is the only *actionable backlog* a laboratory holds, and
+newest-first buries the order that has been waiting longest underneath everything that arrived since. That
+is how a routed order gets forgotten, which is the one failure a work queue exists to prevent, and it fails
+`docs/NATIVE-OPERATING-PRODUCT.md` §27's ownership test in the same way a silent `BLOCKED` state would have.
+
+The incoming view now sorts `LabSelection.selected_at ASC`, `LabOrder.id ASC`. The review views are
+untouched, and that asymmetry is asserted — `test_the_review_views_still_sort_newest_activity_first` stays
+green under the control that reddens the ordering test, which is what makes the asymmetry deliberate rather
+than accidental.
+
+**Why `selected_at` and not a nearby column.** It is the routing fact: the instant this order became *this*
+laboratory's work. Written once (`unique=True` on `lab_order_id`, `default=utc_now`, **no `onupdate`**), so
+no later event rewrites it and no reroute exists to move it. `updated_at` advances on every mutation, so a
+backlog ordered by it reshuffles for reasons unrelated to how long work has been owed.
+`LabOrder.created_at` is when the *clinic* raised the order — a different fact.
+
+**No duration is computed from it anywhere.** Ordering by a recorded instant is not deriving a number from
+one, and the second is what `AGENTS.md` (2026-09-27) and §38's named-gaps table put behind the clinical
+lead's sign-off. The same refusal `DHEALTH-FRONT-DESK-001` made on the clinic side, applied here rather
+than re-argued.
+
+### What was built
+
+| Piece | Where |
+|---|---|
+| `list_for_lab`: incoming sorts oldest-routed-first; review views unchanged | `exchange/lab_workflow.py` (the ticket's only source change) |
+| 23 edge tests — authority, privacy, tenant isolation, audit, lifecycle | `tests/test_dhealthlabreception001_intake.py` (new) |
+| 8 PostgreSQL 16 concurrency tests, gated on `DHLR_PG_*` | `tests/integration/test_dhealthlabreception001_postgres_qualification.py` (new) |
+| 10-phase browser qualification | `ui/e2e/native/13-lab-reception.spec.ts` (new) |
+| Playwright config and runner | `ui/e2e/native-reception.config.ts`, `scripts/demo/qualify-lab-reception.sh` (new) |
+| Report file ignored, as its nine siblings are | `.gitignore` |
+
+**No frontend source file changed.** The interface already did the right thing; it was being handed the
+wrong order.
+
+### Evidence actually executed
+
+| Check | Result |
+|---|---|
+| `tests/test_dhealthlabreception001_intake.py` (new) | **23 passed** |
+| **Whole adapter suite** (`pytest`, including `tests/integration`) | **2009 passed, 234 skipped** in 16m45s, exit 0. Exactly the prior 1986 plus this ticket's 23; the skips are the env-gated PostgreSQL suites |
+| `tests/test_exchange_lab_workflow.py` + `test_dhealthlabblocked001_blocked_orders.py` (existing, unchanged) | **78 passed** (44 + 34) |
+| Real PostgreSQL 16.15 intake concurrency qualification (new, `DHLR_PG_*`) | **8 passed** |
+| `ruff check` · `ruff format --check` | **clean** · **256 files formatted** |
+| `tsc -b --noEmit` · `tsc -p e2e/tsconfig.json` | **clean** · **clean** |
+| `oxlint` (UI) | **0 errors**, 59 pre-existing warnings, **none in the new files** |
+| `npm run build` + the no-secrets bundle check | **clean**, no secrets across 28 built files |
+| Lab + staff + workspace UI tests (7 files) | **188 passed** |
+| **Browser: `13-lab-reception` (new)** | **10 of 10 phases green**, 32.9s |
+| Browser regression — blocked · billing · capabilities · journey · front-desk · visit · access | **13 · 6 · 6 · 12 · 9 · 9 · 16 = 71 phases green**, each from its own `reset.sh` baseline |
+
+**Total browser evidence: 81 phases green across 8 suites.**
+
+### The adapter image had to be rebuilt, and that is worth recording
+
+The running `dhealth-native-demo-adapter-1` carried a **pre-`722877d`** build: `grep -c selected_at.asc`
+inside the container returned **0**. LR-B5 would have failed against it — or, worse, could have passed by
+accident on a favourable baseline, which is the failure mode "run against rebuilt current images, not stale
+containers" exists to prevent. `scripts/demo/up.sh`'s `up -d --build` fixed it; image
+`fec7cb26…` → `8dd4e5e0…`, in-container count 0 → 1. The qualify script's header records the one-line grep
+that verifies it.
+
+### §NC — the negative controls, executed and reverted
+
+Eleven. Each was applied to the committed tree by **exact string replacement, never a regex over code**, by
+a driver that refuses a replacement matching anything other than exactly once and that `ast.parse`s the
+result before writing — so a control reddening from a `SyntaxError` or a `NameError` is impossible by
+construction rather than caught afterwards. Each was reverted with `git checkout --` and the tree verified
+clean by `git status --porcelain` **and** `git diff --stat`, both empty, after every one.
+
+| # | Exact mutation | Invariant removed | What went red | Bad real-world outcome |
+|---|---|---|---|---|
+| **NC-LR-1** | `list_for_lab`'s `.where(LabSelection.lab_organization_id == lab_organization_id)` becomes a no-op join predicate | the tenant boundary on the queue read | `excludes_another_laboratory_s_work` — **1 failed**, with the other laboratory's order in the list | every laboratory on the network reads every other laboratory's routed work, patient names included |
+| **NC-LR-2** | `LabWorkflowOrderResponse` gains `visit_reason_for_visit` | the intake projection's narrowness | `carries_no_clinic_clinical_content` — **1 failed** on the exact key-set assertion | what the patient said about why they came leaves the clinic and reaches a laboratory counter |
+| **NC-LR-3** | `require_lab_tech` becomes `require_role(..., LAB_TECH)` | authority is a capability, not a job title | `direct_lab_queue_work_grant_permits_intake_with_no_role` and `explicit_deny_beats_the_role_template` — **2 failed** | a facility cannot compose a reception worker without inventing a job title, and an individual DENY silently stops working — a revoked person keeps working |
+| **NC-LR-4** | the gate's capability tuple gains `LAB_RESULT_RELEASE` | release authority must not imply intake | `release_authority_alone_does_not_grant_intake` — **1 failed** (403 → **200**) | ADR-044's separation collapses in one direction; a releaser silently gains work intake |
+| **NC-LR-5** | `_transition_in_session` drops `.with_for_update()` | the row lock on every intake mutation | the six SQLite races **still passed**; PostgreSQL 16 — **3 failed**, with **7 of 25** concurrent accepts transitioning instead of 1 | two workers both believe they own an order; an accept overwrites a decline; the audit trail records work twice |
+| **NC-LR-6** | the status filter becomes `status.in_([filter, ACCEPTED])` | answered work leaves the incoming queue | `drops_work_once_it_is_answered` — **1 failed**, the accepted order back in the list | a laboratory re-accepts work it already took, and the backlog never empties, so the queue stops meaning anything |
+| **NC-LR-7** | the `SELECTED` branch sorts `updated_at DESC` again | the ordering fix this ticket exists for | `incoming_queue_is_oldest_routed_first` — **1 failed at index 0**; `review_views_still_sort_newest_activity_first` **stayed green** | the order that has waited longest is buried under everything newer, and gets forgotten |
+| **NC-LR-8** | `PATIENT_DIRECTORY_READ.organization_types` becomes `_BOTH` | a laboratory structurally cannot hold clinic directory authority | `cannot_hold_patient_directory_authority_at_all` — **1 failed** | a laboratory can be granted the clinic's whole patient directory, which is a laboratory browsing patients it has no order for |
+| **NC-LR-9** | `if current != from_status:` becomes `if False and …` | the state precondition on every transition | `an_invalid_intake_transition_is_a_409_not_a_500` and `declining_is_terminal_and_does_not_return_to_incoming` — **2 failed** (409 → **200**) | an already-accepted order can be declined; a terminal refusal is reopened; the lifecycle stops being a lifecycle |
+| **NC-LR-10** | `if current == to_status:` becomes `if False and …` | the idempotent-replay branch | `a_retried_acceptance_neither_transitions_twice_nor_audits_twice` — **1 failed**: the retry became a **409** where the product promises **200** | a lost HTTP response makes the worker's second click an error; the work looks refused when it was taken |
+| **NC-LR-11** | **NC-LR-7 again, with the adapter image rebuilt**, against the running stack | the browser evidence being load-bearing | **LR-B5 red** on *"the order routed first must appear above the one routed after it"*; LR-B1–B4 green, B6–B10 skipped. In-container `selected_at.asc` count confirmed **0** | the browser suite could have been passing against a stale image and nobody would know |
+
+**NC-LR-5 is the single most valuable control in this ticket.** SQLite green and PostgreSQL red, from the
+same mutation, is the "green for the wrong reason" gap measured rather than argued.
+
+**NC-LR-10's red is worth stating precisely rather than generously.** It fails on the *safe-retry* half of
+its assertion, not on a double audit — the status precondition still prevents the second transition, so what
+breaks is the promise that a retried accept returns 200. That is the honest reading and it is the one
+recorded.
+
+**NC-LR-11's revert failed on the first attempt** and is recorded because the failure mattered: the script
+ran `git checkout --` as root, which git refused with *"detected dubious ownership"*, leaving the source and
+the running image still broken. Caught immediately, reverted as the owning user, the stack rebuilt, and the
+suite re-run green (10 of 10) to prove the restoration — but a script that reverts as the wrong user is a
+real way to leave a repository broken while reporting success.
+
+**Not attempted, and why:** no mutation was made to an unused helper; and no control was run against
+`LabSelection`'s write-once guarantee, because the guarantee is the *absence* of an `onupdate` and there is
+no line to break — breaking it would mean adding one, which tests a hypothetical rather than removing a
+protection.
+
+### One thing this ticket got wrong and fixed
+
+**LR-B5 failed once for a reason that was mine, not the product's.** Every queue tab renders the same two
+orders in a single run, so a list read taken between clicking a tab and its refetch returning is the
+*previous* tab's list — indistinguishable by content, and silently answering the wrong question. `openTab`
+now waits for the queue response and the order-dependent assertions poll. The fix is in the reading, not in
+the claim, and the claim was then confirmed both green (real stack) and red (NC-LR-11).
+
+**Also worth recording: two assertions in the PostgreSQL file were passing without testing anything.**
+`LabWorkflowOrderRecord`'s field is `id`; only `LabWorkflowOrderResponse` renames it to `order_id`, so three
+assertions were raising `AttributeError`. Worse, `[r.order_id for r in list_for_lab(rival_id)] == []` had
+been passing **vacuously** — an empty list comprehension never evaluates the attribute, so a wrong name
+inside it is invisible. The list is now asserted empty on its own before anything is read out of it.
+
+### What this does not make true
+
+**Human usability is UNQUALIFIED.** Nobody who works at a laboratory counter has used this surface, no
+timing has been measured against whatever the laboratory does today, and product law 3 ("faster than what it
+replaces") remains a **validated target, not a current claim**. 81 green browser phases are evidence that
+the software works, not that the workflow is workable — and the second is a human judgement no suite can
+make. The words *usable*, *intuitive*, *staff-ready*, *switch-ready* and *production-ready* are not claimed
+anywhere in this ticket's output.
+
+**Still open and untouched:** **D-3** (specimen entity — no specimen was modelled; the handoff phase records
+the existing order-level collection milestone and stops), **D-4** (which attributes a receiving laboratory
+needs to confirm the presenting patient), **D-8** (whether successful reads of sensitive data are audited —
+intake *mutations* write `lab_order_accepted`/`lab_order_rejected`; intake *reads* are not audited),
+**D-11** (laboratory reason vocabulary, now carrying the decline question above).
+
+**19 call sites still use the narrowed `require_clinician` any-of**, unchanged by this ticket and still
+recorded as follow-up work.
+
+**Nothing was pushed, and GitHub Actions was not touched or examined.** All data synthetic; no facility
+database was contacted — the PostgreSQL qualification runs only against a disposable container that was
+torn down. Pilot-ready remains **not clinically live**.

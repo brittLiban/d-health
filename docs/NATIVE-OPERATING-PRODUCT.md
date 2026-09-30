@@ -692,7 +692,7 @@ changes.
 | **Ordres** | Keep — exists |
 | **Résultats** | Keep — exists (entry + inspection) |
 | **Libération** | Keep — exists, separate authority |
-| **Réception** | **Add — P1** (P0 only for a walk-in laboratory, §17) |
+| **Réception** | **Not added** — `Ordres` opening on `Nouveaux` *is* this surface (§42, 2026-09-30). A second navigation entry over the same projection would be two doors into one room. Still open for a walk-in laboratory (§17), which is a different question |
 | **Prélèvements** | **Add — P1** for the entity; the blocking part is P0-4 below |
 | **Facturation** | **Add — P0** (§18) |
 | **Paramètres** | **Add — P1** — offerings, prices, templates are backend-only today |
@@ -2223,3 +2223,108 @@ stack, performed by a member with no clinical role and no role named for a front
 **Pilot-ready is still not clinically live.** This adds a place to record that somebody walked in. It
 adds no clinical sign-off on any order set or structured field, and nothing here is authorization to
 use DHealth on a real patient.
+
+## 42. `DHEALTH-LAB-RECEPTION-001` as delivered (2026-09-30)
+
+**No ADR. No migration. No new capability. No new order state.** One behavioural change — a sort
+order — and the evidence that everything around it was already true. This section leads with that
+because a reader who expects a feature will otherwise mistake the qualification for one.
+
+### The finding that shaped the ticket
+
+**Laboratory work intake was already built at `3e4b69b`.** DH-EX-006 built the incoming queue, the
+order detail read, accept and reject, with the `LabOrder` row locked `FOR UPDATE` and idempotent
+replay for a lost response. ADR-067 made the gate a capability. `DHEALTH-LAB-BLOCKED-001` added
+`BLOCKED`. The interface has opened on `Nouveaux` — `SELECTED`, the incoming queue — since DH-LAB-001,
+with accept and decline on the panel, and `LabHomePage` already counts new orders.
+
+So the deliverable is a **qualification with one defect fixed**, and it is written that way rather
+than as new work. §5's capability inventory needed no additions to support it.
+
+### The one thing that was actually wrong
+
+`list_for_lab` sorted **every** view `updated_at DESC`. For the six review views — `Terminés`,
+`Refusés`, `En cours`, `Bloqués`, `Acceptés`, `Tous` — that is correct: the question there is what
+changed recently. For `SELECTED` it is exactly backwards. `SELECTED` is the only *actionable backlog* a
+laboratory holds, and newest-first buries the order that has been waiting longest underneath everything
+that arrived since. That is how a routed order gets forgotten, which is the one failure a work queue
+exists to prevent, and it fails §27's ownership test in the same way a silent `BLOCKED` state would
+have.
+
+The incoming view now sorts `LabSelection.selected_at ASC` with the order id as a stable tie-break.
+Nothing else changed. `selected_at` is the routing fact rather than a convenient nearby column:
+`LabSelection` is written once per order (`lab_order_id` is `unique=True`, `default=utc_now`, **no
+`onupdate`**), so no later event can rewrite it and no reroute exists to move it. `updated_at` advances
+on every mutation, so a backlog ordered by it reshuffles for reasons unrelated to how long the work has
+been owed. `LabOrder.created_at` is when the *clinic* raised the order, which is a different fact.
+
+**No duration is computed from it, anywhere.** Ordering by a recorded instant is not deriving a number
+from one, and the second is what §38's named-gaps table and `AGENTS.md` (2026-09-27) forbid without the
+clinical lead's sign-off. This is the same refusal `DHEALTH-FRONT-DESK-001` made on the clinic side,
+applied to the laboratory side for consistency rather than re-argued. One browser phase asserts that no
+queue card carries an elapsed time.
+
+### Departures from this specification's own text, each deliberate
+
+**1. `Réception` is not a new section, and §16's information-architecture table is updated to say so.**
+That table lists `Réception` as **Add — P1**. It is not added, because `Ordres` opening on `Nouveaux`
+*is* the reception surface: the same list, the same accept and decline, reached by the section a
+laboratory already uses. Adding a second navigation entry over the same projection would have been the
+dead-navigation failure `staffSections.ts`'s own rule forbids, arrived at from the other direction — two
+doors into one room, with the reader left to guess which is authoritative. The row now reads *"Not
+added — `Ordres` opening on `Nouveaux` is this surface (§42)."*
+
+**2. The label stays `Nouveaux`, not `À recevoir` or `Réception`.** Established vocabulary that two
+browser specs already reference, and `Nouveaux ordres` is the wording `Aujourd'hui` has used since
+DH-LAB-001. Renaming it would have been a cosmetic change with a real regression surface and no product
+gain.
+
+**3. The decline carries no reason, and the ticket's own UI language assumed one exists.** It does not.
+`reject()` is a pure `SELECTED → REJECTED` transition: no reason column, no taxonomy, nothing
+reason-shaped reaching the clinic. This is **recorded rather than filled.** Inventing a reason
+vocabulary here is exactly the *"any gap that obviously should be filled a particular way"* instinct
+`AGENTS.md` names as the failure mode being guarded against — and this repository already has **D-11**
+open because the block-reason vocabulary `DHEALTH-LAB-BLOCKED-001` shipped has not been validated by
+anyone who works in a laboratory. Adding a second unvalidated vocabulary while the first waits on a
+human would compound the problem rather than solve it.
+
+Two tests and one browser phase pin the absence, so a later contributor who assumes a reason exists is
+corrected by a failure rather than by reading the module. **The open question, stated narrowly:** should
+a laboratory declining routed work be required to say why, and from what vocabulary? It belongs with
+D-11, not ahead of it.
+
+**4. Specimens are untouched, and `Prélèvements` is still not added.** **D-3** remains open. The
+collection milestone (`LabSampleCollection`, `recorded_at` only) is what the browser qualification's
+handoff phase records, and it stops there.
+
+### The reception surface, as it actually is
+
+| Question a laboratory counter asks | Where it is answered |
+|---|---|
+| What work has been routed to us and not yet answered? | `Ordres` → `Nouveaux` (`SELECTED`), oldest-routed first |
+| Whose is it, and what was asked for? | the queue card: patient name and exact date of birth, ordering provider, the analyses requested |
+| How many are waiting? | `Aujourd'hui` → `Nouveaux ordres` count |
+| Do we take it? | `Accepter l'ordre` on the panel |
+| Do we refuse it? | `Refuser l'ordre` → confirm. No reason is asked for (see departure 3) |
+| What happens next? | the accepted order offers `Enregistrer la collecte`, then `Commencer l'analyse` — the workflow that already existed |
+
+The authority for all of it is **`lab.queue.work`**. Not a role, and not a job title: a laboratory
+*cashier* holding `BILLING_CLERK` and nothing else was composed into a reception worker by one grant
+through `Équipe et accès`, with the role row provably unchanged, and then had the authority withdrawn
+again — all by clicking, in a real browser. `lab.result.release` was never granted and the server
+refused that same person a release. See `docs/NATIVE-SECURITY-QUALIFICATION.md` §12.
+
+### What this does not make true
+
+**Human usability is not claimed, and §32's plan has not been run for this surface.** No laboratory
+worker has used it, no timing has been measured against whatever the laboratory does today, and product
+law 3 ("faster than what it replaces") therefore remains a **validated target, not a current claim.**
+What *is* demonstrated is that the workflow completes in a real browser against a real stack, performed
+by a member with no laboratory role.
+
+**The specimen question is not answered** (D-3), **the identity-confirmation attribute list is not
+answered** (D-4), **successful-read auditing is not answered** (D-8), and **no reason vocabulary has been
+validated by a laboratory participant** (D-11).
+
+**Pilot-ready is still not clinically live.** This adds no clinical sign-off on any order set or
+structured field, and nothing here is authorization to use DHealth on a real patient.

@@ -191,6 +191,31 @@ review remains independently reconstructable, no value is ever mutated in place,
 is ever released without the releaser having actually inspected its exact fingerprint.
 LIS/Connect integration and demo seed data remain deferred to DH-DEMO-001+.
 
+**2026-09-30 update (DHEALTH-LAB-RECEPTION-001):** the *first* item in this section's own MVP purpose
+list — "incoming work queue; accept/reject assigned orders" — is now
+`WRITTEN, TESTED, REAL-POSTGRESQL-QUALIFIED, BROWSER-QUALIFIED` rather than merely written. The
+correction this ticket owes the DH-LAB-001 note above is that its work was never re-qualified after
+ADR-067 turned the gate into a capability: the authority, privacy and tenant claims for intake had
+never been asserted at the HTTP edge, and the concurrency claims were **green for the wrong reason** —
+DH-EX-006's three races all run on SQLite, where SQLAlchemy omits `FOR UPDATE` entirely, so the row
+lock they exist to exercise was never taken. 23 new adapter tests at the edge, 8 against a disposable
+PostgreSQL 16.15 container, 10 browser phases against real Keycloak, 11 negative controls. With the
+lock removed the SQLite races **still passed** while PostgreSQL caught 7 of 25 concurrent accepts
+transitioning instead of 1.
+
+**No new capability, no new order state, no migration, and no ADR.** `lab.queue.work` already fit and
+`SELECTED` already means "routed here, not yet answered", which is exactly what an incoming queue is;
+inventing a `RECEIVED` or `AT_RECEPTION` state to make the interface convenient would have added a
+second truth about the same fact. One behavioural change: the incoming queue sorted newest-first with
+every other view, which buried the order that had been waiting longest — it now sorts by the routing
+instant, oldest first, and the review views are unchanged. **No waiting duration is computed or
+displayed**, the same refusal DHEALTH-FRONT-DESK-001 made on the clinic side.
+
+Two things this did **not** resolve, stated because the ticket's own language assumed otherwise: the
+laboratory decline still carries **no reason** (`reject()` is a pure state transition — recorded as an
+open question alongside **D-11**, not filled), and **specimens remain entirely `D-3`**. Human usability
+is **UNQUALIFIED**: no laboratory worker has used this surface.
+
 The Exchange backend implements the work
 queue, accept/reject/start-processing, structured result entry, an explicit order-level
 sample/specimen *collection milestone* (DH-EX-011), and an explicit, separately-authorized result

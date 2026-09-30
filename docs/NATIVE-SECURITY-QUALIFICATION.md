@@ -409,3 +409,117 @@ authority, clearing it restores it. **NC-FD-7** breaks it by memoizing the resol
 - No penetration testing, no threat model, and no review by anyone other than the advisor loop this
   session used in place of the `dhealth_advisor` agent `AGENTS.md`'s Codex block names (that agent
   does not exist in this harness).
+
+## 12. Laboratory work intake, qualified rather than built (DHEALTH-LAB-RECEPTION-001) — added 2026-09-30
+
+Recorded here because the **authority claims** for laboratory intake had never been asserted at the
+HTTP edge, against a real backend, or in a browser — only the domain rules had. Nothing in this
+section is a new boundary. Every one of them existed at `3e4b69b`; what is new is the evidence.
+
+### The governing authority is `lab.queue.work`, and no capability was added
+
+Laboratory work intake — the incoming queue, the order detail read, accept and decline — is gated on
+`lab.queue.work` and nothing else. **No capability was added for this ticket**, and no role was
+created. `test_intake_is_governed_by_lab_queue_work_and_no_new_capability_was_added` pins the whole
+`lab.*` namespace to exactly `{lab.queue.work, lab.result.release}`, so a later contributor who adds
+a `lab.reception.*` member is stopped by a failing test rather than by review.
+
+`LAB_TECH` is a template that happens to carry that one capability. It is not the authority. Three
+tests say so through the edge: a member with **no role at all** and a direct GRANT passes; a member
+who keeps the role and receives an individual DENY is refused; and a revocation written through the
+product's own Team & Access endpoint takes effect on the **next request with the same token**, with no
+sign-out. **NC-LR-3** breaks this by replacing the capability check with
+`require_role(..., LAB_TECH)` and reddens the first two.
+
+### `lab.result.release` remains independent, in both directions
+
+Possessing intake authority never implies release authority. `test_release_authority_alone_does_not_
+grant_intake` is the other direction: a `LAB_RESULT_RELEASER` who does not also hold `lab.queue.work`
+is refused the queue outright. **NC-LR-4** makes release imply intake and reddens it.
+
+Qualified in a real browser too, which is the part a unit test cannot reach: **LR-B7** has the
+laboratory cashier who *just accepted an order* refused its release with a **403** from the server —
+not merely un-offered the control. `_require_lab_result_releaser` runs before any order lookup, so the
+refusal is about authority and not about the order's state, and the request body is well-formed on
+purpose because a malformed one would be rejected at validation and would prove nothing.
+
+`billing.operate` is independent in the same way and in both directions (ADR-066):
+`test_billing_authority_alone_does_not_grant_intake` refuses a cashier the queue, and **LR-B10**
+asserts the till survives the withdrawal of intake authority — taking reception away from a cashier
+must not take the cash register with it.
+
+### The intake projection structurally cannot carry clinic clinical content
+
+`LabWorkflowOrderRecord` has **no field** naming a visit, a reason, a note, a review or a result
+value, so this is not a filter somebody can forget to apply — there is nothing to filter. Asserted
+three ways in one test, structural first: over `dataclasses.fields(LabWorkflowOrderRecord)`, over
+`LabWorkflowOrderResponse.model_fields` (exactly ten fields), and over a live response body from both
+the queue and the detail route. **NC-LR-2** adds a visit-reason field to the response model and
+reddens it on the key-set assertion.
+
+A laboratory also **cannot hold `patient.directory.read` at all**: the capability is provider-only in
+the catalog, so the resolver's organization-type filter drops it even if an administrator granted it.
+That is stronger than "a laboratory worker does not need it". **NC-LR-8** widens the capability to
+both organization types and reddens the assertion.
+
+### Tenant isolation, asserted at the edge and under contention
+
+A guessed order id belonging to another laboratory is a **404** — not a 403 — on the detail read, on
+accept and on decline, which is the anti-enumeration convention the rest of the module already uses. A
+second laboratory holding a real, active membership *in its own organization* gets the same 404 on
+both spellings. The clinic that created the order cannot act as the destination laboratory. A platform
+administrator does not receive laboratory work at all (**403**, no bypass — ADR-063).
+
+**PG-RECEPTION-5** adds the part only a real backend can show: a rival laboratory's mutation racing a
+legitimate one still gets `LabOrderNotAssigned`, and cannot read the order by queue or by id either.
+Isolation is checked under contention, not only when the system is quiet. **NC-LR-1** removes the
+tenant filter from the queue and reddens the read-side isolation test with the other laboratory's
+order in the list.
+
+### The concurrency claims were green for the wrong reason until this ticket
+
+This is the substantive finding, and it **predates the ticket**. DH-EX-006's three races —
+`test_accept_vs_reject_race`, `test_25way_same_action_accept_concurrency`,
+`test_25way_same_action_reject_concurrency` — all build their engine on `tmp_path`, which is SQLite.
+SQLAlchemy's SQLite dialect **omits `FOR UPDATE` entirely**, so the lock those tests exist to exercise
+was never taken; SQLite's whole-database writer serialization produced the expected single transition
+for an unrelated reason. `PRAGMA foreign_keys` is also off in the unit suite, and SQLite neither
+enforces `VARCHAR(n)` nor behaves like an MVCC backend under contention.
+
+`tests/integration/test_dhealthlabreception001_postgres_qualification.py` closes it for the intake
+half: **8 tests against a disposable PostgreSQL 16.15 container**, gated on `DHLR_PG_*`, pointed only
+ever at a throwaway database. The pool is sized 30+10 so twenty-five threads contend on the row lock
+rather than queueing for a connection — the difference between measuring the invariant and measuring
+the pool.
+
+**NC-LR-5 is the clearest single piece of evidence in this ticket.** With `.with_for_update()` removed
+from the mutation path, the six SQLite race tests **still passed**, while the PostgreSQL qualification
+went red with **7 of 25 concurrent accepts transitioning instead of 1**. That is the gap, demonstrated
+rather than argued.
+
+### The refusals hold under a real lost-response retry
+
+A double-clicked accept transitions once and replays once; a stale mutation cannot overwrite a newer
+state in either direction; an accept racing a decline produces exactly one transition, and the
+**winner's own returned status is asserted equal to the final stored status**, so a loser cannot
+overwrite a winner in the single `status` column. **NC-LR-10** removes the idempotent-replay branch and
+reddens the safe-retry contract: the second accept becomes a 409 where the product promises a 200.
+**NC-LR-9** permits a stale transition and reddens the 409 on an already-answered order.
+
+### What this section does not claim
+
+- **No boundary was added or moved.** Every claim above was already true at `3e4b69b`. The one
+  behavioural change in this ticket is a **sort order**, which is not a security property.
+- **D-8 is untouched.** Whether successful reads of sensitive data should be audited remains
+  unanswered. Intake *mutations* write `lab_order_accepted` / `lab_order_rejected`; intake *reads* are
+  not audited.
+- **D-3 is untouched.** No specimen entity exists, and none was invented.
+- **The decline carries no reason, and that is a recorded finding rather than a gap filled.** `reject()`
+  is a pure `SELECTED → REJECTED` transition: no reason column, no taxonomy, nothing reason-shaped
+  reaching the clinic. Two tests and one browser phase pin the absence. D-11 is already open because
+  the *other* laboratory reason vocabulary has not been validated by anyone who works in a laboratory.
+- No penetration testing, no threat model, and no review by anyone other than the advisor loop this
+  session used in place of the `dhealth_advisor` agent `AGENTS.md`'s Codex block names (that agent does
+  not exist in this harness).
+- **Human usability is UNQUALIFIED.** Nobody who works at a laboratory counter has used this. Ten green
+  browser phases are evidence that the software works, not that the workflow is workable.
