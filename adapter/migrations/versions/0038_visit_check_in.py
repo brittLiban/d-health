@@ -40,9 +40,22 @@ rewritten -- dropping `NOT NULL` cannot alter a row that already has a value. A 
 arrival form still offers the field, so the clinician-created population is unchanged going forward
 too. NULL means "nobody stated a reason here", which is a fact about the arrival rather than a gap.
 
-SQLite cannot `ALTER COLUMN`, so this runs inside `batch_alter_table` -- the table is recreated with
-the same constraints, which is why `_VISIT_TABLE_CONSTRAINTS` below spells them out. On PostgreSQL
-the same call emits a plain `ALTER COLUMN ... DROP NOT NULL` and rewrites nothing.
+It runs inside `batch_alter_table`, following `0031_connect_namespace`'s precedent, which is why
+`_VISIT_TABLE_CONSTRAINTS` below spells the table's constraints out: on a backend that cannot
+`ALTER COLUMN`, batch mode recreates the table, and a constraint omitted from that list would be
+silently dropped. **On PostgreSQL -- the only backend this chain can actually run on -- the same
+call emits a plain `ALTER COLUMN ... DROP NOT NULL` and rewrites nothing, so the list is never
+read.**
+
+**That SQLite branch is therefore unreachable, and is not qualified.** It is stated rather than
+implied, because the honest reason is worth knowing: `0003_dead_letter_resolutions` uses a bare
+`op.alter_column(... nullable=False)` with no batch mode, so `alembic upgrade` has failed on SQLite
+since revision 3 with `near "ALTER": syntax error` and can never reach this revision. The unit
+suite does not run migrations at all -- `tests/conftest.py` builds its schema with
+`metadata.create_all` -- so nothing exercises the branch either. Batch mode is kept because it is
+harmless on PostgreSQL and because removing it would quietly make this migration *less* portable
+than 0031; it is defensive code for a path that does not currently exist, which is a different
+claim from a path that is known to work.
 
 ── 2. At most one active visit per patient per provider organization ──
 

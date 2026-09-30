@@ -22829,6 +22829,52 @@ reports `0038_visit_check_in (head)` — so these are runs against the new code,
 - Playwright's browsers are installed for the **normal** WSL user, not `root`, while `docker` needs
   `sudo`. The suites therefore run as the normal user with `SEC_DOCKER="sudo -n docker"`.
 
+
+### What was NOT proven, stated plainly
+
+**0038's SQLite `batch_alter_table` branch is unreachable and unqualified.** Attempting to qualify it
+is what established that: `alembic upgrade` fails on SQLite at **revision 0003**, where
+`0003_dead_letter_resolutions` calls a bare `op.alter_column("dead_letters", "sequence",
+nullable=False)` with no batch mode — `sqlite3.OperationalError: near "ALTER": syntax error`. So the
+chain has been PostgreSQL-only since revision 3, by long-standing design, and can never reach 0038 on
+SQLite. The unit suite does not run migrations at all (`tests/conftest.py` uses
+`metadata.create_all`), so nothing exercises the branch there either.
+
+Batch mode is kept — it follows `0031_connect_namespace`'s precedent and is inert on PostgreSQL, where
+it emits a plain `ALTER COLUMN ... DROP NOT NULL`. `_VISIT_TABLE_CONSTRAINTS` exists so that, *if* the
+branch ever became reachable, the recreated table would not silently lose a constraint. It is
+defensive code for a path that does not currently exist, which is a different claim from a path that
+is known to work, and 0038's own docstring now says so instead of implying SQLite matters here.
+
+**The one-active-visit index *is* enforced on SQLite**, via `models.py`'s
+`sqlite_where`/`postgresql_where` pair and `metadata.create_all` — which is how the unit suite's
+`test_a_second_arrival_for_a_waiting_patient_is_refused_rather_than_replayed` can bite at all. Only
+the *migration's* SQLite path is unreachable, not the constraint.
+
+**The same-token revocation proof is HTTP-level, not browser-level.** `test_fd_auth_4` mints a token,
+removes the capability through the product's own endpoint, and the next request with that same token
+is refused. The browser phase FD-B9 proves the administrator's click takes effect and that the role
+never moved, but signs in afresh afterwards — a Playwright context cannot outlive its own test in this
+harness. Two different claims, and neither is used to stand for the other.
+
+**Diagnostic ordering from a desk-created visit is qualified over HTTP, not in a browser.** FD-12 does
+it at the API level. The browser half of the order-from-visit linkage is
+`08-clinic-visit.spec.ts`'s, on a *clinician*-created visit. A phase was written for the browser suite
+and removed rather than left in: the wizard reached from `Patients` deliberately creates an order with
+**no** visit, so it re-qualified the wrong half.
+
+**The two recovery browser suites were not run.** `03-recovery-source` / `04-recovery-proof` qualify a
+just-restored deployment and require a restore drill this ticket did not perform.
+
+**Nothing here is human-qualified.** No receptionist and no clinician has used the arrival surface. No
+timing was measured against the paper register P0-2 names. Product law 3 remains a validated target.
+
+**The `dhealth_advisor` agent `AGENTS.md`'s Codex block requires does not exist in this harness.** An
+independent stronger-model advisor loop was used in its place, before implementation and twice during
+review; it is what surfaced the missing FD-12, the unmeasured route count, the FD-B9 assertion gap,
+the unqualified SQLite branch and the un-run frontend directories. Named as a substitute rather than
+reported as the required agent.
+
 ### Still open
 
 **D-3** (specimen entity) · **D-4** (Lab Reception identity attributes) · **D-6** (walk-in laboratory
