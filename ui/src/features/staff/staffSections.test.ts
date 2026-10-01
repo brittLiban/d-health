@@ -260,3 +260,42 @@ describe('resolveSection', () => {
     expect(resolveSection('orders', [])).toBeNull()
   })
 })
+
+describe('DHEALTH-LAB-OFFERINGS-001 — who reaches Services et tarifs', () => {
+  /**
+   * The section is `Services et tarifs`, and a laboratory's *services* are `facility.configure`'s
+   * subject rather than the price-setter's. So the entry is reachable through either capability.
+   *
+   * Pinned in both directions deliberately: before this ticket, a laboratory administrator holding
+   * only `facility.configure` reached no configuration surface at all, and nothing would have
+   * noticed if a later refactor took it away again.
+   */
+  it('reaches it through facility.configure alone', () => {
+    const membership = { ...lab([]), capabilities: ['facility.configure'] }
+    expect(idsFor(membership)).toEqual(['prices'])
+  })
+
+  it('still reaches it through billing.configure_prices alone', () => {
+    const membership = { ...lab([]), capabilities: ['billing.configure_prices'] }
+    expect(idsFor(membership)).toEqual(['prices'])
+  })
+
+  it('shows it exactly once to somebody holding both', () => {
+    // Two capabilities, one section. An `ids.push` per capability without the guard would have
+    // produced a duplicated navigation entry, which is the obvious way to get this wrong.
+    const membership = {
+      ...lab([]),
+      capabilities: ['facility.configure', 'billing.configure_prices'],
+    }
+    expect(idsFor(membership)).toEqual(['prices'])
+  })
+
+  it('does not reach it on a laboratory authority that is neither', () => {
+    // `lab.queue.work` works the queue and `lab.result.release` publishes results. Neither
+    // configures the facility, and neither should be offered a configuration surface the server
+    // would refuse.
+    expect(idsFor({ ...lab([]), capabilities: ['lab.queue.work'] })).not.toContain('prices')
+    expect(idsFor({ ...lab([]), capabilities: ['lab.result.release'] })).not.toContain('prices')
+    expect(idsFor({ ...lab([]), capabilities: ['billing.operate'] })).not.toContain('prices')
+  })
+})

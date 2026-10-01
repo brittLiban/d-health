@@ -31,9 +31,11 @@ import type {
   BillableOrder,
   BillableSource,
   BillingPatient,
+  CatalogEntry,
   ClinicService,
   ExchangeMembershipSummary,
   Invoice,
+  LabOffering,
 } from '../../api/exchangeTypes'
 import { WorkspaceProvider } from '../workspace/WorkspaceProvider'
 import { BillingPage } from './BillingPage'
@@ -486,5 +488,217 @@ describe('what the till never touches', () => {
     expect(
       await screen.findByText(/ne modifie aucune facture déjà établie/),
     ).toBeInTheDocument()
+  })
+})
+
+// ── DHEALTH-LAB-OFFERINGS-001: Analyses réalisées ────────────────────────────────────────────────
+
+const CATALOG_ENTRIES: CatalogEntry[] = [
+  {
+    id: 'entry-offered',
+    code: 'DEMO-A',
+    display_name: 'Analyse de démonstration A',
+    version: 1,
+    active: true,
+    is_synthetic: true,
+  },
+  {
+    id: 'entry-disabled',
+    code: 'DEMO-B',
+    display_name: 'Analyse de démonstration B',
+    version: 1,
+    active: true,
+    is_synthetic: true,
+  },
+  {
+    id: 'entry-never',
+    code: 'DEMO-C',
+    display_name: 'Analyse de démonstration C',
+    version: 1,
+    active: true,
+    is_synthetic: true,
+  },
+]
+
+const OFFERINGS: LabOffering[] = [
+  {
+    id: 'offering-a',
+    lab_organization_id: LAB_ID,
+    catalog_entry_id: 'entry-offered',
+    local_test_code: null,
+    active: true,
+  },
+  {
+    id: 'offering-b',
+    lab_organization_id: LAB_ID,
+    catalog_entry_id: 'entry-disabled',
+    local_test_code: null,
+    active: false,
+  },
+]
+
+/** A laboratory administrator on the `prices` surface, with the offering reads stubbed. */
+function offeringsClient(overrides: Partial<Record<keyof ExchangeClient, unknown>> = {}) {
+  return billingClient(membershipFor(['ORG_ADMIN'], 'LAB'), {
+    listCatalogTests: vi.fn().mockResolvedValue(CATALOG_ENTRIES),
+    listLabOfferings: vi.fn().mockResolvedValue(OFFERINGS),
+    setLabOfferingActive: vi.fn().mockResolvedValue(OFFERINGS[0]),
+    createLabOffering: vi.fn().mockResolvedValue(OFFERINGS[0]),
+    ...overrides,
+  })
+}
+
+describe('analyses réalisées', () => {
+  it('OF-UI-1: shows three distinct states, because a boolean would hide the third', async () => {
+    // Offered-and-accepting, offered-and-switched-off, and never-declared are three different
+    // facts about a laboratory's configuration. Collapsing the last two would tell an
+    // administrator they had turned something off when they had never offered it.
+    renderBilling(offeringsClient(), 'prices')
+
+    expect(await screen.findByRole('heading', { name: 'Analyses réalisées' })).toBeInTheDocument()
+
+    // Asserted on each row's own text rather than with a text matcher: the code and the state are
+    // separate JSX expressions, so the DOM splits them across text nodes and a single regex would
+    // fail for a formatting reason rather than a behavioural one.
+    const rowText = (name: string) =>
+      (screen.getByText(name).closest('li')?.textContent ?? '').replace(/\s+/g, ' ')
+
+    expect(rowText('Analyse de démonstration A')).toContain('accepte les nouveaux ordres')
+    expect(rowText('Analyse de démonstration A')).toContain('DEMO-A')
+    expect(rowText('Analyse de démonstration B')).toContain("n'accepte plus de nouveaux ordres")
+    expect(rowText('Analyse de démonstration C')).toContain('non proposée par ce laboratoire')
+
+    // The three states are genuinely different controls, not three labels on one button.
+    expect(screen.getByRole('button', { name: 'Ne plus accepter' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Accepter à nouveau' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Proposer cette analyse' })).toBeInTheDocument()
+  })
+
+  it('OF-UI-2: the service name shown is the catalogue own, joined on catalog_entry_id', async () => {
+    // `LabOffering` carries no name, so there is no second copy that could disagree with the
+    // catalogue. The panel reads both and joins them, and this test is what would redden if a
+    // future author "simplified" that by asking the server to include the name on the offering.
+    const client = offeringsClient()
+    renderBilling(client, 'prices')
+
+    expect(await screen.findByText('Analyse de démonstration A')).toBeInTheDocument()
+    expect(client.listCatalogTests).toHaveBeenCalled()
+    expect(client.listLabOfferings).toHaveBeenCalledWith(LAB_ID)
+  })
+
+  it('OF-UI-3: disabling says plainly that existing orders do not change', async () => {
+    // The wording is the feature. An administrator who believes "ne plus accepter" might cancel a
+    // patient's test will not use the control, and the deactivation rule says it cannot.
+    const setLabOfferingActive = vi.fn().mockResolvedValue({ ...OFFERINGS[0], active: false })
+    const client = offeringsClient({
+      setLabOfferingActive,
+      listLabOfferings: vi
+        .fn()
+        .mockResolvedValueOnce(OFFERINGS)
+        .mockResolvedValue([{ ...OFFERINGS[0], active: false }, OFFERINGS[1]]),
+    })
+    renderBilling(client, 'prices')
+
+    const row = (await screen.findByText('Analyse de démonstration A')).closest('li')
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Ne plus accepter' }),
+    )
+
+    await waitFor(() =>
+      expect(setLabOfferingActive).toHaveBeenCalledWith(LAB_ID, 'offering-a', false),
+    )
+    expect(await screen.findByText(/Les ordres déjà reçus ne changent pas/)).toBeInTheDocument()
+  })
+
+  it('OF-UI-4: a never-declared service is added by catalog_entry_id and nothing else', async () => {
+    // No name, no price, no result structure, no specimen type in the request. Each of those
+    // belongs to something else, or to nobody yet.
+    const createLabOffering = vi.fn().mockResolvedValue(OFFERINGS[0])
+    const client = offeringsClient({ createLabOffering })
+    renderBilling(client, 'prices')
+
+    const row = (await screen.findByText('Analyse de démonstration C')).closest('li')
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Proposer cette analyse' }),
+    )
+
+    await waitFor(() =>
+      expect(createLabOffering).toHaveBeenCalledWith(LAB_ID, { catalog_entry_id: 'entry-never' }),
+    )
+  })
+
+  it('OF-UI-5: a provider organization has no offerings panel at all', async () => {
+    // `LabOffering` is a laboratory's declaration. A clinic administrator holding
+    // `facility.configure` sees the price list and no services panel, and that is correct rather
+    // than a gap -- a provider has no offerings to configure.
+    renderBilling(billingClient(membershipFor(['ORG_ADMIN'])), 'prices')
+
+    expect(await screen.findByRole('heading', { name: 'Services et tarifs' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Analyses réalisées' })).toBeNull()
+  })
+
+  it('OF-UI-6: price authority alone shows prices and no offerings panel', async () => {
+    // The two panels sit side by side and are gated independently, because setting what a facility
+    // charges and deciding what it accepts are different authorities. A holder of only
+    // `billing.configure_prices` must not be offered a control the server would refuse.
+    const membership = membershipFor([], 'LAB')
+    const client = billingClient(
+      { ...membership, capabilities: ['billing.configure_prices'] },
+      { listCatalogTests: vi.fn(), listLabOfferings: vi.fn() },
+    )
+    renderBilling(client, 'prices')
+
+    expect(await screen.findByRole('heading', { name: 'Services et tarifs' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Analyses réalisées' })).toBeNull()
+    // And it never even asks: a request the server would refuse is not fired.
+    expect(client.listLabOfferings).not.toHaveBeenCalled()
+  })
+
+  it('OF-UI-7: facility authority alone shows offerings and no price editor', async () => {
+    const membership = membershipFor([], 'LAB')
+    const client = billingClient(
+      { ...membership, capabilities: ['facility.configure'] },
+      {
+        listCatalogTests: vi.fn().mockResolvedValue(CATALOG_ENTRIES),
+        listLabOfferings: vi.fn().mockResolvedValue(OFFERINGS),
+        listClinicServices: vi.fn(),
+      },
+    )
+    renderBilling(client, 'prices')
+
+    expect(await screen.findByRole('heading', { name: 'Analyses réalisées' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Services et tarifs' })).toBeNull()
+    expect(client.listClinicServices).not.toHaveBeenCalled()
+  })
+
+  it('OF-UI-8: the panel shows no price, no specimen field and no ranking', async () => {
+    renderBilling(offeringsClient(), 'prices')
+    await screen.findByRole('heading', { name: 'Analyses réalisées' })
+
+    const heading = screen.getByRole('heading', { name: 'Analyses réalisées' })
+    const panel = (heading.closest('section') ?? document.body) as HTMLElement
+    const text = (panel.textContent ?? '').toLowerCase()
+    for (const absent of [
+      'djf',
+      'tarif',
+      'prix',
+      'tube',
+      'volume',
+      'meilleur',
+      'classement',
+      'étoile',
+    ]) {
+      expect(text).not.toContain(absent)
+    }
+  })
+
+  it('OF-UI-9: an empty catalogue says so rather than inventing analyses', async () => {
+    const client = offeringsClient({
+      listCatalogTests: vi.fn().mockResolvedValue([]),
+      listLabOfferings: vi.fn().mockResolvedValue([]),
+    })
+    renderBilling(client, 'prices')
+
+    expect(await screen.findByText('Aucune analyse au catalogue')).toBeInTheDocument()
   })
 })
