@@ -76,11 +76,12 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import uuid
 
 import pytest
 from exchange_support import activate_result_template, lab_staff, make_lab, make_provider
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import sessionmaker
 
 from daher_adapter.exchange.catalog import CatalogRepository
@@ -208,6 +209,125 @@ def _prefix(name: str) -> str:
 
 
 # ── PG-SPEC-1: the same logical collection, concurrently ─────────────────────────────────────────
+
+
+def test_pg_spec_1a_the_row_lock_is_what_serializes_two_identical_collections(
+    sessions: sessionmaker,
+):
+    """**The deterministic proof that ``FOR UPDATE`` is load-bearing**, and the reason this test
+    exists beside the N-thread one below.
+
+    ``test_pg_spec_1_...`` releases twelve threads from a barrier and counts rows. That is a useful
+    smoke test and it is **not** proof of the lock: control-tested by deleting
+    ``.with_for_update()`` from ``_record_collection_in_session``, it stayed green. The GIL
+    plus per-thread session setup staggers the threads enough that each one commits before the
+    next one reads, so the race the test is named after does not reliably happen. Recorded
+    here rather than quietly
+    fixed, because a test that passes whether or not the code is right is exactly what
+    `AGENTS.md`'s evidence discipline says to strengthen or delete.
+
+    This test creates the contention deliberately instead of hoping for it. Two sessions the test
+    owns, so the interleaving is ours:
+
+    1. ``first`` records the collection and **does not commit** -- its transaction stays open,
+       holding the ``LabOrder`` row lock.
+    2. ``second`` attempts the same logical collection, same key, in another transaction.
+
+    With the lock, step 2 **blocks** on ``SELECT ... FOR UPDATE`` until step 1 commits, then
+    observes the committed specimen and returns it as a replay. Without the lock, step 2
+    reads through the uncommitted write, finds nothing, inserts, and the commit collides with
+    ``uq_exchange_lab_specimens_order_idempotency_key`` -- an ``IntegrityError``, which at the HTTP
+    boundary is an unexplained 500 for what is a perfectly legitimate double click.
+
+    So the assertion is: **``second`` returns a replay of ``first``'s specimen, and raises
+    nothing.** A ``statement_timeout`` keeps a genuinely stuck lock from hanging the suite,
+    and a timeout is itself a failure rather than a skip."""
+    _provider, lab, order, workflow, _orders, collector = _seed_accepted_order(
+        sessions, key_prefix=_prefix("lockproof")
+    )
+    key = str(uuid.uuid4())
+    started = threading.Event()
+    release_first = threading.Event()
+    outcomes: dict[str, object] = {}
+    lock = threading.Lock()
+
+    def hold_the_lock() -> None:
+        """Record the collection and sit on the open transaction until told to commit."""
+        try:
+            # `sessions.begin()`, not `sessions()` plus `session.begin()`: a session from the
+            # factory auto-begins on first use, so an explicit `begin()` raises
+            # `InvalidRequestError`. This is the same context manager the repository layer
+            # itself uses, and it commits when the block exits.
+            with sessions.begin() as session:
+                workflow.record_collection(
+                    order_id=order.id,
+                    lab_organization_id=lab.id,
+                    recorded_by_identity_id=collector,
+                    idempotency_key=key,
+                    session=session,
+                )
+                started.set()
+                # The commit happens when this block exits, which is after the waiter below
+                # has had a real chance to contend for the same row.
+                release_first.wait(timeout=20)
+            with lock:
+                outcomes["first"] = ("committed", None)
+        except BaseException as error:  # noqa: BLE001
+            started.set()
+            with lock:
+                outcomes["first"] = ("error", error)
+
+    def contend() -> None:
+        try:
+            assert started.wait(timeout=20), "the first transaction never opened"
+            with sessions.begin() as session:
+                # Fail loudly rather than hang if the lock is never released. `SET LOCAL`
+                # because this is inside a transaction and must not outlive it.
+                session.execute(text("SET LOCAL statement_timeout = '15s'"))
+                outcome = workflow.record_collection(
+                    order_id=order.id,
+                    lab_organization_id=lab.id,
+                    recorded_by_identity_id=collector,
+                    idempotency_key=key,
+                    session=session,
+                )
+            with lock:
+                outcomes["second"] = (
+                    "ok",
+                    outcome.specimen_created,
+                    outcome.specimen.id,
+                )
+        except BaseException as error:  # noqa: BLE001
+            with lock:
+                outcomes["second"] = ("error", type(error).__name__, str(error)[:300])
+
+    holder = threading.Thread(target=hold_the_lock)
+    waiter = threading.Thread(target=contend)
+    holder.start()
+    waiter.start()
+    # Give the waiter time to actually reach the lock and block on it before the holder commits.
+    assert started.wait(timeout=20)
+    time.sleep(2.0)
+    release_first.set()
+    holder.join(timeout=40)
+    waiter.join(timeout=40)
+
+    assert outcomes.get("first") == ("committed", None), outcomes.get("first")
+    second = outcomes.get("second")
+    assert second is not None, "the contending transaction never finished"
+    assert second[0] == "ok", (
+        f"a legitimate duplicate collection must replay, not raise -- without the FOR UPDATE row "
+        f"lock this is an IntegrityError, i.e. a 500 for a double click: {second!r}"
+    )
+    assert second[1] is False, "the contending call must be a replay, not a second creation"
+
+    assert _count(sessions, LabSpecimen, order.id) == 1
+    assert _count(sessions, LabSampleCollection, order.id) == 1
+    with sessions() as session:
+        stored = session.scalars(
+            select(LabSpecimen.id).where(LabSpecimen.lab_order_id == order.id)
+        ).all()
+    assert stored == [second[2]]
 
 
 def test_pg_spec_1_concurrent_identical_collections_yield_one_specimen(sessions: sessionmaker):
