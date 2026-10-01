@@ -500,6 +500,30 @@ def test_the_server_rechecks_availability_when_the_order_is_actually_assigned(
     refused = _assign(client, clinician, provider.id, order_id, lab.id)
     assert refused.status_code == 409, refused.text
 
+    # **And it is refused for the right reason, named specifically.**
+    #
+    # Found by NC-OF-5, which removed `assign_by_provider`'s own active-offering check and left this
+    # test green. Probed rather than assumed: the refusal still arrived, from a *second*,
+    # independent defence -- `is_operationally_ready_in_session`. So an order can never be routed
+    # for a disabled analysis even if that one line is deleted, which is a stronger safety property
+    # than this test was claiming, and is worth knowing.
+    #
+    # What the specific check protects is **diagnostic precision**, which `selection.py` protects
+    # deliberately and says so: *"Running this broader check first would subsume all of them behind
+    # one generic refusal and destroy the diagnostic precision those messages carry."* Without it
+    # the clinic is told the laboratory "cannot currently receive production work -- its facility
+    # enrollment is blocked, or it lacks the staffing DHealth requires", which names neither the
+    # analysis nor the cause. A clinician reading that cannot tell a switched-off analysis from a
+    # blocked enrollment.
+    detail = refused.json()["detail"]
+    assert "offering" in detail, (
+        f"the refusal must name the missing offering rather than fall back to the generic "
+        f"readiness message, which names neither the analysis nor the cause: {detail!r}"
+    )
+    assert "staffing" not in detail, (
+        f"a disabled analysis is not a staffing problem and must not be reported as one: {detail!r}"
+    )
+
     # The order itself is untouched and still assignable once the laboratory accepts the work again.
     assert _set_active(client, lab_admin, lab.id, offering.id, True).status_code == 200
     accepted = _assign(client, clinician, provider.id, order_id, lab.id)
