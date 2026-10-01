@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
+from exchange_support import lab_staff
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
@@ -159,7 +160,11 @@ def _seed_in_progress_order(sessions: sessionmaker, *, key_prefix: str, item_cou
     # DH-EX-011: start_processing now requires a recorded collection milestone -- this fixture
     # predates that ticket and was never updated (this file is skipped by default in CI, so the
     # staleness went unnoticed until DH-EX-012C's real qualification actually ran it again).
-    workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+    workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=lab_staff(organizations, lab.id),
+    )
     workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
 
     order = orders.get(order.id)

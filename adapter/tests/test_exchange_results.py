@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 from exchange_support import (
+    lab_staff,
     make_lab,
     make_patient_reference,
     make_practitioner_reference,
@@ -179,7 +180,11 @@ def _create_and_select(
     if advance_to_in_progress:
         repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
         # DH-EX-011: start_processing now requires a recorded collection milestone.
-        repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab_id)
+        repos.workflow.record_collection(
+            order_id=order.id,
+            lab_organization_id=lab_id,
+            recorded_by_identity_id=lab_staff(repos.organizations, lab_id),
+        )
         repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
     return repos.orders.get(order.id), practitioner
 
@@ -231,7 +236,11 @@ def _create_and_select_two_items(
     )
     repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
     # DH-EX-011: start_processing now requires a recorded collection milestone.
-    repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab_id)
+    repos.workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab_id,
+        recorded_by_identity_id=lab_staff(repos.organizations, lab_id),
+    )
     repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
     return repos.orders.get(order.id), practitioner
 
@@ -283,7 +292,11 @@ def _create_and_select_n_items(
         lab_order_id=order.id, lab_organization_id=lab_id, expected_price_ids=expected_price_ids
     )
     repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
-    repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab_id)
+    repos.workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab_id,
+        recorded_by_identity_id=lab_staff(repos.organizations, lab_id),
+    )
     repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
     return repos.orders.get(order.id), practitioner
 
@@ -3000,7 +3013,11 @@ def test_q_queue_ordering_oldest_first(sessions: sessionmaker[Session]) -> None:
             expected_price_ids=frozenset({price_id}),
         )
         repos.workflow.accept(order_id=order.id, lab_organization_id=lab.id)
-        repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+        repos.workflow.record_collection(
+            order_id=order.id,
+            lab_organization_id=lab.id,
+            recorded_by_identity_id=lab_staff(repos.organizations, lab.id),
+        )
         repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
         tech_id = _labtech_identity_id(repos, f"{key}-tech")
         for item in order.items:

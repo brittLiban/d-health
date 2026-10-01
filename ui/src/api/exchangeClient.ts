@@ -46,6 +46,7 @@ import type {
   LabOrderBlock,
   LabOrderBlockReason,
   LabOrderCreateOutcome,
+  LabSpecimen,
   LabOrderCreateRequest,
   LabOrderIntent,
   LabOrderIntentCreateOutcome,
@@ -1070,11 +1071,46 @@ export class ExchangeClient {
   async recordLabOrderCollection(
     labId: string,
     orderId: string,
-    options: { token?: string; signal?: AbortSignal } = {},
+    options: { token?: string; signal?: AbortSignal; idempotencyKey?: string } = {},
   ): Promise<LabCollectionResponse> {
     return this.request<LabCollectionResponse>(
       `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/record-collection`,
-      { method: 'POST', signal: options.signal },
+      {
+        method: 'POST',
+        signal: options.signal,
+        // DHEALTH-SPECIMEN-001: the one field a client may supply, and the only thing standing
+        // between a retried request and a duplicate physical specimen record. Omitted entirely when
+        // absent, which selects the server's original keyless behaviour -- a first collection is
+        // still recordable, a second one is not.
+        ...(options.idempotencyKey === undefined
+          ? {}
+          : {
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ idempotency_key: options.idempotencyKey }),
+            }),
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/lab-orders/{order_id}/specimens
+   * DHEALTH-SPECIMEN-001: every physical specimen recorded for this order, oldest first, none
+   * omitted and none replaced. The read that answers "how many physical collection records exist
+   * for this order, and when was each recorded?" -- which `collection_recorded_at` alone cannot.
+   *
+   * Also the lost-response recovery path: after an uncertain POST the UI re-reads this list and
+   * looks for its own `idempotency_key` rather than blindly retrying, exactly as the collection
+   * milestone's own recovery already re-reads the order instead of re-POSTing.
+   */
+  async listLabOrderSpecimens(
+    labId: string,
+    orderId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabSpecimen[]> {
+    return this.request<LabSpecimen[]>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/specimens`,
+      { method: 'GET', signal: options.signal },
       options.token,
     )
   }

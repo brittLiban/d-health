@@ -269,7 +269,13 @@ def _synthetic_world(sessions: sessionmaker[Session], run_id: str) -> dict[str, 
     )
     workflow = LabWorkflowRepository(sessions, organizations)
     workflow.accept(order_id=order.id, lab_organization_id=lab.id)
-    workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+    workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        # DHEALTH-SPECIMEN-001: the collection now also creates a `LabSpecimen`, which records who
+        # recorded it. Same identity this script already uses for every other lab mutation below.
+        recorded_by_identity_id=lab_staff.id,
+    )
     workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
 
     refreshed = LabOrderRepository(sessions, organizations, catalog).get(order.id)

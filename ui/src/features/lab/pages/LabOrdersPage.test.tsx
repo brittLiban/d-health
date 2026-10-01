@@ -6,8 +6,10 @@ import type {
   Amendment,
   AmendmentInspection,
   ExchangeMeResponse,
+  LabCollectionResponse,
   LabObservationHistory,
   LabOrderBlock,
+  LabSpecimen,
   LabWorkflowOrder,
   LabWorkflowPatientIdentity,
   ResultEntryWorkspace,
@@ -110,6 +112,11 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
     // healthy right now. So every test that opens a panel needs this stubbed, not just the block
     // tests.
     listLabOrderBlocks: vi.fn().mockResolvedValue([]),
+    // DHEALTH-SPECIMEN-001: the panel reads specimen history for every order it opens, for exactly
+    // the reason block history is read for every order -- "how many physical samples does this
+    // order have?" is a question about an order that looks ordinary, and an empty list is the
+    // answer. Stubbed here so every panel-opening test has it, not only the specimen tests.
+    listLabOrderSpecimens: vi.fn().mockResolvedValue([]),
     blockLabOrder: vi.fn(),
     resolveLabOrderBlock: vi.fn(),
     getLabOrderAmendment: vi.fn(),
@@ -213,8 +220,35 @@ function makeResultEntryWorkspace(overrides: Partial<ResultEntryWorkspace> = {})
   }
 }
 
-function makeCollectionResponse(overrides: { order_id?: string; recorded_at?: string } = {}) {
-  return { order_id: 'order-a', recorded_at: '2026-09-18T10:42:00Z', ...overrides }
+/**
+ * DHEALTH-SPECIMEN-001: one physical specimen, as the specimen history read returns it.
+ *
+ * No specimen type, container, volume or status field -- the backend models none, so a test fixture
+ * that invented one would be asserting a shape the product does not have.
+ */
+function makeSpecimen(overrides: Partial<LabSpecimen> = {}): LabSpecimen {
+  return {
+    id: 'specimen-1',
+    order_id: 'order-a',
+    recorded_at: '2026-09-18T10:42:00Z',
+    recorded_by_identity_id: 'identity-tech-1',
+    idempotency_key: null,
+    ...overrides,
+  }
+}
+
+function makeCollectionResponse(
+  overrides: { order_id?: string; recorded_at?: string; specimen?: LabSpecimen | null } = {},
+): LabCollectionResponse {
+  // `specimen` defaults to a real one rather than `null`: `null` is the narrow legacy case (a
+  // milestone recorded before specimens existed), and defaulting to it would have made every test
+  // that does not care about specimens silently exercise the legacy path.
+  return {
+    order_id: 'order-a',
+    recorded_at: '2026-09-18T10:42:00Z',
+    specimen: makeSpecimen(),
+    ...overrides,
+  }
 }
 
 interface Deferred<T> {
@@ -767,7 +801,18 @@ describe('LabOrdersPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
 
-    await waitFor(() => expect(recordLabOrderCollection).toHaveBeenCalledWith('lab-a', 'order-a'))
+    // **[Changed 2026-10-01, DHEALTH-SPECIMEN-001.** The call now carries an idempotency key, and
+    // asserting its *presence and shape* is the point: without one the server falls back to its
+    // keyless regime, where a second collection for this order would silently be answered as a
+    // replay. The value is a generated UUID so it cannot be pinned literally -- what is pinned is
+    // that one is sent, and that it is a UUID rather than something derived from clinical content.]**
+    await waitFor(() => expect(recordLabOrderCollection).toHaveBeenCalledTimes(1))
+    const [calledLab, calledOrder, calledOptions] = recordLabOrderCollection.mock.calls[0]
+    expect(calledLab).toBe('lab-a')
+    expect(calledOrder).toBe('order-a')
+    expect(calledOptions.idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    )
     expect(await screen.findByText('Collecte enregistrée')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Enregistrer la collecte' })).not.toBeInTheDocument()
   })
@@ -914,22 +959,43 @@ describe('LabOrdersPage', () => {
   // -- LR-C/LR-P-group: lost-response recovery (DH-LAB-002) ---------------------------------
 
   it('LR-C1: collection commits but the response is lost -- recheck shows success, no error', async () => {
+    // **[Rewritten 2026-10-01, DHEALTH-SPECIMEN-001.** The scenario is unchanged -- the POST lands
+    // server-side and the response is lost -- but the predicate that decides "my request won" is
+    // not. It used to be `collection_recorded_at !== null`, a fact about the *order*, which stops
+    // being a valid success signal the moment a second collection is recordable: after a
+    // recollection that field is already non-null from the first collection, so an uncertain second
+    // POST would have been reported as success whether it landed or not.
+    //
+    // It is now "a specimen carrying **my own** idempotency key exists", read back from the server.
+    // The mock below therefore echoes the key the component actually sent, which is what a server
+    // that received the request would do. It cannot pass by accident: an empty specimen list makes
+    // this same assertion red, which is precisely LR-C2's scenario below.]**
+    const recordLabOrderCollection = vi.fn().mockRejectedValue(new Error('network lost'))
+    const listLabOrderSpecimens = vi.fn(() => {
+      const sentKey = recordLabOrderCollection.mock.calls[0]?.[2]?.idempotencyKey
+      return Promise.resolve(sentKey ? [makeSpecimen({ idempotency_key: sentKey })] : [])
+    })
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
-      getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),
-      recordLabOrderCollection: vi.fn().mockRejectedValue(new Error('network lost')),
+      getLabOrder: makeGetLabOrderRecheckWithCollection('ACCEPTED', '2026-09-18T10:42:00Z'),
+      recordLabOrderCollection,
+      listLabOrderSpecimens,
     })
-    client.getLabOrder = makeGetLabOrderRecheckWithCollection('ACCEPTED', '2026-09-18T10:42:00Z')
     const user = userEvent.setup()
     render(<StaffApp client={client} initialSection="orders" />)
     await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
     await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
     await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
 
-    await waitFor(() => expect(screen.getAllByText('Collecte enregistrée').length).toBeGreaterThan(0))
+    // The specimen history is what now shows the recorded collection, and it shows exactly one --
+    // the lost response did not become a second physical specimen.
+    await waitFor(() => expect(screen.getByText('Prélèvements (1)')).toBeInTheDocument())
+    expect(screen.getByText(/1\. Prélèvement enregistré/)).toBeInTheDocument()
     expect(
       screen.queryByText("L'action n'a pas pu être confirmée. Vous pouvez réessayer."),
     ).not.toBeInTheDocument()
+    // Recovery is a read, never a blind re-POST: exactly one collection request was ever sent.
+    expect(recordLabOrderCollection).toHaveBeenCalledTimes(1)
   })
 
   it('LR-C2: collection response lost, order still ACCEPTED/null -- explicit retry stays available', async () => {
@@ -1066,7 +1132,7 @@ describe('LabOrdersPage', () => {
   // -- RR-C/RR-P/RR-L/RR-U-group: race/stale-response safety (DH-LAB-002) -------------------
 
   it('RR-C1: a late collection response for order A never mutates the now-visible order B', async () => {
-    const collectA = deferred<{ order_id: string; recorded_at: string }>()
+    const collectA = deferred<LabCollectionResponse>()
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([
         makeOrder({ order_id: 'order-a', status: 'ACCEPTED', patient: makePatient({ display_name: 'Patient A' }) }),
@@ -1268,7 +1334,7 @@ describe('LabOrdersPage', () => {
   })
 
   it('RR-L1: switching labs invalidates an outstanding collection action', async () => {
-    const collectStall = deferred<{ order_id: string; recorded_at: string }>()
+    const collectStall = deferred<LabCollectionResponse>()
     const client = makeClient({
       getMe: vi.fn().mockResolvedValue(meWithTwoLabs),
       listLabOrders: vi.fn((labId: string) =>
@@ -1356,7 +1422,7 @@ describe('LabOrdersPage', () => {
   })
 
   it('RR-U1: a collection/processing response arriving after unmount produces no error and no state update', async () => {
-    const collectStall = deferred<{ order_id: string; recorded_at: string }>()
+    const collectStall = deferred<LabCollectionResponse>()
     const client = makeClient({
       listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
       getLabOrder: vi.fn().mockResolvedValue(makeOrder({ status: 'ACCEPTED' })),

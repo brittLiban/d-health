@@ -75,6 +75,29 @@ def _enrol_and_staff(
         assignments.assign(membership_id=membership.id, role=role)
 
 
+def lab_staff(organizations: OrganizationRepository, lab_organization_id: uuid.UUID) -> uuid.UUID:
+    """DHEALTH-SPECIMEN-001: the identity id ``make_lab`` already staffed this laboratory with.
+
+    ``LabSpecimen.recorded_by_identity_id`` is a ``NOT NULL`` foreign key to
+    ``exchange_identities`` -- deliberately, because every real caller has a genuine identity to
+    attribute (a human through ``AuthenticatedPrincipal``, a connector through
+    ``ConnectorServicePrincipal``). So a test that records a collection needs a real identity row
+    too, and a bare ``uuid.uuid4()`` would pass under SQLite while failing the foreign key against
+    real PostgreSQL -- which is precisely the class of gap the integration suites exist to catch.
+
+    ``get_or_create`` with the same deterministic ``subject`` ``_enrol_and_staff`` uses, so this
+    returns the laboratory's *existing* staff identity rather than inventing a second one. Reaches
+    for the repository's own session factory for the same reason ``_enrol_and_staff`` does."""
+    sessions = organizations._sessions  # noqa: SLF001 -- see `_enrol_and_staff`'s docstring
+    identity, _ = ExchangeIdentityRepository(sessions).get_or_create(
+        issuer="https://tests.dhealth.invalid",
+        subject=f"staff-{lab_organization_id}",
+        display_name=f"Personnel {lab_organization_id}",
+        email=None,
+    )
+    return identity.id
+
+
 def make_provider(
     organizations: OrganizationRepository, name: str = "Clinic A", *, operational: bool = True
 ) -> OrganizationRecord:

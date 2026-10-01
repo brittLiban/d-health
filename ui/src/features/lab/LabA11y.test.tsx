@@ -74,6 +74,10 @@ describe('Lab Accessibility', () => {
       // the page throws rather than silently degrading -- which is the correct behaviour and the
       // reason this line is here rather than a defensive check in the component.
       listLabOrderBlocks: vi.fn().mockResolvedValue([]),
+      // DHEALTH-SPECIMEN-001: and specimen history, for the identical reason -- the panel reads it
+      // for every order it opens, so a fixture without it describes a client the product never
+      // produces and the page throws rather than silently degrading.
+      listLabOrderSpecimens: vi.fn().mockResolvedValue([]),
       blockLabOrder: vi.fn(),
       resolveLabOrderBlock: vi.fn(),
     } as unknown as ExchangeClient

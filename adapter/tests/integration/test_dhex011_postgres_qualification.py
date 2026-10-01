@@ -31,6 +31,7 @@ import threading
 import uuid
 
 import pytest
+from exchange_support import lab_staff
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
@@ -114,25 +115,37 @@ def _seed_accepted_order(sessions: sessionmaker, *, key_prefix: str):
         lab_order_id=order.id, lab_organization_id=lab.id, provider_organization_id=provider.id
     )
     workflow.accept(order_id=order.id, lab_organization_id=lab.id)
-    return provider, lab, order, workflow, orders
+    # DHEALTH-SPECIMEN-001: `LabSpecimen.recorded_by_identity_id` is a NOT NULL foreign key, so
+    # this suite needs a real `exchange_identities` row -- against real PostgreSQL a fabricated
+    # UUID fails the constraint, which is exactly what qualifying here is for.
+    collector = lab_staff(organizations, lab.id)
+    return provider, lab, order, workflow, orders, collector
 
 
 def test_collection_persists_and_replays_idempotently(sessions: sessionmaker) -> None:
     """A recorded milestone survives a fresh read, and a second call against the same order --
     even after it has progressed to IN_PROGRESS -- returns the identical row rather than a
     second one or a rewritten timestamp."""
-    _provider, lab, order, workflow, _orders = _seed_accepted_order(
+    _provider, lab, order, workflow, _orders, collector = _seed_accepted_order(
         sessions, key_prefix=f"persist-{uuid.uuid4().hex[:8]}"
     )
 
-    first, created_first = workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+    first_outcome = workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=collector,
+    )
+    first, created_first = first_outcome.milestone, first_outcome.specimen_created
     assert created_first is True
 
     workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
 
-    second, created_second = workflow.record_collection(
-        order_id=order.id, lab_organization_id=lab.id
+    second_outcome = workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=collector,
     )
+    second, created_second = second_outcome.milestone, second_outcome.specimen_created
     assert created_second is False
     assert second.id == first.id
     assert second.recorded_at == first.recorded_at
@@ -154,7 +167,7 @@ def test_no_retroactive_fabrication_for_legacy_in_progress_order(sessions: sessi
     A fresh ``record_collection`` attempt against it must fail closed rather than inventing history
     DHealth never observed, and the legacy order's own repeated start_processing retry must remain
     a safe no-op."""
-    _provider, lab, order, workflow, _orders = _seed_accepted_order(
+    _provider, lab, order, workflow, _orders, collector = _seed_accepted_order(
         sessions, key_prefix=f"legacy-{uuid.uuid4().hex[:8]}"
     )
 
@@ -175,7 +188,11 @@ def test_no_retroactive_fabrication_for_legacy_in_progress_order(sessions: sessi
     assert row_count == 0
 
     with pytest.raises(InvalidLabWorkflowTransition):
-        workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+        workflow.record_collection(
+            order_id=order.id,
+            lab_organization_id=lab.id,
+            recorded_by_identity_id=collector,
+        )
 
     record, transitioned = workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
     assert transitioned is False
@@ -185,14 +202,18 @@ def test_no_retroactive_fabrication_for_legacy_in_progress_order(sessions: sessi
 def test_start_processing_gate_enforced_via_workflow_repository(sessions: sessionmaker) -> None:
     """``LabWorkflowRepository.start_processing`` refuses ACCEPTED -> IN_PROGRESS with no
     milestone, and succeeds once one is recorded."""
-    _provider, lab, order, workflow, _orders = _seed_accepted_order(
+    _provider, lab, order, workflow, _orders, collector = _seed_accepted_order(
         sessions, key_prefix=f"gate-wf-{uuid.uuid4().hex[:8]}"
     )
 
     with pytest.raises(InvalidLabWorkflowTransition):
         workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
 
-    workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+    workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=collector,
+    )
     _record, transitioned = workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
     assert transitioned is True
 
@@ -201,7 +222,7 @@ def test_start_processing_gate_enforced_via_generic_transition_path(sessions: se
     """``LabOrderRepository.transition()`` -- a second, independent path capable of producing
     IN_PROGRESS -- enforces the identical invariant, proving the API path is not the only place
     this is checked."""
-    _provider, lab, order, _workflow, orders = _seed_accepted_order(
+    _provider, lab, order, _workflow, orders, _collector = _seed_accepted_order(
         sessions, key_prefix=f"gate-tx-{uuid.uuid4().hex[:8]}"
     )
 
@@ -221,7 +242,7 @@ def test_10way_concurrent_collection_recording_yields_one_row(sessions: sessionm
     PostgreSQL row-locking. Exactly one row must be created; every other caller observes a safe
     idempotent replay of that same row -- never a duplicate, never a UNIQUE-constraint crash
     surfaced to a caller."""
-    _provider, lab, order, workflow, _orders = _seed_accepted_order(
+    _provider, lab, order, workflow, _orders, collector = _seed_accepted_order(
         sessions, key_prefix=f"tenway-{uuid.uuid4().hex[:8]}"
     )
 
@@ -232,9 +253,12 @@ def test_10way_concurrent_collection_recording_yields_one_row(sessions: sessionm
     def attempt() -> None:
         try:
             barrier.wait(timeout=15)
-            record, created = workflow.record_collection(
-                order_id=order.id, lab_organization_id=lab.id
+            outcome = workflow.record_collection(
+                order_id=order.id,
+                lab_organization_id=lab.id,
+                recorded_by_identity_id=collector,
             )
+            record, created = outcome.milestone, outcome.specimen_created
             with lock:
                 results.append(("ok", (record.id, created)))
         except BaseException as error:  # noqa: BLE001
@@ -264,7 +288,7 @@ def test_10way_concurrent_collection_recording_yields_one_row(sessions: sessionm
 
 
 def _run_collection_vs_start_once(
-    sessions: sessionmaker, workflow: LabWorkflowRepository, *, lab, order
+    sessions: sessionmaker, workflow: LabWorkflowRepository, *, lab, order, collector
 ) -> dict[str, object]:
     results: dict[str, object] = {}
     barrier = threading.Barrier(2)
@@ -272,9 +296,12 @@ def _run_collection_vs_start_once(
     def collect_attempt() -> None:
         try:
             barrier.wait(timeout=15)
-            _record, created = workflow.record_collection(
-                order_id=order.id, lab_organization_id=lab.id
+            outcome = workflow.record_collection(
+                order_id=order.id,
+                lab_organization_id=lab.id,
+                recorded_by_identity_id=collector,
             )
+            created = outcome.specimen_created
             results["collect"] = ("ok", created)
         except BaseException as error:  # noqa: BLE001
             results["collect"] = ("error", type(error).__name__)
@@ -320,7 +347,7 @@ def test_collection_vs_start_processing_race_yields_coherent_outcome(
     ``InvalidLabWorkflowTransition``) and a caller's retry succeeds after collection has landed.
     Run 5 times, matching this ticket's own PROJECT_STATE evidence discipline."""
     for attempt in range(5):
-        _provider, lab, order, workflow, _orders = _seed_accepted_order(
+        _provider, lab, order, workflow, _orders, collector = _seed_accepted_order(
             sessions, key_prefix=f"race-{uuid.uuid4().hex[:8]}"
         )
 

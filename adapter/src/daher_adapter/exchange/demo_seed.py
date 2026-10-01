@@ -147,6 +147,16 @@ _WORKFLOW_TABLES = (
     "exchange_lab_observations",
     "exchange_lab_results",
     "exchange_lab_sample_collections",
+    # DHEALTH-SPECIMEN-001. Physical specimen records are workflow state a laboratory *produces* --
+    # nothing seeds one -- so a reset that left them behind would make this module's "restore the
+    # deterministic baseline" contract false for specimens specifically, and would leave a freshly
+    # reset demo holding collection provenance for orders that no longer exist.
+    #
+    # Ordered before `exchange_lab_orders` (a `RESTRICT` foreign key to the order) and before
+    # `exchange_identities` is ever touched (a `RESTRICT` foreign key to the recording actor).
+    # TRUNCATE's own CASCADE would sort the ordering out regardless; the explicit position is what
+    # makes a missing entry fail loudly, which is this list's whole reason for existing.
+    "exchange_lab_specimens",
     # DHEALTH-LAB-BLOCKED-001. Block episodes are workflow state a laboratory *produces*; nothing
     # seeds one, so a reset that left them behind would make this module's "restore the
     # deterministic baseline" contract false for blocked work specifically -- and would leave a

@@ -32,6 +32,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
+from exchange_support import lab_staff
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
@@ -160,7 +161,11 @@ def _seed_in_progress_native_item(sessions: sessionmaker, *, key_prefix: str):
         lab_order_id=order.id, lab_organization_id=lab.id, expected_price_ids=frozenset([price_id])
     )
     workflow.accept(order_id=order.id, lab_organization_id=lab.id)
-    workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+    workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=lab_staff(organizations, lab.id),
+    )
     workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
     order = orders.get(order.id)
     item_id = order.items[0].id

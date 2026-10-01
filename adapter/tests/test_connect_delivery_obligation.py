@@ -31,7 +31,7 @@ from decimal import Decimal
 
 import pytest
 from exchange_auth_support import ISSUER
-from exchange_support import make_lab, make_offering, make_provider
+from exchange_support import lab_staff, make_lab, make_offering, make_provider
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -180,7 +180,11 @@ def _prepare_and_enter(world, *, text_value: str | None = None) -> None:
         expected_price_ids=frozenset({world["price_id"]}),
     )
     workflow.accept(order_id=order_id, lab_organization_id=lab_id)
-    workflow.record_collection(order_id=order_id, lab_organization_id=lab_id)
+    workflow.record_collection(
+        order_id=order_id,
+        lab_organization_id=lab_id,
+        recorded_by_identity_id=lab_staff(organizations, lab_id),
+    )
     workflow.start_processing(order_id=order_id, lab_organization_id=lab_id)
 
     with sessions() as session:

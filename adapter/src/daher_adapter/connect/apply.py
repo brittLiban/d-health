@@ -409,10 +409,26 @@ class ConnectBridge:
         collection state at all.
         """
         order = _load_order(session, envelope)
-        _, created = self._workflow.record_collection(
-            order_id=order.id, lab_organization_id=self._organization_id, session=session
+        # DHEALTH-SPECIMEN-001: the same call now also creates the physical `LabSpecimen` record,
+        # attributed to this connector's own service identity -- `ConnectorServicePrincipal`'s
+        # `identity_id` exists for exactly this, an attribution handle and not a source of
+        # permission (see `connect/service_identity.py`). A machine that reported a collection is
+        # recorded as having reported it; nothing claims a human collected the sample.
+        #
+        # **No idempotency key, deliberately, and it is a recorded gap rather than an oversight.**
+        # This keeps DH-EX-011's keyless contract byte-for-byte: a repeated source event is a replay
+        # and never a second specimen. The cost is real -- a source LIS that emits two *genuine*
+        # collection events for one order gets a replay on the second, so a recollection reported by
+        # a partner system is not recordable through Connect today. Closing it requires the Connect
+        # contract to carry a per-event identity that distinguishes "the same event again" from "a
+        # second collection", which is an envelope/contract change this ticket does not make.
+        outcome = self._workflow.record_collection(
+            order_id=order.id,
+            lab_organization_id=self._organization_id,
+            recorded_by_identity_id=self._identity_id,
+            session=session,
         )
-        return ApplyOutcome(applied=True, replayed=not created)
+        return ApplyOutcome(applied=True, replayed=not outcome.specimen_created)
 
     def _require_source_release(self, payload: ReleasedResult | ReleasedAmendment) -> None:
         if not payload.source_release_confirmed:

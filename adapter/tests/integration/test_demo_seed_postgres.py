@@ -32,6 +32,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from exchange_support import lab_staff
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -181,7 +182,11 @@ def _create_full_workflow_object(sessions: sessionmaker[Session]) -> None:
         resolved_by_identity_id=_labtech_identity(identities, "tech"),
     )
 
-    workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+    workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=lab_staff(organizations, lab.id),
+    )
     workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
     order = orders.get(order.id)
     item_id = order.items[0].id

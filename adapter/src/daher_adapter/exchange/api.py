@@ -131,6 +131,7 @@ from daher_adapter.exchange.lab_workflow import (
     InvalidLabWorkflowTransition,
     LabOrderBlockRecord,
     LabOrderNotAssigned,
+    LabSpecimenRecord,
     LabWorkflowOrderRecord,
     LabWorkflowRepository,
 )
@@ -1597,16 +1598,81 @@ class LabWorkflowOrderResponse(BaseModel):
     ``status == 'BLOCKED'`` -- both are written in one transaction."""
 
 
+class LabCollectionRequest(BaseModel):
+    """DHEALTH-SPECIMEN-001: the only thing a client may supply when recording a collection.
+
+    One optional field, and everything else about the specimen is server-derived: the order and the
+    laboratory come from the URL, the collector from the authenticated principal, the instant from
+    the server clock. A client may not name the laboratory, the collector, the ordering clinic, the
+    patient, or the order's state -- the URL plus ``LabSelection`` establish authority, and a body
+    that could carry a collector identity would let a browser attribute a sample to a colleague who
+    never touched it.
+
+    ``idempotency_key`` is the client's own opaque retry key, exactly as ``LabOrder`` already
+    requires for order submission: one value per *intended* collection, resent unchanged on a lost
+    response. Omitting it selects DH-EX-011's original keyless behaviour, which can record a first
+    collection but never a second -- see ``LabWorkflowRepository.record_collection``.
+
+    Deliberately **no** specimen type, container, tube, volume, anatomical source, quantity or
+    quality field. Not omitted for later: no governed source for any of them exists in this
+    repository, and a screen that felt empty is not a reason to invent clinical vocabulary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str | None = Field(default=None, max_length=128)
+    """``max_length`` matches ``LabSpecimen.idempotency_key``'s real ``VARCHAR(128)`` exactly, so an
+    oversized key is refused here with a 422 rather than reaching PostgreSQL and surfacing as an
+    uncontrolled 500 -- the lesson ``NativeObservationRequest`` already records for its own value
+    fields, applied at the same boundary."""
+
+
+class LabSpecimenResponse(BaseModel):
+    """DHEALTH-SPECIMEN-001: one physical specimen record, as the owning laboratory sees it.
+
+    **An exact, closed projection.** ``extra="forbid"`` plus this field list is the privacy
+    boundary: a specimen endpoint must not become a side door into the clinic record. There is
+    deliberately no patient name, no date of birth, no visit, no reason for visit, no clinical note,
+    no diagnosis, no ordered test, no result, no doctor review, no invoice, and no other order --
+    none of which a laboratory needs in order to record and read back which physical samples it
+    took. A caller that legitimately needs the order reads the order, through the route that already
+    authorizes that.
+
+    ``recorded_by_identity_id`` is the internal identity id and nothing more -- no name, no e-mail,
+    no role. Resolving it to a display name is the staff-directory read's job, not this one's.
+
+    No field here describes the sample physically, because DHealth records none: see
+    ``LabSpecimen``'s docstring for why an absent specimen type is the honest answer rather than a
+    gap to be filled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    order_id: uuid.UUID
+    recorded_at: datetime
+    recorded_by_identity_id: uuid.UUID
+    idempotency_key: str | None
+
+
 class LabCollectionResponse(BaseModel):
     """DH-EX-011: the response to recording (or idempotently replaying) the order-level
     sample/specimen collection workflow milestone -- deliberately narrow, exactly the one fact
     this ticket records. No specimen type/tube/volume/handling field exists anywhere in this
-    shape because none is modeled."""
+    shape because none is modeled.
+
+    **DHEALTH-SPECIMEN-001 extends it additively.** ``order_id``/``recorded_at`` keep their exact
+    DH-EX-011 meanings -- ``recorded_at`` is still the *milestone's* instant, so no existing client
+    reads a changed fact -- and ``specimen`` is the physical record this call created or replayed.
+
+    ``specimen`` is ``None`` in exactly one case: a keyless replay against an order from
+    before DHEALTH-SPECIMEN-001, whose milestone was recorded before specimens were
+    modelled. It never means "the specimen was not recorded"; it means DHealth does not know
+    which physical samples that order had."""
 
     model_config = ConfigDict(extra="forbid")
 
     order_id: uuid.UUID
     recorded_at: datetime
+    specimen: LabSpecimenResponse | None = None
 
 
 class ResultEntryPlanObservationResponse(BaseModel):
@@ -7519,21 +7585,50 @@ def build_exchange_router(
         order_id: uuid.UUID,
         response: Response,
         principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        body: LabCollectionRequest | None = None,
     ) -> LabCollectionResponse:
-        # DH-EX-011: records exactly one fact -- this LAB_TECH explicitly advanced the
-        # order-level sample/specimen collection workflow milestone. No request body: the order
-        # comes from the URL, the lab from the URL/auth context, the actor from authentication,
-        # and the timestamp from the server clock -- never a caller-supplied value.
+        # DH-EX-011 recorded one fact here: this LAB_TECH explicitly advanced the order-level
+        # sample/specimen collection workflow milestone. DHEALTH-SPECIMEN-001 makes the same call
+        # also create the physical specimen record, in the same transaction, because they are one
+        # clinical action -- a browser must never have to create a specimen and then separately
+        # advance the order, which is two requests either of which can be the one that fails.
+        #
+        # Still nothing about the specimen comes from the caller except an optional retry key: the
+        # order from the URL, the laboratory from the URL after `LabSelection` proves it owns the
+        # order, the collector from `principal.identity_id`, the instant from the server clock.
+        #
+        # `body` is optional so DH-EX-011's original bodyless request stays valid verbatim -- that
+        # is the keyless regime, which can record a first collection but never a second.
         _require_lab_tech(principal, lab_id)
         try:
             with session_factory.begin() as session:
-                record, created = lab_workflow.record_collection(
-                    order_id=order_id, lab_organization_id=lab_id, session=session
+                outcome = lab_workflow.record_collection(
+                    order_id=order_id,
+                    lab_organization_id=lab_id,
+                    recorded_by_identity_id=principal.identity_id,
+                    idempotency_key=body.idempotency_key if body is not None else None,
+                    session=session,
                 )
-                if created:
+                # Two events, because the first collection creates two rows and an additional
+                # specimen creates one. Each is written from the outcome's own explicit boolean,
+                # never inferred by comparing the two timestamps. Writing only the milestone event
+                # would leave an additional specimen unaudited; writing only the specimen event
+                # would retire a DH-EX-011 event that real historical rows carry. A replay creates
+                # nothing and therefore writes neither.
+                if outcome.milestone_created:
                     security_audit.record(
                         session,
                         event_type="lab_sample_collection_recorded",
+                        actor_identity_id=principal.identity_id,
+                        organization_id=lab_id,
+                        outcome="created",
+                        resource_type="lab_order",
+                        resource_id=order_id,
+                    )
+                if outcome.specimen_created:
+                    security_audit.record(
+                        session,
+                        event_type="lab_specimen_recorded",
                         actor_identity_id=principal.identity_id,
                         organization_id=lab_id,
                         outcome="created",
@@ -7546,8 +7641,47 @@ def build_exchange_router(
             ) from error
         except InvalidLabWorkflowTransition as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
-        return LabCollectionResponse(order_id=record.lab_order_id, recorded_at=record.recorded_at)
+        # 201 on a genuinely new physical specimen, 200 on a replay -- exactly DH-EX-011's own
+        # contract, now keyed on the specimen because that is what this call creates. A second
+        # specimen for an order whose milestone already existed is a creation, and says so.
+        response.status_code = (
+            status.HTTP_201_CREATED if outcome.specimen_created else status.HTTP_200_OK
+        )
+        return LabCollectionResponse(
+            order_id=outcome.milestone.lab_order_id,
+            recorded_at=outcome.milestone.recorded_at,
+            specimen=(
+                None if outcome.specimen is None else _to_lab_specimen_response(outcome.specimen)
+            ),
+        )
+
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/specimens",
+        response_model=list[LabSpecimenResponse],
+    )
+    def list_lab_order_specimens(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> list[LabSpecimenResponse]:
+        """DHEALTH-SPECIMEN-001: every physical specimen recorded for this order, oldest first,
+        none omitted and none replaced.
+
+        This is the read that answers *"how many physical collection records exist for this order,
+        and when and by whom was each recorded?"* -- the question a single
+        ``collection_recorded_at`` column can never answer, and the reason a later collection
+        creates a row rather than rewriting one.
+
+        Its own bounded read rather than a field on the work queue, matching
+        ``list_lab_order_blocks`` exactly: specimen count per order is unbounded in principle and
+        the queue is a fixed-width view. ``lab.queue.work`` via ``_require_lab_tech``, the same
+        authority that records one -- reading back the samples you just took is not a separate
+        privilege, and `lab.result.release` is emphatically not a substitute for it."""
+        _require_lab_tech(principal, lab_id)
+        records = lab_workflow.list_specimens_for_order(order_id, lab_id)
+        if records is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        return [_to_lab_specimen_response(record) for record in records]
 
     # -- DHEALTH-LAB-BLOCKED-001: the cannot-proceed workflow -------------------------------
     #
@@ -10515,6 +10649,24 @@ def _to_lab_block_response(record: LabOrderBlockRecord | None) -> LabOrderBlockR
         resolved_at=record.resolved_at,
         resolved_by_identity_id=record.resolved_by_identity_id,
         resolution_note=record.resolution_note,
+    )
+
+
+def _to_lab_specimen_response(record: LabSpecimenRecord) -> LabSpecimenResponse:
+    """DHEALTH-SPECIMEN-001: the one place a ``LabSpecimen`` becomes an HTTP shape.
+
+    Field-by-field and explicit, never ``model_validate`` over the record: the narrowing has to be
+    visible at one reviewable place, so that a field added to ``LabSpecimenRecord`` later cannot
+    reach a client merely by existing. ``lab_organization_id`` is deliberately **not**
+    carried -- the caller already named the laboratory in the URL and was authorized against
+    it, so echoing it back tells them nothing, and putting it in a projection invites a
+    future reader to trust it as authority."""
+    return LabSpecimenResponse(
+        id=record.id,
+        order_id=record.lab_order_id,
+        recorded_at=record.recorded_at,
+        recorded_by_identity_id=record.recorded_by_identity_id,
+        idempotency_key=record.idempotency_key,
     )
 
 

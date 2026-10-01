@@ -251,6 +251,14 @@ SecurityEventType = Literal[
     "capability_granted",
     "capability_denied",
     "capability_override_cleared",
+    # DHEALTH-SPECIMEN-001: one physical sample instance was recorded against a LabOrder.
+    # Deliberately separate from `lab_sample_collection_recorded` above -- the first collection
+    # writes both (a milestone was created once; a specimen was created now), and an additional
+    # specimen recorded after a block writes only this one. Reuses `resource_type="lab_order"` for
+    # the same reason every lab event above does, `lab_order_blocked` included: the specimen row
+    # itself carries `recorded_by_identity_id`/`recorded_at` and is the authoritative provenance
+    # record, so this table stays order-centric rather than gaining a per-child resource type.
+    "lab_specimen_recorded",
 ]
 SecurityOutcome = Literal["created", "returned_existing", "updated", "unchanged", "refused"]
 SecurityResourceType = Literal[

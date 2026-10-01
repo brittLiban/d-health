@@ -559,7 +559,44 @@ export interface ProviderBlock {
  */
 export interface LabCollectionResponse {
   order_id: string
+  /**
+   * The order-level *milestone's* instant, unchanged in meaning from DH-LAB-002 §22. Not the
+   * specimen's -- for the first collection they are the same value by construction, and for a later
+   * collection this one deliberately does not move.
+   */
   recorded_at: string
+  /**
+   * DHEALTH-SPECIMEN-001: the physical specimen this call created, or replayed.
+   *
+   * `null` in exactly one case: a keyless replay against an order whose milestone predates the
+   * specimen entity. It never means "no specimen was recorded" -- it means DHealth does not know
+   * which physical samples that order had.
+   */
+  specimen: LabSpecimen | null
+}
+
+/**
+ * DHEALTH-SPECIMEN-001: one physical sample instance recorded for a lab order.
+ *
+ * Mirrors the backend's `LabSpecimenResponse` exactly. The field list is the whole shape -- there is
+ * deliberately no specimen type, container, tube colour, volume, anatomical source, quality grade,
+ * accession number or status, because DHealth models none of them and no governed source for any of
+ * them exists. A screen that feels empty is not a reason to invent clinical vocabulary.
+ *
+ * `recorded_at` is when DHealth's server observed a laboratory worker record this sample -- never a
+ * caller-supplied or backdated clinical instant, and never a claim about when collection physically
+ * happened. The UI must word it accordingly: "Prélèvement enregistré", never "Prélèvement effectué".
+ */
+export interface LabSpecimen {
+  id: string
+  order_id: string
+  recorded_at: string
+  recorded_by_identity_id: string
+  /**
+   * The client's own opaque retry key, echoed back so a caller recovering from a lost response can
+   * find the specimen it already created by reading rather than by re-POSTing.
+   */
+  idempotency_key: string | null
 }
 
 /**

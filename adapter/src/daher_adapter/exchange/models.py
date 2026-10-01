@@ -89,6 +89,8 @@ __all__ = [
     "LabResultType",
     "LabSampleCollection",
     "LabSelection",
+    "SPECIMEN_RECORDABLE_ORDER_STATUSES",
+    "LabSpecimen",
     "Organization",
     "OrganizationMembership",
     "OrganizationMembershipStatus",
@@ -971,6 +973,189 @@ class LabSampleCollection(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+
+
+#: DHEALTH-SPECIMEN-001: the only order statuses for which a ``LabSpecimen`` row may be created.
+#:
+#: Deliberately the **same two values** ``BLOCKABLE_ORDER_STATUSES`` already names, and for the
+#: same underlying reason -- "work this laboratory has genuinely taken and has not yet released".
+#: It is a separate frozenset rather than an alias of that one because the two answer different
+#: questions (*may this be blocked?* versus *may a physical sample be recorded against it?*) and a
+#: future change to either must not silently move the other; the equality is asserted by a test
+#: rather than expressed by sharing the object.
+#:
+#: **This is not a widening of the block-entry rule**, and it is not a widening of the
+#: DH-EX-011 collection milestone rule either. The *first* milestone still may only be created
+#: while ``ACCEPTED`` -- ``_record_specimen_in_session`` keeps that check exactly as DH-EX-011
+#: wrote it, so a legacy ``IN_PROGRESS``/``COMPLETED`` order that never had a milestone still
+#: cannot retroactively acquire one. ``IN_PROGRESS`` appears here only for an **additional**
+#: specimen on an order whose milestone already exists, which is the one case the existing
+#: workflow genuinely produces: ``LabOrderBlock.resolve`` restores ``blocked_from_status``, and
+#: `docs/NATIVE-OPERATING-PRODUCT.md` §16's own worked example is an order blocked *from*
+#: ``IN_PROGRESS`` for an unusable specimen. There is no path from ``IN_PROGRESS`` back to
+#: ``ACCEPTED``, so an ``ACCEPTED``-only rule would have made a second physical sample
+#: unrecordable for exactly the situation §16 describes -- the software would have had to either
+#: overwrite the first specimen or pretend the second one did not exist.
+SPECIMEN_RECORDABLE_ORDER_STATUSES: frozenset[str] = frozenset(
+    {LabOrderStatus.ACCEPTED.value, LabOrderStatus.IN_PROGRESS.value}
+)
+
+
+class LabSpecimen(Base):
+    """DHEALTH-SPECIMEN-001: one **physical sample instance** recorded as having been collected in
+    service of exactly one ``LabOrder``.
+
+    This is the entity ``LabSampleCollection``'s own docstring says it deliberately is *not*, and
+    the distinction between the two rows is the whole content of this ticket:
+
+    * ``LabSampleCollection`` is an **order-level workflow milestone** -- at most one per order,
+      the thing ``ACCEPTED -> IN_PROGRESS`` is gated on. It answers *"has this laboratory started
+      the collection step for this order?"*
+    * ``LabSpecimen`` is a **physical sample instance** -- any number per order, never rewritten
+      once written. It answers *"which physical samples has this laboratory recorded for this
+      order, when, and on whose authority?"*
+
+    It is not another ``LabOrder``, not a result, not a status, not a barcode, not inventory.
+
+    ── Why ``lab_order_id`` is NOT unique ──
+
+    ``LabSampleCollection.lab_order_id`` carries ``unique=True``, which is correct for a
+    once-per-order milestone and **false** as a statement about physical reality. Laboratory
+    medicine is not one-order/one-specimen: a CBC and a urine culture cannot share a tube, and a
+    sample that turns out to be unusable is replaced by a second sample rather than by an edit to
+    the first. A unique constraint here would have encoded "an order has at most one physical
+    sample, forever" into the schema, and every later recollection would then have had to either
+    overwrite the earlier row or not be recorded at all. Both are lies, and the second is the one
+    that gets chosen under deadline pressure.
+
+    This ticket builds no multi-container workflow and no multi-specimen UI. It only refuses to
+    make the schema assert something untrue, so that adding either later is not a destructive
+    redesign.
+
+    ── ``recorded_at``, and why it is deliberately not ``collected_at`` ──
+
+    The name is inherited from ``LabSampleCollection`` on purpose, and the reasoning is
+    unchanged: this is when DHealth's own server clock observed an authenticated laboratory worker
+    record this sample, never a caller-supplied or backdated clinical instant. It states *"a lab
+    user recorded a physical sample at this instant"*, never *"physical collection definitively
+    occurred at this exact historical moment"*. ADR-018's DH-011J2 addendum is the reason the rule
+    exists at all -- no reliable native collection signal existed even on the OpenMRS/OpenELIS
+    connector track -- and `models.py`'s ``LabOrderStatus`` docstring generalizes it to this whole
+    Exchange: never infer a physical-world event from a database timestamp. Introducing a
+    ``collected_at`` column here would have quietly reversed that decision under a new ticket's
+    cover.
+
+    ── Provenance, all of it server-derived ──
+
+    ``recorded_by_identity_id`` is ``NOT NULL``. Every caller has a real
+    ``exchange_identities`` row to attribute: a human laboratory worker through
+    ``AuthenticatedPrincipal.identity_id``, and a Connect agent through
+    ``ConnectorServicePrincipal.identity_id``, which exists for precisely this purpose (see
+    ``connect/service_identity.py``: *"an attribution handle, not a source of permission"*). No
+    caller may supply it, and no request body carries it -- a browser that could name the
+    collector could attribute a sample to a colleague who never touched it.
+
+    ``lab_organization_id`` is likewise derived, from the URL's laboratory *after*
+    ``LabSelection`` has proved that laboratory owns this order. It is stored rather than left to
+    be re-derived through the join, matching both sibling tables
+    (``LabSampleCollection``/``LabOrderBlock``) exactly: it is the authority under which this row
+    was written, and it cannot drift from the selection because ``LabSelection.lab_order_id`` is
+    itself unique, so an order has exactly one owning laboratory for its whole life.
+
+    ── ``idempotency_key``: retry safety without a false 1:1 ──
+
+    The hard part. "One specimen per order" would make retries trivially safe and the domain
+    false, so retry safety is carried by an explicit client request key instead -- the same
+    mechanism, and the same vocabulary, ``LabOrder.idempotency_key`` already established for order
+    submission. Scoped ``(lab_order_id, idempotency_key)``: two laboratories' clients generate
+    their own keys with no coordination, and the order already fixes the tenant, so a narrower
+    scope is unnecessary and a global one would let two orders' keys collide by accident.
+
+    **Nullable, deliberately.** A ``NULL`` key means "recorded through the original DH-EX-011
+    keyless path", which is what ``connect/apply.py``'s source-observed collection event and every
+    pre-DHEALTH-SPECIMEN-001 script still use. PostgreSQL permits many ``NULL``s in a unique
+    constraint, so those rows are not constrained by it -- they are constrained by the keyless
+    path's own rule, which is unchanged from DH-EX-011: a keyless call never creates a second
+    specimen and never a second milestone. That is a real, recorded gap rather than a hidden one
+    (a source LIS that emits two genuine collection events still gets a replay on the second),
+    and closing it needs a Connect contract change this ticket does not make.
+
+    ── No lifecycle, no taxonomy, no accession number ──
+
+    There is **no specimen status column** -- no ``COLLECTED``/``RECEIVED``/``REJECTED``/
+    ``DISCARDED``/``RECOLLECTED``. A sample that cannot be worked is already expressible: the
+    *order* becomes ``BLOCKED`` with a ``LabOrderBlock`` episode naming ``SPECIMEN_UNUSABLE`` or
+    ``SPECIMEN_INSUFFICIENT``, and that is an operational statement a worker made, not a clinical
+    adequacy judgement DHealth is entitled to record. A second state machine beside it would have
+    had to be kept consistent with the first forever, and its vocabulary would have been invented
+    here rather than validated by anyone who works in a laboratory.
+
+    There is **no specimen type, container, tube colour, anticoagulant, volume, anatomical source,
+    storage location, quality grade or rejection category**. Not "not yet" -- absent, because no
+    governed source for any of them exists in this repository: ``TestCatalogEntry`` carries no
+    specimen-type field, so the type cannot be derived either, and inventing one is exactly what
+    `AGENTS.md`'s "never invent clinical content" rule forbids. The absence is a real product gap
+    and is recorded as one.
+
+    There is **no human-facing accession number**. ``id`` is a server-generated UUID, durable and
+    suitable for a later label ticket to reference; it is emphatically not an accession identifier
+    and nothing renders it as one.
+
+    ── No explicit recollection link ──
+
+    No ``recollection_of_specimen_id``. The question *"was this sample collected because that
+    earlier one had to be replaced?"* cannot be answered from the workflow input that exists: the
+    collection action carries no such statement, an order may legitimately require more than one
+    sample, and inferring the link from two timestamps would be fabricated provenance. Multiple
+    immutable rows plus their recorded order preserve the history truthfully -- *how many samples
+    exist, when each was recorded, by whom* -- without claiming to know why. Whether the link is
+    needed, and where a laboratory would state it, is recorded as a remaining decision.
+
+    ── Immutability ──
+
+    No code path updates a row of this table after insert, and no ``PATCH`` endpoint exists that
+    could. There is no void/correct path either: a mistaken record is history, and inventing
+    destructive edit semantics for it is recorded as an open decision rather than decided here --
+    the same shape ``LabOrderBlock`` chose (*"a block that turned out to be a mistake is resolved
+    with a note saying so, not erased"*).
+
+    ── Historical rows ──
+
+    **Nothing is backfilled.** A pre-DHEALTH-SPECIMEN-001 order with a ``LabSampleCollection``
+    row and no specimen means exactly *"the collection milestone was recorded; how many physical
+    samples there were, and who collected them, is not known to DHealth"*. Manufacturing one
+    specimen per such milestone would assert a cardinality of exactly one and an unknown
+    collector -- two facts no migration can know -- so the honest absence is preserved instead."""
+
+    __tablename__ = "exchange_lab_specimens"
+    __table_args__ = (
+        UniqueConstraint(
+            "lab_order_id",
+            "idempotency_key",
+            name="uq_exchange_lab_specimens_order_idempotency_key",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    #: Deliberately **not** ``unique`` -- see the class docstring. ``RESTRICT`` matches every
+    #: sibling: an order that has physical-sample history cannot be deleted out from under it.
+    lab_order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_lab_orders.id", ondelete="RESTRICT"), nullable=False
+    )
+    lab_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    recorded_by_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: The client's own retry key, or ``NULL`` for the DH-EX-011 keyless path. Opaque and never
+    #: derived from clinical content, exactly as ``LabOrder.idempotency_key`` requires of its own.
+    #: No separate index: the unique constraint above is a btree with ``lab_order_id`` leading, so
+    #: it already serves both the per-order history read and the per-key replay lookup.
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class LabOrderBlock(Base):
@@ -2157,7 +2342,21 @@ class ExchangeSecurityAuditEvent(Base):
             #
             # Deliberately **no** event for assigning a role template: that is `role_assigned`,
             # which already exists and already means exactly this, now that a role *is* a template.
-            "'capability_granted', 'capability_denied', 'capability_override_cleared'"
+            "'capability_granted', 'capability_denied', 'capability_override_cleared', "
+            # DHEALTH-SPECIMEN-001: one physical sample instance was recorded. Distinct from
+            # `lab_sample_collection_recorded` above rather than reusing it, because the two are
+            # genuinely different facts and the first collection writes both: the milestone row was
+            # created *once* for this order, and a specimen row was created *now*. An additional
+            # specimen recorded after a block writes only this one -- reusing the milestone event
+            # for it would claim a milestone had been created when none was.
+            #
+            # `resource_type='lab_order'` with the *order* id, matching every lab event above,
+            # including `lab_order_blocked`, whose episode row has its own UUID and its own by-id
+            # endpoint and still deliberately did not get a `lab_order_block` resource type. The
+            # specimen row itself is the authoritative record of which specimen, when, and by whom
+            # -- it carries `recorded_by_identity_id` and `recorded_at` -- exactly as the block
+            # episode row is the authoritative record of its own reason and note.
+            "'lab_specimen_recorded'"
             ")",
             name="ck_exchange_security_audit_events_event_type",
         ),

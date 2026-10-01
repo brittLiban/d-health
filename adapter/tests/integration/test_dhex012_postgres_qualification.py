@@ -36,6 +36,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
+from exchange_support import lab_staff
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -135,7 +136,11 @@ def _seed_in_progress_order(sessions: sessionmaker, *, key_prefix: str, item_cou
         lab_order_id=order.id, lab_organization_id=lab.id, provider_organization_id=provider.id
     )
     workflow.accept(order_id=order.id, lab_organization_id=lab.id)
-    workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+    workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=lab_staff(organizations, lab.id),
+    )
     workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
 
     return {

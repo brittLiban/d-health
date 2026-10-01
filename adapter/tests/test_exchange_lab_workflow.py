@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
-from exchange_support import make_lab, make_provider
+from exchange_support import lab_staff, make_lab, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select
@@ -1673,7 +1673,11 @@ def test_25way_same_action_start_processing_concurrency(tmp_path: Path) -> None:
     h = _build_repo_harness(tmp_path, db_name="same-start")
     lab, order_id = _seed_selected_order(h, name="samestart")
     h["workflow"].accept(order_id=order_id, lab_organization_id=lab.id)
-    h["workflow"].record_collection(order_id=order_id, lab_organization_id=lab.id)
+    h["workflow"].record_collection(
+        order_id=order_id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=lab_staff(h["organizations"], lab.id),
+    )
 
     outcomes = []
     errors = []
@@ -1738,7 +1742,11 @@ def _run_accept_vs_collection_once(tmp_path: Path, i: int) -> None:
     def do_collection():
         barrier.wait(timeout=10)
         try:
-            h["workflow"].record_collection(order_id=order_id, lab_organization_id=lab.id)
+            h["workflow"].record_collection(
+                order_id=order_id,
+                lab_organization_id=lab.id,
+                recorded_by_identity_id=lab_staff(h["organizations"], lab.id),
+            )
             results["collection"] = "ok"
         except InvalidLabWorkflowTransition:
             results["collection"] = "conflict"
@@ -1752,9 +1760,12 @@ def _run_accept_vs_collection_once(tmp_path: Path, i: int) -> None:
 
     if results["collection"] == "conflict":
         # collection lost the race (order was still SELECTED) -- retry it now that accept landed.
-        _record, created = h["workflow"].record_collection(
-            order_id=order_id, lab_organization_id=lab.id
+        outcome = h["workflow"].record_collection(
+            order_id=order_id,
+            lab_organization_id=lab.id,
+            recorded_by_identity_id=lab_staff(h["organizations"], lab.id),
         )
+        created = outcome.specimen_created
         assert created is True
 
     with h["sessions"]() as session:
@@ -1793,7 +1804,11 @@ def _run_collection_vs_start_processing_once(tmp_path: Path, i: int) -> None:
 
     def do_collection():
         barrier.wait(timeout=10)
-        h["workflow"].record_collection(order_id=order_id, lab_organization_id=lab.id)
+        h["workflow"].record_collection(
+            order_id=order_id,
+            lab_organization_id=lab.id,
+            recorded_by_identity_id=lab_staff(h["organizations"], lab.id),
+        )
         results["collection"] = "done"
 
     def do_start():
@@ -1853,9 +1868,12 @@ def test_10way_concurrent_collection_recording(tmp_path: Path) -> None:
     def attempt():
         try:
             barrier.wait(timeout=10)
-            _record, created = h["workflow"].record_collection(
-                order_id=order_id, lab_organization_id=lab.id
+            outcome = h["workflow"].record_collection(
+                order_id=order_id,
+                lab_organization_id=lab.id,
+                recorded_by_identity_id=lab_staff(h["organizations"], lab.id),
             )
+            created = outcome.specimen_created
             with lock:
                 outcomes.append(created)
         except Exception as error:  # noqa: BLE001

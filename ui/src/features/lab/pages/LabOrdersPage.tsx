@@ -4,6 +4,7 @@ import type {
   LabOrderBlock,
   LabOrderBlockReason,
   LabOrderStatus,
+  LabSpecimen,
   LabWorkflowOrder,
   ResultEntryWorkspace,
 } from '../../../api/exchangeTypes'
@@ -123,6 +124,20 @@ const PROCESSING_PREREQUISITE_ERROR =
 const BLOCK_CONFLICT_ERROR =
   'Cet ordre vient d’être bloqué pour un autre motif — le blocage actuel est affiché ci-dessous.'
 const BLOCK_HISTORY_ERROR = "Impossible de charger l'historique des blocages de cet ordre."
+const SPECIMEN_HISTORY_ERROR = "Impossible de charger les prélèvements de cet ordre."
+
+/**
+ * DHEALTH-SPECIMEN-001: the order statuses for which the server will record a physical specimen.
+ *
+ * Mirrors the backend's `SPECIMEN_RECORDABLE_ORDER_STATUSES` -- "work this laboratory has taken and
+ * has not yet released". Used for two things, and deliberately not for a third: deciding whether to
+ * offer the collection action, and distinguishing "unconfirmed, retry available" from "the order
+ * moved somewhere this can no longer be recorded" during lost-response recovery.
+ *
+ * It is **not** an authorization check. The server decides; this only avoids offering a control that
+ * would be refused, exactly as the existing status-driven actions on this page already do.
+ */
+const SPECIMEN_RECORDABLE_STATUSES: LabOrderStatus[] = ['ACCEPTED', 'IN_PROGRESS']
 
 const QUEUE_PAGE_LIMIT = 100
 
@@ -177,6 +192,21 @@ interface BlockHistoryState {
 }
 
 /**
+ * DHEALTH-SPECIMEN-001: the order's physical specimen history, read from the server.
+ *
+ * Its own panel-scoped read rather than a field on the queue, mirroring `BlockHistoryState`
+ * exactly -- the number of specimens per order is unbounded in principle and the queue is a
+ * fixed-width view. `specimens: null` means "not loaded or failed", and an empty array means
+ * "loaded, and this order has none", which are different facts and must stay distinguishable.
+ */
+interface SpecimenHistoryState {
+  orderId: string
+  loading: boolean
+  error: string | null
+  specimens: LabSpecimen[] | null
+}
+
+/**
  * DHEALTH-LAB-BLOCKED-001 §26: the block form's own draft, and the whole of what a user supplies.
  * There is deliberately no actor, organization, timestamp or resume-state field here — not
  * disabled ones, not hidden ones, none at all. Anything this shape cannot express is a fact the
@@ -205,6 +235,19 @@ export function LabOrdersPage() {
     submitting: false,
   })
   const [blockHistory, setBlockHistory] = useState<BlockHistoryState | null>(null)
+  const [specimenHistory, setSpecimenHistory] = useState<SpecimenHistoryState | null>(null)
+  // DHEALTH-SPECIMEN-001: the key for the collection the user is *currently intending*, held in a
+  // ref rather than regenerated inside `runCollection`.
+  //
+  // This is the whole of the duplicate-specimen defence on the client side, and the reason it is a
+  // ref is the reason it exists at all: if the key were generated inside the POST, a user who
+  // pressed "Confirmer" twice after an uncertain first response would send two *different* keys,
+  // and the server -- correctly, by its own contract -- would record two physical specimens for one
+  // physical collection. The key is minted once when the user opens the confirmation for a
+  // collection, and every attempt at that same collection reuses it. A genuinely new collection
+  // opens a new confirmation and therefore mints a new key, which is exactly the distinction
+  // between "retry the request that may already have won" and "a second sample was taken".
+  const collectionKeyRef = useRef<string | null>(null)
   const [blockDraft, setBlockDraft] = useState<BlockDraft>({
     reason: BLOCK_REASONS[0],
     note: '',
@@ -473,6 +516,52 @@ export function LabOrdersPage() {
     setBlockHistory(null)
   }, [panel?.orderId, panel?.order, loadBlockHistory])
 
+  // DHEALTH-SPECIMEN-001: the order's physical specimen history. Same generation/mount/tenant
+  // stale-response discipline as every other panel-scoped read on this page -- deliberately
+  // reading `panelGenerationRef` without incrementing it, exactly as `loadBlockHistory` does.
+  const loadSpecimenHistory = useCallback(
+    (orderId: string) => {
+      if (!activeLab) return
+      const generation = panelGenerationRef.current
+      const targetLab = activeLab.organization_id
+      const controller = new AbortController()
+
+      setSpecimenHistory({ orderId, loading: true, error: null, specimens: null })
+      client
+        .listLabOrderSpecimens(targetLab, orderId, { signal: controller.signal })
+        .then((specimens) => {
+          if (!mountedRef.current) return
+          if (panelGenerationRef.current !== generation) return
+          if (currentLabRef.current !== targetLab) return
+          setSpecimenHistory({ orderId, loading: false, error: null, specimens })
+        })
+        .catch(() => {
+          if (controller.signal.aborted) return
+          if (!mountedRef.current) return
+          if (panelGenerationRef.current !== generation) return
+          if (currentLabRef.current !== targetLab) return
+          setSpecimenHistory({
+            orderId,
+            loading: false,
+            error: SPECIMEN_HISTORY_ERROR,
+            specimens: null,
+          })
+        })
+      return () => controller.abort()
+    },
+    [client, activeLab],
+  )
+
+  // Loaded for every opened order, for the same reason block history is: "how many physical samples
+  // does this order have?" is a question about an order that looks ordinary, and an empty list is
+  // itself the answer.
+  useEffect(() => {
+    if (panel?.orderId && panel.order) {
+      return loadSpecimenHistory(panel.orderId)
+    }
+    setSpecimenHistory(null)
+  }, [panel?.orderId, panel?.order, loadSpecimenHistory])
+
   const handleOpenOrder = (orderId: string) => {
     if (panel?.orderId === orderId) return
     setMutationState({ action: null, submitting: false, error: null })
@@ -606,14 +695,34 @@ export function LabOrdersPage() {
   // three-way shape as accept/reject's `targetStatus` equality above -- there is no
   // `targetStatus` for a milestone that never changes `LabOrder.status` at all. Success is judged
   // by `collection_recorded_at` being non-null, never by inferring it from `status`.
+  //
+  // **[Changed 2026-10-01, DHEALTH-SPECIMEN-001.** The POST now carries
+  // `collectionKeyRef.current`, and the lost-response recovery below is rewritten around it.
+  //
+  // The old recovery predicate -- "`collection_recorded_at` is non-null, therefore my request
+  // won" -- was correct while an order could have at most one collection, and becomes *false* the
+  // moment a second one is recordable: after a recollection the field is already non-null from the
+  // *first* collection, so an uncertain second POST would have been reported as a success whether
+  // it had been recorded or not. The predicate is therefore now "a specimen carrying **my own**
+  // idempotency key exists", which is a fact about this specific request rather than about the
+  // order, and it is read back from the server rather than assumed.
+  //
+  // What has not changed is the shape that matters: recovery is a **read**, never a blind re-POST.
+  // This function calls `recordLabOrderCollection` exactly once per invocation.]**
   const runCollection = useCallback(async () => {
     if (!activeLab || !panel?.order) return
     const orderId = panel.order.order_id
     const targetLab = activeLab.organization_id
     const mutationGeneration = panelGenerationRef.current
+    // Minted when the confirmation was opened; reused by every attempt at that same collection.
+    // The `??` branch is defensive only -- the action is unreachable without a confirmation.
+    const idempotencyKey = collectionKeyRef.current ?? crypto.randomUUID()
+    collectionKeyRef.current = idempotencyKey
     setMutationState({ action: 'collect', submitting: true, error: null })
     try {
-      const response = await client.recordLabOrderCollection(targetLab, orderId)
+      const response = await client.recordLabOrderCollection(targetLab, orderId, {
+        idempotencyKey,
+      })
       if (!mountedRef.current || currentLabRef.current !== targetLab) return
       if (panelGenerationRef.current !== mutationGeneration) {
         loadQueue(filter)
@@ -625,6 +734,9 @@ export function LabOrdersPage() {
         setMutationState({ action: 'collect', submitting: false, error: ORDER_MISMATCH_ERROR })
       } else {
         setMutationState({ action: null, submitting: false, error: null })
+        // This collection is settled, so the next one is a genuinely new physical sample and must
+        // not reuse this key -- reusing it would make a real second collection look like a retry.
+        collectionKeyRef.current = null
       }
       setConfirming(null)
       loadPanel(orderId, { isRecheck: true })
@@ -637,29 +749,42 @@ export function LabOrdersPage() {
       }
       setConfirming(null)
       try {
-        const authoritative = await client.getLabOrder(targetLab, orderId)
+        const [authoritative, specimens] = await Promise.all([
+          client.getLabOrder(targetLab, orderId),
+          client.listLabOrderSpecimens(targetLab, orderId),
+        ])
         if (!mountedRef.current || currentLabRef.current !== targetLab) return
         if (panelGenerationRef.current !== mutationGeneration) {
           loadQueue(filter)
           return
         }
+        // Did *my* request land? Decided by my own key, never by the order's collection field.
+        const mine = specimens.some((specimen) => specimen.idempotency_key === idempotencyKey)
         if (authoritative.order_id !== orderId) {
           setMutationState({ action: 'collect', submitting: false, error: ORDER_MISMATCH_ERROR })
-        } else if (authoritative.collection_recorded_at !== null) {
-          // §25 Case A: the milestone genuinely exists now -- success, no error, never a second
-          // POST (this branch never calls `recordLabOrderCollection` again).
+        } else if (mine) {
+          // Case A: the specimen this request was for genuinely exists -- success, no error, and
+          // never a second POST (this branch never calls `recordLabOrderCollection` again).
           setMutationState({ action: null, submitting: false, error: null })
-        } else if (authoritative.status === 'ACCEPTED') {
-          // §25 Case B: still ACCEPTED with no milestone -- genuinely unconfirmed, explicit retry
-          // stays available (the "Enregistrer la collecte" button remains offered below).
-          setMutationState({ action: 'collect', submitting: false, error: MUTATION_UNCONFIRMED_ERROR })
+          collectionKeyRef.current = null
+        } else if (SPECIMEN_RECORDABLE_STATUSES.includes(authoritative.status)) {
+          // Case B: the order is still in a state where this collection could be recorded, and it
+          // was not -- genuinely unconfirmed. An explicit retry stays available and will reuse the
+          // same key, so it cannot create a duplicate if the first attempt did in fact land.
+          setMutationState({
+            action: 'collect',
+            submitting: false,
+            error: MUTATION_UNCONFIRMED_ERROR,
+          })
         } else {
-          // §25 Case C: the order moved on (e.g. rejected/cancelled) with no milestone ever
-          // recorded -- a real conflict, never fabricated collection history.
+          // Case C: the order moved somewhere this collection can no longer be recorded (rejected,
+          // cancelled, blocked, released) and it never was -- a real conflict, never fabricated
+          // collection history.
           setMutationState({ action: 'collect', submitting: false, error: MUTATION_CONFLICT_ERROR })
         }
         if (authoritative.order_id === orderId) {
           setPanel({ orderId, loading: false, error: null, order: authoritative })
+          setSpecimenHistory({ orderId, loading: false, error: null, specimens })
         }
         loadQueue(filter)
       } catch {
@@ -1085,18 +1210,87 @@ export function LabOrdersPage() {
                       <strong>Analyses demandées :</strong>{' '}
                       {panel.order.requested_tests.map((t) => t.catalog_display_name_snapshot).join(', ')}
                     </p>
-                    <p style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
-                      {panel.order.collection_recorded_at ? (
-                        <>
-                          <strong>Collecte enregistrée</strong>{' '}
-                          {formatDateTime(panel.order.collection_recorded_at)}
-                        </>
-                      ) : (
-                        // §11/§49: null is worded as "not recorded in DHealth", never as
-                        // "definitely not collected" -- a legacy order may predate DH-EX-011.
-                        <>Collecte non enregistrée dans DHealth</>
-                      )}
-                    </p>
+                    {/*
+                      DHEALTH-SPECIMEN-001: the specimen history *replaces* the single milestone
+                      timestamp once any specimen exists, rather than sitting beside it.
+
+                      Showing both would be two displays of an overlapping fact: for the first
+                      collection they are the same instant by construction, and after a second
+                      collection the milestone line would silently keep showing the first one next to
+                      a two-row history, which reads as a contradiction. So the milestone line
+                      survives for exactly the case it is still the only truth -- an order whose
+                      collection was recorded before specimens were modelled.
+                    */}
+                    {specimenHistory?.orderId === panel.order.order_id &&
+                    specimenHistory.specimens !== null &&
+                    specimenHistory.specimens.length > 0 ? (
+                      <div>
+                        <p
+                          style={{
+                            margin: '0 0 var(--space-1)',
+                            fontSize: 'var(--font-size-sm)',
+                            fontWeight: 'var(--font-weight-semibold)',
+                          }}
+                        >
+                          Prélèvements ({specimenHistory.specimens.length})
+                        </p>
+                        <ul
+                          style={{
+                            listStyle: 'none',
+                            margin: 0,
+                            padding: 0,
+                            display: 'grid',
+                            gap: 'var(--space-1)',
+                          }}
+                        >
+                          {specimenHistory.specimens.map((specimen, index) => (
+                            <li key={specimen.id} style={{ fontSize: 'var(--font-size-sm)' }}>
+                              {/*
+                                "Prélèvement enregistré", and the same wording for every row.
+
+                                Deliberately NOT "Nouveau prélèvement", "Prélèvement de contrôle" or
+                                anything implying the second row replaced the first: DHealth does not
+                                know *why* a later sample was recorded. An order may legitimately
+                                need more than one, and nothing in the collection action says which
+                                case this is -- so the UI states what the domain knows (a sample was
+                                recorded, at this instant) and nothing more. Equally not
+                                "Prélèvement effectué": the server recorded that someone entered it,
+                                never that collection physically happened at that moment.
+
+                                The index is an ordinal for reading, not a clinical label.
+                              */}
+                              {index + 1}. Prélèvement enregistré {formatDateTime(specimen.recorded_at)}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : panel.order.collection_recorded_at ? (
+                      // A collection recorded before DHEALTH-SPECIMEN-001: the milestone is the only
+                      // record, and how many physical samples it stood for is not known. Worded as
+                      // the milestone it is, with no specimen count implied.
+                      <p style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                        <strong>Collecte enregistrée</strong>{' '}
+                        {formatDateTime(panel.order.collection_recorded_at)}
+                      </p>
+                    ) : (
+                      // §11/§49: null is worded as "not recorded in DHealth", never as
+                      // "definitely not collected" -- a legacy order may predate DH-EX-011.
+                      <p style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                        Collecte non enregistrée dans DHealth
+                      </p>
+                    )}
+                    {specimenHistory?.orderId === panel.order.order_id && specimenHistory.error ? (
+                      <p
+                        role="alert"
+                        style={{
+                          margin: 0,
+                          fontSize: 'var(--font-size-sm)',
+                          color: 'var(--color-danger-700)',
+                        }}
+                      >
+                        {specimenHistory.error}
+                      </p>
+                    ) : null}
                     <p style={{ margin: 0, fontSize: 'var(--font-size-xs)', color: 'var(--color-neutral-500)', fontFamily: 'monospace' }}>
                       Référence de l'ordre : <code>{panel.order.order_id}</code>
                     </p>
@@ -1261,7 +1455,14 @@ export function LabOrdersPage() {
                     ) : (
                       <Button
                         type="button"
-                        onClick={() => setConfirming('collect')}
+                        onClick={() => {
+                          // DHEALTH-SPECIMEN-001: one key per *intended* collection, minted when the
+                          // confirmation opens so that every attempt at this collection -- including
+                          // a retry after an uncertain response -- carries the same one and cannot
+                          // produce a second physical specimen record.
+                          collectionKeyRef.current = crypto.randomUUID()
+                          setConfirming('collect')
+                        }}
                         disabled={mutationState.submitting}
                       >
                         Enregistrer la collecte
@@ -1427,6 +1628,80 @@ export function LabOrdersPage() {
                       Décision enregistrée — <strong>{formatOrderStatusLabel(panel.order.status)}</strong>.
                     </p>
                   )}
+
+                  {/*
+                    DHEALTH-SPECIMEN-001: recording an *additional* physical specimen for an order
+                    that already has one.
+
+                    Offered only where the server will accept it -- a milestone already exists
+                    (otherwise the primary "Enregistrer la collecte" action above is the right
+                    control) and the order is still work this laboratory holds and has not released.
+                    A control shown where it would be refused is a lie about what the product does;
+                    hiding one is usability and never the boundary, which stays server-side.
+
+                    Secondary and placed after the workflow actions, for the same reason the block
+                    control is: taking another sample is the exception, not the ordinary next step.
+
+                    **The wording says only what DHealth knows.** "Enregistrer un nouveau
+                    prélèvement" -- never "recollecte", never "nouveau prélèvement de remplacement",
+                    never anything implying the earlier sample was rejected. The system does not
+                    know why a second sample was taken: an order may legitimately require more than
+                    one, and the collection action carries no statement of cause. The operational
+                    reason, where there is one, lives in the block episode the technician recorded.
+                  */}
+                  {SPECIMEN_RECORDABLE_STATUSES.includes(panel.order.status) &&
+                  panel.order.collection_recorded_at ? (
+                    <div
+                      style={{
+                        marginTop: 'var(--space-4)',
+                        paddingTop: 'var(--space-3)',
+                        borderTop: '1px solid var(--color-neutral-200)',
+                      }}
+                    >
+                      {confirming === 'collect' ? (
+                        <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+                          <p role="alert" style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
+                            Enregistrer un nouveau prélèvement ? Les prélèvements déjà enregistrés
+                            sont conservés — celui-ci s'ajoute à l'historique.
+                          </p>
+                          <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                            <Button
+                              type="button"
+                              onClick={() => void runCollection()}
+                              disabled={mutationState.submitting}
+                            >
+                              {mutationState.submitting && mutationState.action === 'collect'
+                                ? 'Enregistrement…'
+                                : 'Confirmer le prélèvement'}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              onClick={() => setConfirming(null)}
+                              disabled={mutationState.submitting}
+                            >
+                              Annuler
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={() => {
+                            // A new intended collection, so a new key. Minted here rather than in
+                            // `runCollection` so that a repeated "Confirmer" after an uncertain
+                            // response reuses one key and cannot duplicate the specimen.
+                            collectionKeyRef.current = crypto.randomUUID()
+                            setConfirming('collect')
+                          }}
+                          disabled={mutationState.submitting}
+                        >
+                          Enregistrer un nouveau prélèvement
+                        </Button>
+                      )}
+                    </div>
+                  ) : null}
 
                   {/*
                     DHEALTH-LAB-BLOCKED-001 §26. Offered only in the two states the server accepts

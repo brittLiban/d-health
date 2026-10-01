@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
-from exchange_support import make_lab, make_provider
+from exchange_support import lab_staff, make_lab, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -1475,7 +1475,11 @@ def test_patient_order_response_never_leaks_a_real_lab_result_even_after_selecti
     workflow = LabWorkflowRepository(sessions, organizations)
     workflow.accept(order_id=order_id, lab_organization_id=lab.id)
     # DH-EX-011: start_processing now requires a recorded collection milestone.
-    workflow.record_collection(order_id=order_id, lab_organization_id=lab.id)
+    workflow.record_collection(
+        order_id=order_id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=lab_staff(organizations, lab.id),
+    )
     workflow.start_processing(order_id=order_id, lab_organization_id=lab.id)
 
     results = LabResultRepository(sessions)

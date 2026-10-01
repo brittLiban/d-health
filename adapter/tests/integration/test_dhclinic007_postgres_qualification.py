@@ -44,6 +44,7 @@ from decimal import Decimal
 from threading import Barrier, Lock, Thread
 
 import pytest
+from exchange_support import lab_staff
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -168,7 +169,11 @@ def _prepared_amendment_with_distinct_practitioners(
         expected_price_ids=frozenset({price_id}),
     )
     workflow.accept(order_id=order.id, lab_organization_id=lab.id)
-    workflow.record_collection(order_id=order.id, lab_organization_id=lab.id)
+    workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab.id,
+        recorded_by_identity_id=lab_staff(organizations, lab.id),
+    )
     workflow.start_processing(order_id=order.id, lab_organization_id=lab.id)
     order = orders.get(order.id)
     item_id = order.items[0].id

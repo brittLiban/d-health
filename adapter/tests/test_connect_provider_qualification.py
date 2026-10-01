@@ -36,7 +36,7 @@ from exchange_auth_support import (
     generate_keypair,
     make_token,
 )
-from exchange_support import make_lab, make_offering, make_provider
+from exchange_support import lab_staff, make_lab, make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -277,7 +277,11 @@ def _run_native_laboratory_to_release(world, lab_order_id: uuid.UUID) -> None:
         expected_price_ids=frozenset({world["price_id"]}),
     )
     workflow.accept(order_id=lab_order_id, lab_organization_id=lab_id)
-    workflow.record_collection(order_id=lab_order_id, lab_organization_id=lab_id)
+    workflow.record_collection(
+        order_id=lab_order_id,
+        lab_organization_id=lab_id,
+        recorded_by_identity_id=lab_staff(organizations, lab_id),
+    )
     workflow.start_processing(order_id=lab_order_id, lab_organization_id=lab_id)
 
     with sessions() as session:

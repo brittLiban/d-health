@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from exchange_support import (
+    lab_staff,
     make_patient_reference,
     make_practitioner_reference,
     make_priced_offering,
@@ -161,7 +162,11 @@ def order_in_progress(
         lab_order_id=order.id, lab_organization_id=lab_id, expected_price_ids=frozenset({price_id})
     )
     repos.workflow.accept(order_id=order.id, lab_organization_id=lab_id)
-    repos.workflow.record_collection(order_id=order.id, lab_organization_id=lab_id)
+    repos.workflow.record_collection(
+        order_id=order.id,
+        lab_organization_id=lab_id,
+        recorded_by_identity_id=lab_staff(repos.organizations, lab_id),
+    )
     repos.workflow.start_processing(order_id=order.id, lab_organization_id=lab_id)
 
     refreshed = repos.orders.get(order.id)

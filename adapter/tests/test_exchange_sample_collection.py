@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 from exchange_auth_support import PLATFORM_ADMIN_ROLE, build_validator, generate_keypair, make_token
-from exchange_support import make_lab, make_offering, make_provider
+from exchange_support import lab_staff, make_lab, make_offering, make_provider
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
@@ -641,7 +641,11 @@ def test_list_for_lab_collection_join_adds_no_marginal_per_order_query(
         organizations, catalog, directory, patients, sessions, lab=lab_small, count=2
     )
     workflow.accept(order_id=small_orders[0], lab_organization_id=lab_small.id)
-    workflow.record_collection(order_id=small_orders[0], lab_organization_id=lab_small.id)
+    workflow.record_collection(
+        order_id=small_orders[0],
+        lab_organization_id=lab_small.id,
+        recorded_by_identity_id=lab_staff(organizations, lab_small.id),
+    )
 
     lab_large = make_lab(organizations, name="N1Large")
     directory.upsert(
@@ -657,7 +661,11 @@ def test_list_for_lab_collection_join_adds_no_marginal_per_order_query(
         organizations, catalog, directory, patients, sessions, lab=lab_large, count=8
     )
     workflow.accept(order_id=large_orders[0], lab_organization_id=lab_large.id)
-    workflow.record_collection(order_id=large_orders[0], lab_organization_id=lab_large.id)
+    workflow.record_collection(
+        order_id=large_orders[0],
+        lab_organization_id=lab_large.id,
+        recorded_by_identity_id=lab_staff(organizations, lab_large.id),
+    )
 
     small_count, _ = _count_list_for_lab_queries(sessions, workflow, lab_small.id)
     large_count, _ = _count_list_for_lab_queries(sessions, workflow, lab_large.id)
@@ -997,11 +1005,22 @@ def test_cross_lab_lab_tech_gets_anti_enumeration_404(
 
 
 def test_extra_body_fields_rejected(
-    client: TestClient, keypair, organizations, catalog, directory, patients
+    client: TestClient, keypair, organizations, catalog, directory, patients, sessions
 ) -> None:
-    """No request body is required for this ticket -- confirm the route accepts none (FastAPI
-    ignores an unmodeled body by default since there is no Pydantic body parameter at all, so
-    this simply proves the endpoint works identically with or without a stray body)."""
+    """Invented specimen attributes are **refused**, and no body is still valid.
+
+    **[Strengthened 2026-10-01, DHEALTH-SPECIMEN-001.** DH-EX-011 wrote this test to prove only that
+    a stray body was harmlessly *ignored* -- the route had no Pydantic body parameter at all, so
+    FastAPI silently dropped whatever arrived, and the original assertion was `201` plus "the fields
+    did not come back". That was true but weak: a future author could have added a body model that
+    quietly *accepted* `specimen_type` and the test would still have passed.
+
+    This ticket gives the route a real `LabCollectionRequest` with `extra="forbid"`, so an invented
+    clinical attribute is now actively rejected with a 422 naming the offending field. That is the
+    structural guard `AGENTS.md`'s "never invent clinical content" rule wants at the HTTP boundary:
+    `specimen_type`, `collected_at`, tube, volume and container are not "not yet supported", they are
+    refused, and the refusal is what this test now pins. The bodyless request DH-EX-011 shipped stays
+    valid verbatim, which is the second half of the assertion.]**"""
     private_key, _ = keypair
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="NoBody"
@@ -1023,10 +1042,32 @@ def test_extra_body_fields_rejected(
         headers=_auth(lab_tech_token),
     )
 
-    response = client.post(
+    # An invented specimen taxonomy and a caller-supplied collection instant: both refused, both
+    # named. `collected_at` in particular must never be accepted -- DHealth records when it
+    # *observed* a collection, never a backdated clinical timestamp a client asserts.
+    refused = client.post(
         f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
         headers=_auth(lab_tech_token),
         json={"specimen_type": "blood", "collected_at": "2020-01-01T00:00:00Z"},
+    )
+    assert refused.status_code == 422, refused.text
+    offending = {tuple(error["loc"]) for error in refused.json()["detail"]}
+    assert ("body", "specimen_type") in offending
+    assert ("body", "collected_at") in offending
+
+    # Nothing was recorded by the refused request -- a 422 is not a partial write.
+    with sessions() as session:
+        assert (
+            session.scalars(
+                select(LabSampleCollection).where(LabSampleCollection.lab_order_id == order_id)
+            ).all()
+            == []
+        )
+
+    # DH-EX-011's bodyless request stays valid, unchanged.
+    response = client.post(
+        f"/exchange/v1/organizations/{lab.id}/lab-orders/{order_id}/record-collection",
+        headers=_auth(lab_tech_token),
     )
     assert response.status_code == 201, response.text
     assert "specimen_type" not in response.json()

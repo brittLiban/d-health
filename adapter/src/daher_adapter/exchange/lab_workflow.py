@@ -48,6 +48,28 @@ identical duplicate lives in ``exchange/orders.py``'s ``transition()``, so that 
 state-machine mutation path cannot bypass the same invariant this module enforces on its own
 dedicated ``start_processing`` action -- see that function's own comment for why both must agree.
 
+**DHEALTH-SPECIMEN-001 addition, and the one invariant worth reading before anything else in this
+module.** ``record_collection`` now writes **two** rows, in one transaction, and is the only code
+path in this repository that writes either:
+
+* ``LabSampleCollection`` -- unchanged. Still the order-level *workflow milestone*, still at
+  most one per order, still the thing ``ACCEPTED -> IN_PROGRESS`` is gated on. Its
+  ``recorded_at`` still means what DH-EX-011 said it means.
+* ``LabSpecimen`` -- new. The *physical sample instance*: any number per order, never rewritten,
+  carrying ``recorded_at``, ``recorded_by_identity_id`` and the client's own retry key.
+
+**The invariant: from this ticket onward a milestone is never created without a first specimen**,
+both from one ``utc_now()`` evaluated once, so for any order whose milestone was created here the
+milestone's instant and the earliest specimen's instant are the *same value*, not two values that
+agree. There is deliberately no second entry point that could create one half alone -- that is what
+makes this enforceable rather than merely documented, and it is why ``connect/apply.py``'s
+source-observed collection event goes through this same method rather than a sibling of it.
+
+The one permitted asymmetry is historical and is never repaired by invention: a pre-0039 order may
+carry a milestone with no specimen, meaning *"the collection step was recorded; how many physical
+samples there were, and who collected them, is not known to DHealth"*. ``record_collection`` returns
+``specimen=None`` for it rather than manufacturing one.
+
 **DHEALTH-LAB-BLOCKED-001 addition.** ``block``/``resolve_block`` implement
 `docs/NATIVE-OPERATING-PRODUCT.md` §16's P0-4: an order this laboratory took and cannot currently
 continue gets an honest status instead of sitting in a queue state that claims progress nobody is
@@ -91,12 +113,14 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from daher_adapter.exchange.models import (
     BLOCKABLE_ORDER_STATUSES,
+    SPECIMEN_RECORDABLE_ORDER_STATUSES,
     LabOrder,
     LabOrderBlock,
     LabOrderBlockReason,
     LabOrderStatus,
     LabSampleCollection,
     LabSelection,
+    LabSpecimen,
     OrganizationType,
 )
 from daher_adapter.exchange.organizations import OrganizationRepository
@@ -125,6 +149,21 @@ class ConflictingBlockRequest(RuntimeError):
     different request that happens to arrive second is a real conflict, and answering it with
     somebody else's block would tell the caller their reason was recorded when it was not. Maps to
     HTTP 409."""
+
+
+class BrokenCollectionInvariant(RuntimeError):
+    """DHEALTH-SPECIMEN-001: a ``LabSpecimen`` was found whose order has no
+    ``LabSampleCollection`` milestone.
+
+    Unreachable by construction -- ``record_collection`` creates both rows in one transaction and no
+    other code path writes either -- so this is a corruption report, not an expected error. It is
+    deliberately **not** mapped to a client-facing status code anywhere: there is no request
+    a caller could reformulate to make it go away, and swallowing it would mean serving a
+    collection history the database can no longer substantiate.
+
+    Distinct from ``InvalidLabWorkflowTransition`` for exactly that reason: that one means
+    "you asked for something the workflow does not allow", which is a 409; this one means
+    "the stored data contradicts itself"."""
 
 
 class BlockEpisodeNotFound(RuntimeError):
@@ -200,6 +239,56 @@ class LabSampleCollectionRecord:
     lab_order_id: uuid.UUID
     lab_organization_id: uuid.UUID
     recorded_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class LabSpecimenRecord:
+    """DHEALTH-SPECIMEN-001: one physical sample instance, exactly as stored.
+
+    Carries no order metadata beyond the relationship -- no patient, no test, no status, no
+    provider. A caller that needs those reads the order; copying them here would have created a
+    second, drift-prone copy of facts the ``LabOrder`` already owns, and would have turned a
+    specimen read into a patient read.
+
+    ``idempotency_key`` is exposed deliberately: it is the client's *own* opaque retry key, never
+    clinical content, and a client recovering from a lost response reads the history back and looks
+    for its own key rather than blindly re-POSTing. That is the same read-don't-retry recovery the
+    lab UI already performs for the collection milestone."""
+
+    id: uuid.UUID
+    lab_order_id: uuid.UUID
+    lab_organization_id: uuid.UUID
+    recorded_at: datetime
+    recorded_by_identity_id: uuid.UUID
+    idempotency_key: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LabCollectionOutcome:
+    """DHEALTH-SPECIMEN-001: what one ``record_collection`` call did, stated rather than inferred.
+
+    ``milestone_created`` and ``specimen_created`` are separate booleans because the three outcomes
+    are genuinely distinct and a caller -- the audit writer in particular -- must not have to guess
+    which one happened:
+
+    * **first collection** -- both ``True``. Two rows were created, and two audit events belong to
+      it: the milestone was advanced, and a physical specimen was recorded.
+    * **an additional specimen** -- ``specimen_created`` only. The milestone is untouched; claiming
+      it was advanced again would be false.
+    * **a replay** -- both ``False``. Nothing was written, so nothing is audited.
+
+    The alternative was for the caller to compare ``specimen.recorded_at`` against
+    ``milestone.recorded_at`` and treat equality as "the milestone was created just now". That is
+    inference from a timestamp -- the precise thing this package refuses to do everywhere else --
+    and it would have silently mis-audited the day two instants coincided.
+
+    ``specimen`` is ``None`` only for a keyless replay against a pre-0039 milestone recorded before
+    specimens were modelled. It never means "no specimen was recorded"."""
+
+    milestone: LabSampleCollectionRecord
+    specimen: LabSpecimenRecord | None
+    milestone_created: bool
+    specimen_created: bool
 
 
 class LabWorkflowRepository:
@@ -455,35 +544,101 @@ class LabWorkflowRepository:
         )
 
     def record_collection(
-        self, *, order_id: uuid.UUID, lab_organization_id: uuid.UUID, session: Session | None = None
-    ) -> tuple[LabSampleCollectionRecord, bool]:
-        """DH-EX-011: records the explicit, order-level fact that this lab's authorized
-        ``LAB_TECH`` advanced the sample/specimen collection workflow milestone -- see
-        ``LabSampleCollection``'s own docstring in ``models.py`` for the full contract. Returns
-        ``(record, created)``: ``created=False`` means an existing milestone was returned as a
-        safe idempotent replay -- unconditionally, even if the order has since progressed past
-        ``ACCEPTED`` to ``IN_PROGRESS``/``COMPLETED``/``CANCELLED``, because the milestone
-        genuinely already happened and this call never rewrites or duplicates it.
+        self,
+        *,
+        order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        recorded_by_identity_id: uuid.UUID,
+        idempotency_key: str | None = None,
+        session: Session | None = None,
+    ) -> LabCollectionOutcome:
+        """The **one** authoritative domain operation for recording specimen collection.
 
-        A *new* milestone may only be created while ``order.status == ACCEPTED``. Any other
-        status with no existing milestone (including ``SELECTED`` -- collection attempted before
-        acceptance -- or a legacy ``IN_PROGRESS``/``COMPLETED`` order that predates this ticket and
-        never had one recorded) raises ``InvalidLabWorkflowTransition`` rather than fabricating
-        retroactive physical-event history: DHealth did not observe collection for that order, and
-        this call must never silently manufacture that it did."""
+        DH-EX-011 recorded a single order-level milestone here and nothing about the physical
+        sample. DHEALTH-SPECIMEN-001 keeps that milestone exactly as it was and adds the physical
+        record beside it, written **in the same transaction by this one method** -- there is no
+        separate "create a specimen" entry point a caller could use to produce one half without the
+        other, which is what makes the source-of-truth invariant below enforceable rather than
+        merely documented.
+
+        Returns a ``LabCollectionOutcome`` -- see that dataclass for why it reports
+        milestone creation and specimen creation as two separate booleans rather than one.
+
+        ── The source-of-truth invariant ──
+
+        * ``LabSampleCollection`` remains the **order-level workflow milestone** and remains the
+          thing ``ACCEPTED -> IN_PROGRESS`` is gated on. Unchanged, including the gate.
+        * ``LabSpecimen`` is the **physical-sample authority**: how many samples, when each, by
+          whom.
+        * From this ticket onward a milestone is **only ever created together with a first
+          specimen**, both from one ``utc_now()`` evaluated once, so for any order whose milestone
+          was created here ``milestone.recorded_at == the earliest specimen's recorded_at``
+          exactly. Not approximately -- one value written twice, because two separate ``utc_now()``
+          calls would differ by microseconds and the invariant would be false in the most
+          confusing possible way.
+        * For a **pre-DHEALTH-SPECIMEN-001** order the milestone may stand alone, and then
+          ``specimen`` is ``None``. That is the honest historical asymmetry, never repaired by
+          invention: see ``LabSpecimen``'s docstring and ``0039_lab_specimens``.
+
+        ── Two idempotency regimes, and why there are two ──
+
+        **Keyless** (``idempotency_key is None``) is DH-EX-011's original contract, preserved
+        byte-for-byte for its existing callers -- ``connect/apply.py``'s source-observed collection
+        event above all. If a milestone already exists this is a replay, unconditionally and
+        regardless of the order's current status, and **no second specimen is ever created**. A
+        keyless caller therefore cannot record a recollection at all. That is a real, recorded gap
+        (a source LIS emitting two genuine collection events gets a replay on the second) rather
+        than a hidden one; closing it needs a Connect contract change this ticket does not make.
+
+        **Keyed** carries the client's own opaque retry key, exactly as ``LabOrder.idempotency_key``
+        does for order submission. A retry with the same key returns the same specimen and creates
+        nothing; a *different* key is a *different* physical collection and creates a new specimen,
+        preserving every earlier one. This is the distinction the ticket turns on, and it is why
+        ``lab_order_id`` is not unique: enforcing retry safety by allowing only one specimen per
+        order would make retries easy by making the domain false.
+
+        ── Which statuses may create what ──
+
+        * A **first** specimen (and with it the milestone) only while ``ACCEPTED``. Unchanged from
+          DH-EX-011, deliberately: a legacy ``IN_PROGRESS``/``COMPLETED`` order that never had a
+          milestone still cannot retroactively acquire one, because DHealth did not observe
+          collection for it and must never manufacture that it did.
+        * An **additional** specimen, for an order whose milestone already exists, while the order
+          is in ``SPECIMEN_RECORDABLE_ORDER_STATUSES`` (``ACCEPTED``/``IN_PROGRESS``) -- see that
+          frozenset's own comment for why ``IN_PROGRESS`` has to be there and why this is not a
+          widening of anything.
+
+        Neither path ever updates an existing row. ``recorded_at``, ``recorded_by_identity_id`` and
+        ``lab_order_id`` are write-once; a mistaken record is history, not a row to be edited."""
         if session is not None:
             return self._record_collection_in_session(
-                session, order_id=order_id, lab_organization_id=lab_organization_id
+                session,
+                order_id=order_id,
+                lab_organization_id=lab_organization_id,
+                recorded_by_identity_id=recorded_by_identity_id,
+                idempotency_key=idempotency_key,
             )
         with self._sessions.begin() as owned_session:
             return self._record_collection_in_session(
-                owned_session, order_id=order_id, lab_organization_id=lab_organization_id
+                owned_session,
+                order_id=order_id,
+                lab_organization_id=lab_organization_id,
+                recorded_by_identity_id=recorded_by_identity_id,
+                idempotency_key=idempotency_key,
             )
 
     def _record_collection_in_session(
-        self, session: Session, *, order_id: uuid.UUID, lab_organization_id: uuid.UUID
-    ) -> tuple[LabSampleCollectionRecord, bool]:
+        self,
+        session: Session,
+        *,
+        order_id: uuid.UUID,
+        lab_organization_id: uuid.UUID,
+        recorded_by_identity_id: uuid.UUID,
+        idempotency_key: str | None,
+    ) -> LabCollectionOutcome:
         self._organizations.require_type(lab_organization_id, OrganizationType.LAB)
+
+        idempotency_key = _normalize_idempotency_key(idempotency_key)
 
         order = session.scalar(select(LabOrder).where(LabOrder.id == order_id).with_for_update())
         if order is None:
@@ -495,26 +650,145 @@ class LabWorkflowRepository:
         if selection is None or selection.lab_organization_id != lab_organization_id:
             raise LabOrderNotAssigned(str(order_id))
 
-        existing = _get_collection(session, order_id)
-        if existing is not None:
-            # Idempotent replay -- unconditional regardless of the order's current status: the
-            # milestone genuinely already happened, so this never re-validates status, never
-            # rewrites `recorded_at`, and never creates a second row.
-            return _to_collection_record(existing), False
+        # Replay is decided before any status check, deliberately -- `block`'s own ordering, and for
+        # the same reason: a retry of the request that already won must succeed regardless of what
+        # the order's status has become since.
+        if idempotency_key is not None:
+            replayed = session.scalar(
+                select(LabSpecimen).where(
+                    LabSpecimen.lab_order_id == order_id,
+                    LabSpecimen.idempotency_key == idempotency_key,
+                )
+            )
+            if replayed is not None:
+                milestone = _get_collection(session, order_id)
+                if milestone is None:
+                    # Unreachable by construction: a specimen and its order's milestone are created
+                    # together by this method, and nothing else in the repository creates either.
+                    # Raised rather than worked around with a silent fallback, and rather than
+                    # `assert` (which `-O` strips and which ruff's S101 forbids in `src/`): a `None`
+                    # here means the source-of-truth invariant is already broken, and a caller that
+                    # quietly carried on would hide a corrupted collection history.
+                    raise BrokenCollectionInvariant(
+                        f"LabSpecimen {replayed.id} exists for LabOrder {order_id} with no "
+                        f"collection milestone -- the DHEALTH-SPECIMEN-001 source-of-truth "
+                        f"invariant is broken"
+                    )
+                return LabCollectionOutcome(
+                    milestone=_to_collection_record(milestone),
+                    specimen=_to_specimen_record(replayed),
+                    milestone_created=False,
+                    specimen_created=False,
+                )
 
-        if LabOrderStatus(order.status) != LabOrderStatus.ACCEPTED:
-            raise InvalidLabWorkflowTransition(
-                f"cannot record a sample/specimen collection milestone for LabOrder {order_id} "
-                f"in status {order.status!r} -- a new milestone may only be recorded while "
-                f"ACCEPTED, and none was ever recorded for this order"
+        existing_milestone = _get_collection(session, order_id)
+
+        if existing_milestone is None:
+            # First collection for this order. DH-EX-011's rule, unchanged.
+            if LabOrderStatus(order.status) != LabOrderStatus.ACCEPTED:
+                raise InvalidLabWorkflowTransition(
+                    f"cannot record a sample/specimen collection milestone for LabOrder "
+                    f"{order_id} in status {order.status!r} -- a new milestone may only be "
+                    f"recorded while ACCEPTED, and none was ever recorded for this order"
+                )
+            # One instant, written to both rows. Two `utc_now()` calls would differ by microseconds
+            # and quietly falsify the equality the invariant promises.
+            now = utc_now()
+            milestone = LabSampleCollection(
+                lab_order_id=order_id, lab_organization_id=lab_organization_id, recorded_at=now
+            )
+            specimen = LabSpecimen(
+                lab_order_id=order_id,
+                lab_organization_id=lab_organization_id,
+                recorded_at=now,
+                recorded_by_identity_id=recorded_by_identity_id,
+                idempotency_key=idempotency_key,
+            )
+            session.add(milestone)
+            session.add(specimen)
+            session.flush()
+            return LabCollectionOutcome(
+                milestone=_to_collection_record(milestone),
+                specimen=_to_specimen_record(specimen),
+                milestone_created=True,
+                specimen_created=True,
             )
 
-        collection = LabSampleCollection(
-            lab_order_id=order_id, lab_organization_id=lab_organization_id, recorded_at=utc_now()
+        if idempotency_key is None:
+            # DH-EX-011's keyless replay, preserved exactly: the milestone genuinely already
+            # happened, so this never re-validates status, never rewrites `recorded_at`, and never
+            # creates a second row of either kind. `specimen` is the order's earliest, or `None`
+            # for a pre-DHEALTH-SPECIMEN-001 milestone that never had one.
+            earliest = _earliest_specimen(session, order_id)
+            return LabCollectionOutcome(
+                milestone=_to_collection_record(existing_milestone),
+                specimen=_to_specimen_record(earliest) if earliest is not None else None,
+                milestone_created=False,
+                specimen_created=False,
+            )
+
+        # A new, genuinely distinct physical collection against an order whose milestone already
+        # exists. The milestone is NOT touched: it records when the collection step began for this
+        # order, which a later sample does not change.
+        if order.status not in SPECIMEN_RECORDABLE_ORDER_STATUSES:
+            raise InvalidLabWorkflowTransition(
+                f"cannot record a physical specimen for LabOrder {order_id} in status "
+                f"{order.status!r} -- a specimen may only be recorded for work this laboratory "
+                f"has taken and not yet released "
+                f"({', '.join(sorted(SPECIMEN_RECORDABLE_ORDER_STATUSES))})"
+            )
+
+        specimen = LabSpecimen(
+            lab_order_id=order_id,
+            lab_organization_id=lab_organization_id,
+            recorded_at=utc_now(),
+            recorded_by_identity_id=recorded_by_identity_id,
+            idempotency_key=idempotency_key,
         )
-        session.add(collection)
+        session.add(specimen)
         session.flush()
-        return _to_collection_record(collection), True
+        return LabCollectionOutcome(
+            milestone=_to_collection_record(existing_milestone),
+            specimen=_to_specimen_record(specimen),
+            milestone_created=False,
+            specimen_created=True,
+        )
+
+    def list_specimens_for_order(
+        self, order_id: uuid.UUID, lab_organization_id: uuid.UUID
+    ) -> list[LabSpecimenRecord] | None:
+        """DHEALTH-SPECIMEN-001: every physical specimen recorded for this order, **oldest
+        first**, none ever omitted.
+
+        Oldest-first, unlike ``list_blocks_for_order``'s newest-first: a block list answers *"what
+        is wrong right now"*, and a specimen list is a collection history whose reading order is the
+        order the samples were recorded in. ``id`` is the stable tie-break for two samples recorded
+        in the same instant.
+
+        Read-only and tenant-scoped, so no lock. Returns ``None`` -- never an empty list --
+        both when the order does not exist and when it exists but is not assigned to this
+        laboratory, matching ``get_for_lab``/``list_blocks_for_order`` exactly: an empty list means
+        *"your order, no specimens yet"* and must stay distinguishable from *"not your order"*, and
+        neither answer discloses that an order id belongs to somebody else.
+
+        Deliberately its own bounded read rather than a field on the queue listing: the number of
+        specimens per order is unbounded in principle, and the queue is a fixed-width view. Same
+        reasoning ``list_blocks_for_order`` already applied to block history."""
+        with self._sessions() as session:
+            order = session.get(LabOrder, order_id)
+            if order is None:
+                return None
+            selection = session.scalar(
+                select(LabSelection).where(LabSelection.lab_order_id == order_id)
+            )
+            if selection is None or selection.lab_organization_id != lab_organization_id:
+                return None
+            rows = session.scalars(
+                select(LabSpecimen)
+                .where(LabSpecimen.lab_order_id == order_id)
+                .order_by(LabSpecimen.recorded_at.asc(), LabSpecimen.id.asc())
+            ).all()
+            return [_to_specimen_record(row) for row in rows]
 
     # -- DHEALTH-LAB-BLOCKED-001: the cannot-proceed workflow -------------------------------
 
@@ -886,6 +1160,43 @@ def _normalize_note(note: str | None) -> str | None:
         return None
     stripped = note.strip()
     return stripped or None
+
+
+def _normalize_idempotency_key(key: str | None) -> str | None:
+    """``None``, ``""`` and ``"   "`` all mean "no key supplied" and select the keyless regime.
+
+    Its own function rather than a second caller of ``_normalize_note``: the transformation happens
+    to be identical, but a client request key is not a note, and a future change to how notes are
+    normalized must not silently change which collection requests count as retries of each other.
+    Whitespace is stripped so a key that round-trips through a form field cannot become a second,
+    distinct key for the same logical request -- which would create a duplicate specimen, the exact
+    failure idempotency exists to prevent."""
+    if key is None:
+        return None
+    stripped = key.strip()
+    return stripped or None
+
+
+def _earliest_specimen(session: Session, order_id: uuid.UUID) -> LabSpecimen | None:
+    """The order's first recorded physical specimen, or ``None`` for a pre-DHEALTH-SPECIMEN-001
+    milestone that never had one. ``id`` breaks a same-instant tie deterministically."""
+    return session.scalar(
+        select(LabSpecimen)
+        .where(LabSpecimen.lab_order_id == order_id)
+        .order_by(LabSpecimen.recorded_at.asc(), LabSpecimen.id.asc())
+        .limit(1)
+    )
+
+
+def _to_specimen_record(specimen: LabSpecimen) -> LabSpecimenRecord:
+    return LabSpecimenRecord(
+        id=specimen.id,
+        lab_order_id=specimen.lab_order_id,
+        lab_organization_id=specimen.lab_organization_id,
+        recorded_at=specimen.recorded_at,
+        recorded_by_identity_id=specimen.recorded_by_identity_id,
+        idempotency_key=specimen.idempotency_key,
+    )
 
 
 def _get_active_block(session: Session, order_id: uuid.UUID) -> LabOrderBlock | None:
