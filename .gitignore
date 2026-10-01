@@ -94,3 +94,8 @@ native-front-desk-results.json
 # repository root by scripts/demo/qualify-lab-reception.sh. Evidence of a run, not part of the
 # source -- same treatment as its nine siblings above.
 native-reception-results.json
+
+# DHEALTH-SPECIMEN-001: the physical specimen qualification report, written at the repository root
+# by scripts/demo/qualify-specimen.sh. Evidence of a run, not part of the source -- same treatment
+# as its ten siblings above.
+native-specimen-results.json

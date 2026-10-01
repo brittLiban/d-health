@@ -1291,7 +1291,7 @@ export function LabOrdersPage() {
                         style={{
                           margin: 0,
                           fontSize: 'var(--font-size-sm)',
-                          color: 'var(--color-danger-700)',
+                          color: 'var(--color-danger, #b91c1c)',
                         }}
                       >
                         {specimenHistory.error}
