@@ -23143,3 +23143,284 @@ recorded as follow-up work.
 **Nothing was pushed, and GitHub Actions was not touched or examined.** All data synthetic; no facility
 database was contacted — the PostgreSQL qualification runs only against a disposable container that was
 torn down. Pilot-ready remains **not clinically live**.
+
+## DHEALTH-SPECIMEN-001 — a physical specimen becomes its own record, and an order may have more than one (2026-10-01)
+
+**ADR-070. Migration `0039_lab_specimens`. Alembic head `0038_visit_check_in` → `0039_lab_specimens`,
+exactly one head. No new capability, no new role, no new order state, no new reason vocabulary.**
+From `7f4e6f5`.
+
+### The starting state, which is most of the ticket's shape
+
+**`LabSampleCollection` already existed** (DH-EX-011, migration `0014`): one row per order, columns
+`id`, `lab_order_id` (**`unique=True`**), `lab_organization_id`, `recorded_at`. **No actor at all.**
+It is the thing `ACCEPTED → IN_PROGRESS` is gated on, enforced twice — in
+`lab_workflow.start_processing` and again in `orders.py::transition`, deliberately duplicated so the
+generic state machine cannot bypass it. Its callers at `7f4e6f5` were the HTTP endpoint,
+`connect/apply.py::_collect`, `connect/harness.py`, `qualify_meta_whatsapp.py`, five PostgreSQL
+integration suites, and the UI's `collection_recorded_at`.
+
+So the ticket was not "add a specimen table". It was: **the schema contains a false statement, and
+removing it touches a load-bearing gate, a Connect path, and 19 test files.**
+
+The false statement is the unique constraint. One row per order is correct for a *workflow milestone*
+and false about physical reality — a CBC and a urine culture cannot share a tube, and an unusable
+sample is replaced by a second sample rather than by an edit to the first. With it in place, every
+future recollection had two available outcomes: overwrite the earlier row, or go unrecorded.
+
+### Decisions taken, and why each is the smaller option
+
+| Decision | Reasoning |
+|---|---|
+| **`LabSpecimen` / `exchange_lab_specimens`** | Repository vocabulary is `Lab*` (`LabOrder`, `LabSelection`, `LabOrderBlock`, `LabSampleCollection`). `Specimen` alone would collide with nothing but would also match nothing |
+| **`lab_order_id` is NOT unique** | The whole point. The only uniqueness is `(lab_order_id, idempotency_key)`, which is retry safety and not cardinality. NC-SP-4 proves the absence is load-bearing |
+| **Keep `LabSampleCollection`** | It is the `IN_PROGRESS` gate and it has real historical rows. Replacing it would have meant either converting those rows to specimens — asserting a cardinality of one and a collector, neither knowable — or breaking the gate. Pattern B: the milestone stays the workflow fact, the specimen becomes the physical authority |
+| **One `utc_now()` written to both rows** | Two clock reads would differ by microseconds and falsify the invariant in the most confusing possible shape. NC-SP-6b proves it |
+| **`record_collection` is the only writer of either row** | What makes the invariant enforceable rather than documented. There is deliberately no sibling "create a specimen" entry point, and Connect's collection event goes through this same method. Had it not, milestone-only rows would have kept entering new data forever while every keyed test passed |
+| **`recorded_at`, never `collected_at`** | ADR-018's DH-011J2 rule. A `collected_at` column would have reversed that decision under a new ticket's cover |
+| **`recorded_by_identity_id` is `NOT NULL`** | Every caller has a real `exchange_identities` row — a human via `AuthenticatedPrincipal`, a connector via `ConnectorServicePrincipal.identity_id`, which exists for exactly this and is typed non-optional through the whole inbound chain. Verified rather than assumed before committing to the constraint |
+| **No specimen status enum** | `BLOCKED` + `LabOrderBlock` already expresses "cannot be worked", operationally rather than clinically. A second state machine would need permanent consistency with the first and its vocabulary would have been invented here |
+| **No specimen type, container, volume, source, accession, grade** | `TestCatalogEntry` carries no specimen-type field, so the type cannot even be *derived*. The endpoint now **refuses** `specimen_type`/`collected_at` with a 422 rather than ignoring them |
+| **No `recollection_of_specimen_id`** | The collection action carries no statement of cause, an order may legitimately need more than one sample, and inferring the link from two timestamps is fabricated provenance |
+| **No new capability** | `lab.queue.work` already governs this. A `lab.specimen.collect` would be ADR-067 §3A's speculative seam. A test asserts no `Capability` member contains "specimen" |
+| **Additional specimens from `{ACCEPTED, IN_PROGRESS}`** | The already-governed "work this laboratory took and has not released". `IN_PROGRESS` is required: `resolve_block` restores `blocked_from_status`, there is no path back to `ACCEPTED`, and §16's own worked example blocks *from* `IN_PROGRESS`. The **first** milestone stays `ACCEPTED`-only, so no legacy order can retroactively acquire one |
+| **Specimen history is its own bounded read** | Specimen count per order is unbounded; the queue is fixed-width. `list_blocks_for_order` made the same choice |
+| **Audit reuses `resource_type="lab_order"`** | `lab_order_blocked` has its own UUID and its own by-id endpoint and still deliberately did not get a per-child resource type. The specimen row is the authoritative provenance record |
+| **No backfill** | A pre-0039 milestone with no specimen means "the collection step was recorded; how many samples and who collected them is not known". `0038` settled the identical question the identical way for `checked_in_by` |
+
+### The exact schema
+
+```
+exchange_lab_specimens
+  id                      uuid       PK
+  lab_order_id            uuid       NOT NULL  FK → exchange_lab_orders(id)     ON DELETE RESTRICT
+  lab_organization_id     uuid       NOT NULL  FK → exchange_organizations(id)  ON DELETE RESTRICT
+  recorded_at             timestamptz NOT NULL
+  recorded_by_identity_id uuid       NOT NULL  FK → exchange_identities(id)     ON DELETE RESTRICT
+  idempotency_key         varchar(128) NULL
+
+  UNIQUE (lab_order_id, idempotency_key)   -- uq_exchange_lab_specimens_order_idempotency_key
+```
+
+No index on `lab_order_id` alone: the unique constraint is a btree with `lab_order_id` leading, so it
+already serves both the per-order history read and the per-key replay lookup. A second index would be
+dead weight on every insert. Verified against the real `\d` output, not inferred from the model.
+
+### The source-of-truth invariant, stated once
+
+* `LabSampleCollection` — order-level **workflow milestone**, at most one per order, still the
+  `ACCEPTED → IN_PROGRESS` gate. Unchanged.
+* `LabSpecimen` — **physical sample instance**, any number per order, never rewritten.
+* For any order whose milestone was created after `0039`: `milestone.recorded_at` **equals** the
+  earliest specimen's `recorded_at` — one value written twice, not two values that agree.
+* For a pre-`0039` order the milestone may stand alone and `record_collection` returns
+  `specimen=None`. That is "unknown", never "collection did not happen".
+
+### Retry versus a second sample, which are different facts
+
+A retry with the **same** `idempotency_key` → one specimen, HTTP 200, no second audit row. A
+**different** key → a new specimen, HTTP 201, every earlier one preserved. Idempotency is deliberately
+*not* enforced by "one specimen per order": that would have made retries easy by making the domain
+false.
+
+**The keyless path is preserved byte-for-byte and its gap is recorded.** A bodyless POST — DH-EX-011's
+original request, and what `connect/apply.py` still sends — can record a first collection and can never
+record a second. So **a recollection reported by a partner LIS through Connect is not representable
+today**: the second event is a replay. Closing it needs a Connect envelope carrying a per-event
+identity, which this ticket does not build.
+
+### 🛑 Recorded finding — D-3 is SPLIT, and only one half is answered · **Human Decision Required: Yes** · raised 2026-10-01
+
+D-3's recorded decision kind is **"Product, needs a laboratory participant."** No laboratory
+participant has been consulted. What happened instead is that the operator directed this ticket, which
+is a legitimate decision about *architecture* and is **not** a substitute for that conversation.
+
+**Resolved (architectural):** the entity exists; its cardinality is truthful; collection provenance
+(instant + authenticated actor) is recorded; a prior specimen is preserved when another is collected.
+
+**Still open, and needing a laboratory participant:**
+
+1. Which specimen **types** does this laboratory work with, and where is their governed source?
+   (`TestCatalogEntry` has no such field, so the type cannot be derived — this is a real product gap.)
+2. Do staff need a **human-facing accession number** distinct from the internal id?
+3. What must a physical **label** carry?
+4. When is a specimen invalid **as a specimen**, rather than the order becoming `BLOCKED`?
+5. May a mistaken collection record be **voided or corrected**, and with what audit semantics?
+6. Is an explicit **recollection link** needed, and what workflow input could truthfully supply it?
+
+**Nobody may read ADR-070 as "specimens are done."**
+
+### What was built
+
+Backend: `LabSpecimen`, `SPECIMEN_RECORDABLE_ORDER_STATUSES`, `LabCollectionOutcome`,
+`LabSpecimenRecord`, `BrokenCollectionInvariant`; `record_collection` rewritten;
+`list_specimens_for_order`; `LabCollectionRequest`/`LabSpecimenResponse`; `GET
+…/lab-orders/{id}/specimens`; the `lab_specimen_recorded` audit event; migration `0039`;
+`exchange_lab_specimens` in `demo_seed._WORKFLOW_TABLES`.
+
+Frontend: `LabSpecimen` type, `listLabOrderSpecimens`, `recordLabOrderCollection` carrying an
+idempotency key, the `Prélèvements` history panel on `Ordres`, and an
+`Enregistrer un nouveau prélèvement` action for an order that already has a milestone.
+
+### Two defects this ticket introduced, both found before any claim was made
+
+**1. The retry after an unconfirmed collection minted a *new* idempotency key.** Both confirmation
+handlers did `collectionKeyRef.current = crypto.randomUUID()` unconditionally, while the recovery
+comment two hundred lines above promised the opposite — *"an explicit retry stays available and will
+reuse the same key, so it cannot create a duplicate if the first attempt did in fact land."*
+
+The sequence that breaks it: the POST lands server-side, the response is lost, recovery reads the
+specimen list and correctly finds nothing *at that instant*, the UI offers the retry, the user clicks,
+a fresh key is minted, and the first write commits late. **Two specimens for one physical collection**
+— and the server is behaving correctly throughout, because it was handed two genuinely different keys.
+No backend test could have caught it. `??=` fixes it; `handleOpenOrder` also clears the ref so an
+unconfirmed key cannot follow the user to another order; `SP-UI-1` and `SP-UI-2` pin both halves.
+Found by review before any browser run.
+
+**2. An undefined CSS custom property, caught by a pre-existing guard the lab tests do not exercise.**
+The specimen-history error line used `var(--color-danger-700)`. That token does not exist — `index.css`
+defines `--color-danger` and `--color-danger-bg`, and every other danger colour in `LabOrdersPage.tsx`
+is written `var(--color-danger, #b91c1c)`. The message would have rendered with no colour at all.
+
+`designTokens.test.ts`'s *"defines every custom property referenced anywhere in the application"*
+caught it: it scans the whole source tree for `var(--x)` and compares against what `index.css` actually
+declares. **The two lab test files it would have had to be caught in both passed** — 124 green — which
+is precisely why the ticket's instruction to run the *whole* UI suite rather than the touched files
+exists, and why the batch runner below reconciles its file count rather than trusting one summary line.
+
+### Four things found while running this, none of them a defect in this ticket's code
+
+**1. A concurrency test that was green for the wrong reason, found by NC-SP-11.** The twelve-thread
+barrier test for concurrent identical collections **stayed green with `.with_for_update()` deleted**.
+The GIL plus per-thread session setup staggers the threads enough that each commits before the next
+reads, so the race it is named after did not reliably happen. `PG-SPEC-1a` now creates the contention
+deterministically — two transactions the test owns, the first holding the row lock on an open
+transaction while the second attempts the same logical collection — and reddens on the mutation with
+`IntegrityError`, which at the HTTP boundary is a 500 for an ordinary double click. The barrier test is
+kept, with a docstring that now says plainly what it does and does not prove. **This is what negative
+controls are for**, and it is the second time in three tickets that one found a test rather than a bug.
+
+**2. `exchange_security_audit_events` is not in `demo_seed._WORKFLOW_TABLES`, and should not be.**
+After a reset the demo database held **5 `lab_specimen_recorded` audit rows beside 2 specimens** —
+history from earlier qualification runs whose orders no longer exist. That is pre-existing and
+deliberate: an audit row records that something happened, and a workflow reset is not a reason to erase
+it (`0032`/`0035`'s downgrade reasoning, applied to reset). **Recorded, not fixed.** The consequence
+worth knowing is that an audit-row count is not a reliable measure of what a single qualification run
+did, and nothing in this ticket's evidence relies on one.
+
+**3. The adapter crash-looped once after `scripts/demo/up.sh`, on `RecoveryFenceUnavailable`.** A
+genuine startup race: `up -d --build` brought the new container up while the previous one still held the
+`pg_try_advisory_lock` session lock. `pg_locks` showed **no advisory lock held at all** by the time it
+was inspected, and a plain `docker restart` cleared it. **Not caused by this ticket** — the fence
+predates it and the failure mode is a container race, not a code path — but the next operator rebuilding
+this stack will hit it, so it is written down rather than left to be rediscovered.
+
+**4. `connect/harness.py`'s `LQ5` scenario still counts milestones, not specimens.** Its assertions
+("collection is never inferred", "the connector can report one") remain true and still pass, because the
+milestone is still created. But the harness **never asserts that a `LabSpecimen` was created by the
+connector event**, so a future regression in `apply.py::_collect` that stopped creating the physical
+record would not be caught there. **Recorded as a gap, deliberately not fixed:** widening the connector
+qualification harness is Connect's own surface and this ticket's §Out-of-scope forbids touching it. The
+backend suite does cover the path — `_collect` goes through `record_collection`, which has no code path
+that creates a milestone without a specimen.
+
+### §Evidence — what was actually executed, with measured counts
+
+| What | Result |
+|---|---|
+| New adapter tests (`test_dhealthspecimen001_specimens.py`) | **38 passed** |
+| New PostgreSQL qualification (`test_dhealthspecimen001_postgres_qualification.py`) | **15 passed** against a disposable PostgreSQL **16.15** |
+| Whole adapter suite | **2049 passed, 249 skipped**, exit 0, 962s. Reconciles exactly: 2011 + 38 new unit tests = 2049; 234 + 15 new PG tests (skipped without `DHSPEC_PG_*`) = 249 |
+| UI unit suite | **996 passed across 62 files, RECONCILED** — run in batches of 7 with the reported file count checked against the count handed in, because a whole-suite `vitest run` has silently dropped files here before |
+| Specimen browser qualification (`14-lab-specimen.spec.ts`) | **14 of 14 phases green**, 24.3s |
+| Sibling browser suites re-run on this stack | **41 phases green** — `11-lab-blocked` 13, `13-lab-reception` 10, `01-golden-journey` 12, `09-billing` 6, each from its own `reset.sh` baseline |
+| Browser phases total | **55** |
+| Negative controls | **15 distinct, 17 runs**, all reverted byte-for-byte |
+| `ruff check` / `ruff format --check` | clean, 259 files |
+| `tsc -b --noEmit` / `tsc -p e2e/tsconfig.json` | clean |
+| `oxlint` | **0 errors**; **+1 warning** vs the pre-ticket baseline (9 → 10 on `LabOrdersPage.tsx`), the `set-state-in-effect` rule the file's existing nine already fire on |
+| UI build + `check-no-secrets-in-bundle.mjs` | clean, no secrets across 28 built files |
+| Migration identifier lengths | longest is `uq_exchange_lab_specimens_order_idempotency_key` at **47** characters, against PostgreSQL's 63 — ADR-068's 64-character defect class avoided, and confirmed against the real `\d` output rather than inferred |
+
+### §Migration — exercised in both directions against a real database, not asserted
+
+Run against the same disposable PostgreSQL 16.15 container, with `alembic`, and observed:
+
+| Step | Observed |
+|---|---|
+| `alembic heads` | `0039_lab_specimens (head)` — **exactly one** |
+| `0038_visit_check_in → 0039` | applied |
+| schema (`\d exchange_lab_specimens`) | no unique on `lab_order_id` alone; `uq_..._order_idempotency_key` over `(lab_order_id, idempotency_key)`; three `RESTRICT` foreign keys; no redundant index |
+| upgrade onto **55 real legacy milestone rows** | **0 specimens created** — no backfill |
+| downgrade with 18 specimen rows | **REFUSED**, `DowngradeBlockedBySpecimenHistory`; still at head; all 18 rows intact |
+| downgrade with a `lab_specimen_recorded` audit row | **REFUSED**, `DowngradeBlockedBySpecimenAuditHistory` — guard 1, which runs **first** by design so it raises while the rows its history describes still exist |
+| downgrade with zero rows | **SUCCEEDED**, table dropped |
+| re-upgrade | back at `0039_lab_specimens` |
+
+### §NC — the negative controls, executed and reverted
+
+Each applied one exact literal mutation with an asserted occurrence count, `ast.parse`d before being
+written (a control that fails on a syntax error proves nothing), then reverted with
+`git checkout --` and `git status --porcelain` + `git diff --stat` checked clean before the next.
+All legitimate work was committed first, so no revert could destroy implementation — the mistake
+DHEALTH-LAB-RECEPTION-001 recorded.
+
+| # | Mutation | Target | Result |
+|---|---|---|---|
+| **NC-SP-1** | drop the `selection.lab_organization_id` tenant check in the collection path | `test_a_rival_laboratory_can_neither_read_nor_create_a_specimen` · `PG-SPEC-5` | **1 failed** (unit) · **1 failed** (PG) |
+| **NC-SP-2** | `recorded_by_identity_id=uuid.uuid4()` instead of `principal.identity_id` | `test_recording_a_collection_creates_a_durable_specimen` · `test_a_client_cannot_choose_the_collector` | **2 failed** — both on the `== identity` assertion. Note the mechanism: under SQLite with `PRAGMA foreign_keys` off the fabricated UUID *inserts*, so what reddens is the provenance assertion, not a constraint |
+| **NC-SP-3** | disable the keyed replay lookup | `test_retrying_the_same_collection_creates_no_second_specimen` | **1 failed** |
+| **NC-SP-4** | add `unique=True` to `LabSpecimen.lab_order_id` | `test_the_schema_does_not_assert_one_specimen_per_order` · `test_a_second_physical_collection_preserves_the_first` | **2 failed** |
+| **NC-SP-5** | update the earliest specimen instead of inserting a new one | `test_a_second_physical_collection_preserves_the_first` · `test_the_blocked_recollection_journey_preserves_every_specimen` | **2 failed** |
+| **NC-SP-6** | create the milestone without its specimen | `test_no_milestone_is_ever_created_without_a_specimen` | **1 failed** |
+| **NC-SP-6b** | read the clock twice instead of once | `test_milestone_and_first_specimen_share_one_instant` · `PG-SPEC-7` | **1 failed** (unit) · **1 failed** (PG) |
+| **NC-SP-7** | require `patient.directory.read` to collect | `test_collecting_needs_no_patient_directory_authority` | **1 failed** |
+| **NC-SP-8** | swap the queue-work gate for the release gate | `test_release_authority_alone_cannot_collect` · `test_recording_a_collection_creates_a_durable_specimen` | **2 failed** |
+| **NC-SP-9** | add `lab_organization_id` to `LabSpecimenResponse` | the exact-projection test · the response-shape test | **2 failed** |
+| **NC-SP-10** | allow a first collection from any lifecycle state | `test_a_first_specimen_is_refused_before_the_laboratory_accepts` · the legacy-`IN_PROGRESS` test | **2 failed** |
+| **NC-SP-11** | remove `.with_for_update()` | `PG-SPEC-1a` | **1 failed**, with `IntegrityError: duplicate key value violates "uq_exchange_lab_sample_collections_lab_order_id"` — i.e. a 500 for a double click. **This control first found a weak test rather than proving the lock; see §Four things found** |
+| **NC-SP-12** | gate the new control on `activeLab.roles.includes('LAB_TECH')` | `test_no_navigation_or_capability_module_authorizes_on_a_role_name` | **1 failed, 6 passed** |
+| **NC-SP-13** | `=` instead of `??=` on the collection key | `SP-UI-1` | **1 failed, 123 passed** |
+| **NC-SP-14** | make migration `0039` backfill one specimen per historical milestone | *measured observation* | clean upgrade onto 55 legacy milestones → **0 specimens**; mutated upgrade → **55 fabricated** |
+| **NC-SP-15** | remove the downgrade guard protecting specimen history | *measured observation* | with the guard: **refused**, head unchanged, 56 rows intact. Without it: **table dropped** |
+
+**NC-SP-14 and NC-SP-15 are measured observations, not reddened pytests, and that is stated rather
+than blurred.** The evidence they attack is a migration's behaviour; a pytest that re-ran migrations
+inside the PG suite would tear down the schema the other 15 tests depend on.
+
+**One control was redone.** NC-SP-11's first run left all 14 PG tests green — see §Four things found.
+The control was correct; the test was weak. `PG-SPEC-1a` was written, committed, and the control
+re-run against it.
+
+### §Environment and cleanup
+
+| Item | State |
+|---|---|
+| Disposable PostgreSQL | container `dhspec-qual-pg`, `postgres:16-alpine`, port 55439, **destroyed at the end of the ticket**. Never a facility database; nothing in this ticket contacted one |
+| Demo stack | left **running**, rebuilt (`up -d --build`) and post-qualification. **Not reset** — it holds `09-billing`'s state from the last sibling run. Run `scripts/demo/reset.sh` before the next browser suite |
+| `exchange_membership_capability_overrides` | **0 rows** verified after each reset. `13-lab-reception` removes its own grant and this ticket's suite never writes that table |
+| Pushed | **no**. Repository is ahead of `origin/master`; nothing was pushed |
+| GitHub Actions | **untouched** — `git diff 7f4e6f5..HEAD -- .github/` is **0 lines** |
+
+### What this does not make true
+
+**Human usability is UNQUALIFIED.** Nobody who works at a laboratory bench has used this surface. No
+timing was measured. Green browser phases are evidence that the software works, not that the workflow
+is workable, and the second is a human judgement no suite can make. The words *usable*, *intuitive*,
+*staff-ready*, *switch-ready*, *production-ready*, *pilot-ready* and *clinically live* are not claimed.
+
+**Not built, and not claimed:** specimen types, labels, barcodes, accession numbers, scanners,
+analyser interfacing, QC, reference ranges, inventory, reagents, lot numbers, storage locations, chain
+of custody, specimen-level rejection, and any explicit recollection linkage.
+
+**Still open and untouched: D-4** (which attributes a receiving laboratory needs to confirm the
+presenting patient — this ticket added no identity ceremony, no name-and-DOB prompt, no wristband scan
+and no national-ID field), **D-8** (successful-read auditing — specimen *creation* writes
+`lab_specimen_recorded`; **`GET …/specimens` writes nothing**, so the specimen history read is exactly
+as unaudited as every other sensitive read in this repository, and this ticket did not quietly change
+that), **D-11** (the laboratory reason vocabulary — the same four provisional block reasons, still
+unvalidated by anyone who works in a laboratory, and this ticket added no fifth).
+
+**Nothing was pushed and GitHub Actions was not touched.** All data synthetic; no facility database
+was contacted — the PostgreSQL qualification ran only against a disposable container, destroyed
+afterwards.

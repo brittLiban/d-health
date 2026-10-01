@@ -6,6 +6,111 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-10-01, DHEALTH-SPECIMEN-001, directly on `master`.** From `7f4e6f5`. **A physical specimen is
+now its own durable record, an order may hold more than one, and a recollection no longer has to
+overwrite the sample it replaces.** Alembic head moves `0038_visit_check_in` → **`0039_lab_specimens`**,
+exactly one head. **ADR-070.** No new capability, no new role, no new order state, no new reason
+vocabulary.
+
+**What was actually wrong was the schema, not the code.** DH-EX-011's `LabSampleCollection` carried
+`unique(lab_order_id)` — correct for a once-per-order *workflow milestone*, and false as a statement
+about physical reality. A CBC and a urine culture cannot share a tube; an unusable sample is replaced
+by a second sample rather than by an edit to the first. With that constraint in place every future
+recollection had exactly two available outcomes: overwrite the earlier row, or go unrecorded. It also
+recorded **no actor at all**.
+
+**`exchange_lab_specimens.lab_order_id` is deliberately not unique.** The only uniqueness is
+`(lab_order_id, idempotency_key)` — retry safety, not cardinality. The milestone keeps its own
+one-per-order constraint, because the two tables mean different things: the milestone is what
+`ACCEPTED → IN_PROGRESS` is gated on, and the specimen is the physical sample.
+
+**The invariant, and why it is enforceable rather than documented.** `record_collection` is the only
+code path in the repository that writes either row, so a milestone is never created without a first
+specimen, and both take **one `utc_now()` evaluated once** — the two instants are the same stored value,
+not two values that agree. Connect's source-observed collection event goes through that same method
+rather than beside it; had it not, milestone-only rows would have kept entering new data forever while
+every keyed test passed.
+
+**Retry and a second sample are different facts, and the design keeps them apart.** Same
+`idempotency_key` → one specimen, 200, no second audit row. Different key → a new specimen, 201, every
+earlier one preserved. Enforcing idempotency by allowing one specimen per order would have made retries
+easy by making the domain false. **A real client-side defect was introduced and fixed before any
+browser run:** both confirmation handlers minted a fresh key, so the retry after an unconfirmed
+response would have sent a *different* key and a late-landing first write would have become a second
+specimen. `??=` fixes it; `SP-UI-1` pins it.
+
+**Nothing clinical was invented, and the endpoint now refuses it.** No specimen type, container, tube,
+volume, anatomical source, accession number, storage location, quality grade or status column exists —
+`TestCatalogEntry` carries no specimen-type field, so the type cannot even be *derived*, which is a
+real product gap recorded as one. `specimen_type` and `collected_at` are rejected with a 422 naming the
+field rather than silently ignored. `recorded_at` is deliberately not `collected_at`: ADR-018's
+DH-011J2 rule, which a renamed column would have reversed under a new ticket's cover.
+
+**No explicit recollection linkage.** The collection action carries no statement of cause, an order may
+legitimately require more than one sample, and inferring the link from two timestamps would be
+fabricated provenance. Multiple immutable rows plus their recorded order preserve what is known — how
+many, when each, by whom — without claiming to know why. The UI says "Prélèvement enregistré" for every
+row and never "recollecte", "remplacement" or "rejeté".
+
+**Nothing was backfilled.** A pre-`0039` order with a milestone and no specimen means "the collection
+step was recorded; how many physical samples there were, and who collected them, is not known".
+Fabricating one specimen per milestone would assert a cardinality of one and a collector identity, and
+`0038` settled the identical question the identical way for `checked_in_by`. The screen keeps showing
+the milestone line for such an order rather than claiming "Prélèvements (0)".
+
+**A negative control caught a concurrency test that was green for the wrong reason.** The twelve-thread
+barrier test stayed green with `.with_for_update()` deleted — the GIL plus per-thread session setup
+staggers the threads enough that each commits before the next reads. `PG-SPEC-1a` now creates the
+contention deterministically with two transactions the test owns, and reddens on the mutation.
+
+**Evidence actually executed:** 38 new adapter tests at the HTTP edge and the domain boundary; 15 new
+real-PostgreSQL-16.15 tests covering the row lock, both concurrency directions, the stale replay,
+cross-tenant mutation, every foreign key, `RESTRICT`, the composite unique constraint, `timestamptz`
+precision and `VARCHAR(128)`; the migration exercised **in both directions** against that same
+disposable database — `0038 → 0039` applied, exactly one head, downgrade **refused** by each of its two
+guards with the database left unchanged, downgrade **permitted** with zero rows, and re-upgrade;
+**14 browser phases** against real Chromium, Caddy, Keycloak 26.7.1 and PostgreSQL 16 on a
+**rebuilt** stack *proved* to carry the change (route answers 401 not 404, model present in the adapter
+image, `Prélèvements` present in the built UI bundle, `exchange_lab_specimens` present in the running
+database); the whole adapter suite **2049 passed, 249 skipped**; **996 UI unit tests
+across 62 files**, batched and reconciled because a whole-suite `vitest run` has silently dropped
+files in this repository before; **15 distinct negative controls in 17 runs** (NC-SP-1 and NC-SP-6b were
+each run twice, once against the unit suite and once against PostgreSQL), every one reverted
+byte-for-byte with `git status --porcelain` and `git diff --stat` checked clean between each.
+**Thirteen of the fifteen reddened a named test; NC-SP-14 and NC-SP-15 are measured observations
+against the disposable database rather than reddened pytests**, because the evidence they attack is a
+migration's behaviour and a test that re-ran migrations would tear down the schema the rest of the PG
+suite needs. `ruff` and `ruff format --check` clean; `tsc -b`, `tsc -p e2e/tsconfig.json` clean;
+`oxlint` **0 errors**, and **+1 warning** against the pre-ticket baseline (9 → 10 on
+`LabOrdersPage.tsx`) — the `set-state-in-effect` rule the file's existing nine already fire on, because
+`loadSpecimenHistory` mirrors `loadBlockHistory` exactly. The UI build and its no-secrets check clean
+across 28 built files.
+
+**🛑 D-3 is SPLIT, not closed, and this is the sentence a later reader must not skip.** D-3's recorded
+decision kind is *"Product, needs a laboratory participant"*, and **no laboratory participant has been
+consulted.** The operator directing this ticket answered the *architectural* half — does the entity
+exist, is its cardinality truthful, is provenance recorded, is a prior specimen preserved. The
+*participant* half is untouched: specimen **types** and their governed source, a human-facing
+**accession number**, **label** content, when a specimen is invalid *as a specimen* rather than the
+order becoming `BLOCKED`, whether a mistaken record may be **voided**, and whether an explicit
+**recollection link** is needed. **Nobody may read ADR-070 as "specimens are done."**
+
+**D-4** (identity-confirmation attributes), **D-8** (successful-read auditing — specimen *creation* is
+audited, the specimen *history read* is not) and **D-11** (the laboratory reason vocabulary, still
+unvalidated; this ticket added no fifth reason) are **exactly as open as they were.**
+
+**Connect cannot report a recollection, and that is recorded rather than hidden.** Its collection event
+is keyless, so a second event for the same order is a replay. Closing it needs an envelope carrying a
+per-event identity, which this ticket does not build.
+
+**Human usability is UNQUALIFIED.** Nobody who works at a laboratory bench has used this surface, and
+no timing has been measured against whatever the laboratory does today, so law 3 remains a validated
+target rather than a current claim. Green browser phases are evidence that the software works, not that
+the workflow is workable. **Pilot-ready is still not clinically live.** All data synthetic; no real
+patient data anywhere; no facility database contacted; GitHub Actions untouched.
+
+### Previous as-of — 2026-09-30, DHEALTH-LAB-RECEPTION-001
+
 **2026-09-30, DHEALTH-LAB-RECEPTION-001, directly on `master`.** From `3e4b69b`. **The beginning of a
 laboratory day is now qualified rather than merely written — and the incoming queue no longer buries
 the order that has waited longest.** Alembic head is unchanged at **`0038_visit_check_in`**: this
@@ -87,7 +192,9 @@ offered. `LabOrdersPage.tsx` and `LabHomePage.tsx` are now in it; both already p
 the guard bites rather than merely being present.
 
 **Specimens are untouched — D-3 remains entirely open.** So do **D-4** (identity-confirmation
-attributes), **D-8** (successful-read auditing) and **D-11**.
+attributes), **D-8** (successful-read auditing) and **D-11**. **[Superseded for the specimen half
+on 2026-10-01 by DHEALTH-SPECIMEN-001/ADR-070 — see §A. D-3's *architectural* half is resolved;
+its *participant* half, and D-4, D-8 and D-11 in full, remain open.]**
 
 **Human usability is UNQUALIFIED.** Nobody who works at a laboratory counter has used this surface, and
 no timing has been measured against whatever the laboratory does today, so law 3 remains a validated
@@ -238,7 +345,9 @@ second episode that does not overwrite the first · all six sibling browser suit
 
 **Human usability is not claimed.** No laboratory worker has used this screen. Nothing was timed.
 **No specimen entity was built** — **D-3** is exactly as open as it was, and `SPECIMEN_UNUSABLE`
-says the laboratory stopped, not what happens to the tube. Still not production-deployed or
+says the laboratory stopped, not what happens to the tube. **[True as written for
+DHEALTH-LAB-BLOCKED-001. A specimen entity was built later, on 2026-10-01 (ADR-070), and
+`SPECIMEN_UNUSABLE` still says only what this sentence says it says.]** Still not production-deployed or
 clinically live; all data synthetic, no real patient data used.
 
 <!-- The previous as-of block follows, preserved as history rather than deleted. -->

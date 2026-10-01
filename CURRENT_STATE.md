@@ -2298,6 +2298,14 @@ statement that the laboratory stopped. It does not identify a tube, create an ac
 container, or link a recollection to its predecessor. Recollection has no representation at all: a
 block whose reason is an unusable specimen communicates the operational state and nothing more.
 
+> **[Updated 2026-10-01, DHEALTH-SPECIMEN-001/ADR-070.** Two of those five clauses changed and
+> three did not, so the paragraph is annotated rather than rewritten. **Changed:** a specimen
+> entity now exists, and **recollection does have a representation** — a later collection creates a
+> new `LabSpecimen` and the earlier one is preserved. **Unchanged:** `SPECIMEN_UNUSABLE` still says
+> only that the laboratory stopped; no accession and no container is recorded; and nothing **links**
+> a recollection to its predecessor, because the collection action carries no statement of cause and
+> inferring it from two timestamps would be fabricated provenance.]**
+
 **Nothing tells an external system.** DHealth Connect refuses to apply an externally released
 result to a blocked order — correct, and it needed no change — but there is no mechanism by which a
 block is *announced* outward, and none was invented. That is a known gap, not interoperability.
@@ -2380,6 +2388,13 @@ absence, so the next contributor is corrected by a failure rather than by readin
 handoff phase records the existing order-level collection milestone and stops there. **D-4** (which
 attributes a receiving laboratory needs to confirm the presenting patient) and **D-8** (whether successful
 reads of sensitive data should be audited) are equally untouched.
+
+> **[Superseded in part 2026-10-01, DHEALTH-SPECIMEN-001/ADR-070.** A specimen entity now exists and
+> **D-3 is split**: its architectural half is resolved, its participant half (types, accession
+> numbers, labels, specimen-level rejection, void semantics, recollection linkage) still needs a
+> laboratory participant and none has been consulted. **D-4 and D-8 are still exactly as open as
+> this sentence says** — that ticket added no identity ceremony, and it audits specimen *creation*
+> but not the specimen *history read*.]**
 
 **Human usability is UNQUALIFIED, and no amount of the above changes that.** Nobody who works at a
 laboratory counter has used this surface. No timing has been measured against whatever the laboratory does
