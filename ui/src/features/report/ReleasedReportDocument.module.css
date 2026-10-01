@@ -1,0 +1,356 @@
+/* DHEALTH-LAB-REPORT-001/ADR-072 — the printable released laboratory report.
+ *
+ * Two layouts in one file, and they are deliberately different things:
+ *
+ *  - On screen this is a full-surface overlay. It is rendered through a portal into `document.body`,
+ *    outside `#root`, so nothing in the staff shell can be printed by accident and no z-index or
+ *    grid-column fight with the shell is possible.
+ *  - In print the overlay becomes ordinary static flow, the action bar disappears, and the document
+ *    paginates normally. The repository's existing `[data-print-root]` mechanism (visibility
+ *    hiding plus `position: absolute`) is deliberately NOT reused here: an absolutely positioned
+ *    root does not fragment reliably across pages, and this report may legitimately run to several.
+ *    See `index.css`'s own print block.
+ *
+ * `@page` is not set anywhere. Page size and margins belong to the browser's print dialog, and the
+ * application does not control them — the widths below are sized so an A4 page at ordinary margins
+ * holds the table without horizontal overflow.
+ */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  overflow: auto;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-family);
+}
+
+/* The one piece of application chrome the screen view keeps: a way back, and the print action.
+   Marked `data-print-hide` in the component so the print rules can remove it. */
+.actions {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.actionsSpacer {
+  margin-left: auto;
+}
+
+.document {
+  /* 180mm is A4's 210mm less a 15mm gutter each side: the table below is laid out to fit inside
+     that measure, so nothing is clipped when the dialog applies ordinary margins. */
+  max-width: 180mm;
+  margin: var(--space-5) auto;
+  padding: var(--space-6);
+  background: #ffffff;
+  color: #111111;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  justify-content: space-between;
+  align-items: flex-start;
+  padding-bottom: var(--space-4);
+  border-bottom: 2px solid #111111;
+}
+
+.laboratory {
+  margin: 0;
+  font-family: var(--font-family-serif);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+}
+
+.documentKind {
+  margin: 2px 0 0;
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-neutral-700);
+}
+
+/* Version identity. Text-weighted and bordered rather than tinted: the fact that this is Version 1
+   and not Version 2 must survive a monochrome printer and a photocopy. */
+.versionBlock {
+  text-align: right;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid #111111;
+  border-radius: var(--radius-sm);
+}
+
+.versionIdentity {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.versionCurrency {
+  margin: 2px 0 0;
+  font-size: var(--font-size-sm);
+}
+
+.versionSuperseded {
+  font-weight: var(--font-weight-semibold);
+}
+
+/* ── Identity panels ─────────────────────────────────────────────────────── */
+
+.panels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.panel {
+  min-width: 0;
+}
+
+.panelHeading {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-neutral-700);
+}
+
+.fieldList {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: var(--space-3);
+  row-gap: 2px;
+  font-size: var(--font-size-sm);
+}
+
+.fieldList dt {
+  color: var(--color-neutral-700);
+}
+
+.fieldList dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ── Results ─────────────────────────────────────────────────────────────── */
+
+.resultsHeading {
+  margin: var(--space-5) 0 var(--space-2);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.serviceBlock {
+  margin-top: var(--space-4);
+}
+
+.serviceHeading {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+}
+
+.serviceCode {
+  font-weight: var(--font-weight-regular);
+  color: var(--color-neutral-700);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+  /* Fixed layout plus the column widths below is what keeps a long observation label from pushing
+     the value and unit columns off the page measure. */
+  table-layout: fixed;
+}
+
+.table caption {
+  /* Present for screen readers; the visible service heading above says the same thing. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.table th,
+.table td {
+  padding: var(--space-2) var(--space-2);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--color-neutral-300);
+  overflow-wrap: anywhere;
+}
+
+.table thead th {
+  border-bottom: 1px solid #111111;
+  font-weight: var(--font-weight-semibold);
+}
+
+.colLabel {
+  width: 46%;
+}
+
+.colValue {
+  width: 22%;
+}
+
+.colUnit {
+  width: 14%;
+}
+
+.colRange {
+  width: 18%;
+}
+
+.value {
+  font-weight: var(--font-weight-semibold);
+}
+
+/* ── Release footer ──────────────────────────────────────────────────────── */
+
+.release {
+  margin-top: var(--space-5);
+  padding-top: var(--space-3);
+  border-top: 2px solid #111111;
+}
+
+.releaseNote {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-neutral-700);
+  line-height: 1.5;
+}
+
+/* ── Narrow screens ──────────────────────────────────────────────────────── */
+
+/* `screen and` is not decoration. Print resolves a width media query against the page box
+   (A4 is ~794px at 96dpi), so an unscoped `max-width: 760px` would be one printer margin away
+   from silently emitting the stacked phone layout onto paper. */
+@media screen and (max-width: 760px) {
+  .document {
+    max-width: none;
+    margin: var(--space-3);
+    padding: var(--space-4);
+  }
+
+  .panels {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .versionBlock {
+    text-align: left;
+  }
+
+  /* A four-column clinical table does not belong in 390px. The cells carry their own label
+     instead, one observation per stacked block — the same values, read top to bottom. */
+  .table,
+  .table tbody,
+  .table tr,
+  .table td {
+    display: block;
+    width: auto;
+  }
+
+  .table thead {
+    display: none;
+  }
+
+  .table tr {
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--color-neutral-300);
+  }
+
+  .table td {
+    border-bottom: none;
+    padding: 2px 0;
+  }
+
+  .table td::before {
+    content: attr(data-label) ' : ';
+    color: var(--color-neutral-700);
+  }
+
+  .table td:first-child::before {
+    content: none;
+  }
+}
+
+/* ── Print ───────────────────────────────────────────────────────────────── */
+
+/* What happens on paper. The one rule this block cannot express — hiding the application entirely —
+ * lives in `index.css` as `body.dh-report-open #root { display: none }`, because a CSS-module class
+ * cannot reach `#root`. Everything else is scoped here, to this component's own classes.
+ */
+@media print {
+  .overlay {
+    /* Back to ordinary static flow. This is the whole reason the report does not reuse the
+       `[data-print-root]` mechanism: a fixed or absolutely positioned root does not fragment
+       across pages, and a report with thirty observations legitimately needs more than one. */
+    position: static;
+    inset: auto;
+    overflow: visible;
+    background: #ffffff;
+  }
+
+  /* Back action and print button. Nothing interactive reaches paper. */
+  .actions {
+    display: none;
+  }
+
+  .document {
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: #ffffff;
+    color: #111111;
+  }
+
+  /* Page-break discipline. Each rule names the specific way the document would otherwise break:
+     a header split from the identity it labels, a service heading stranded at the foot of a page,
+     an observation whose label landed on one page and whose value landed on the next. */
+  .header,
+  .panels,
+  .release {
+    break-inside: avoid;
+  }
+
+  .serviceHeading,
+  .resultsHeading {
+    break-after: avoid;
+  }
+
+  .table tr {
+    break-inside: avoid;
+  }
+
+  /* A long table is allowed — required, even — to split across pages, so the column headings are
+     repeated at the top of each one. `display: table-header-group` is what makes that happen. */
+  .table thead {
+    display: table-header-group;
+  }
+
+  .serviceBlock {
+    /* Deliberately not `break-inside: avoid`: a service with enough observations to exceed one page
+       must be allowed to continue onto the next rather than be pushed whole and clipped. */
+    break-inside: auto;
+  }
+}

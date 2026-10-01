@@ -1770,3 +1770,74 @@ export interface PaymentCreateOutcome {
   invoice: Invoice
   created: boolean
 }
+
+// -- DHEALTH-LAB-REPORT-001/ADR-072: the printable released report ----------------------------
+
+/**
+ * One organization as the report header names it.
+ *
+ * **Current reference data, not release-snapshot truth.** `Organization` carries no address,
+ * telephone, registration or accreditation number, so the report shows none and invents none.
+ * `name` is read live at render time: a laboratory renamed after a release reprints under the new
+ * name. ADR-072 §5 records that as a limitation rather than claiming an immutability the schema
+ * does not provide.
+ */
+export interface ReleasedReportOrganization {
+  organization_id: string
+  name: string
+}
+
+/**
+ * One released observation, exactly as the manifest-bound row holds it.
+ *
+ * `reference_range_low`/`reference_range_high` are governed released data on that same immutable
+ * row, already rendered on the clinician's result screen. **Nothing derives a flag, a verdict or a
+ * comparison from them** -- printing a range the laboratory released is reporting; computing
+ * normal/abnormal/H/L from it would be clinical interpretation, which this product does not do.
+ */
+export interface ReleasedReportObservation {
+  observation_id: string
+  display_label_snapshot: string
+  result_type: 'NUMERIC' | 'TEXT'
+  numeric_value: string | null
+  numeric_unit: string | null
+  reference_range_low: string | null
+  reference_range_high: string | null
+  text_value: string | null
+}
+
+export interface ReleasedReportItem {
+  item_id: string
+  catalog_code_snapshot: string
+  catalog_display_name_snapshot: string
+  observations: ReleasedReportObservation[]
+}
+
+/**
+ * DHEALTH-LAB-REPORT-001: one printable laboratory report, bound to one exact released version.
+ *
+ * Both the laboratory route and the ordering-clinic route return this identical shape, built by one
+ * server-side function. `released_at` is the authoritative release instant (the same stored value as
+ * `LabResultRelease.released_at` / `LabResultAmendment.released_at`).
+ *
+ * `is_current_version`/`current_release_version_number` are **derived metadata**: they say which
+ * release is the reference result now, and never alter what this version's report renders. The
+ * domain has no "cancelled", "invalid" or "revoked" release, so no such word appears in the UI.
+ *
+ * Deliberately absent, and asserted absent server-side: the clinician's review disposition, visit
+ * or consultation context, laboratory-internal notes, money, specimen facts, the releasing
+ * identity, and the patient's contact channel.
+ */
+export interface ReleasedReport {
+  order_id: string
+  release_version_id: string
+  release_version_number: number
+  is_amendment: boolean
+  released_at: string
+  is_current_version: boolean
+  current_release_version_number: number
+  laboratory: ReleasedReportOrganization
+  ordering_organization: ReleasedReportOrganization
+  patient: LabWorkflowPatientIdentity
+  results: ReleasedReportItem[]
+}

@@ -82,6 +82,7 @@ import type {
   ProviderReleaseVersionContent,
   ProviderReleaseVersionHistory,
   ProviderResultReviewQueueResponse,
+  ReleasedReport,
   ReleaseQueue,
   ResultEntryPlan,
   ResultEntryWorkspace,
@@ -469,6 +470,25 @@ export class ExchangeClient {
   ): Promise<ProviderReleaseVersionContent> {
     return this.request<ProviderReleaseVersionContent>(
       `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/release-versions/${encodeURIComponent(releaseVersionId)}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/orders/{order_id}/release-versions/{release_version_id}/report
+   * DHEALTH-LAB-REPORT-001/ADR-072: the printable report for one exact released version, from the
+   * ordering clinic's side. Same document, same server-side builder as the laboratory's own
+   * `getLabOrderReleaseVersionReport`. No "latest" mode — see that method's note.
+   */
+  async getReleaseVersionReport(
+    providerId: string,
+    orderId: string,
+    releaseVersionId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ReleasedReport> {
+    return this.request<ReleasedReport>(
+      `/organizations/${encodeURIComponent(providerId)}/orders/${encodeURIComponent(orderId)}/release-versions/${encodeURIComponent(releaseVersionId)}/report`,
       { method: 'GET', signal: options.signal },
       options.token,
     )
@@ -1634,6 +1654,26 @@ export class ExchangeClient {
   ): Promise<LabReleaseVersionContent> {
     return this.request<LabReleaseVersionContent>(
       `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/release-versions/${encodeURIComponent(releaseVersionId)}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET .../lab-orders/{order_id}/release-versions/{release_version_id}/report
+   * DHEALTH-LAB-REPORT-001/ADR-072: the printable report for one exact released version, from the
+   * laboratory's side. `releaseVersionId` is always the version the user is looking at — this
+   * method has no "latest" mode, deliberately, so a Print action cannot silently resolve to a
+   * version the user is not inspecting.
+   */
+  async getLabOrderReleaseVersionReport(
+    labId: string,
+    orderId: string,
+    releaseVersionId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<ReleasedReport> {
+    return this.request<ReleasedReport>(
+      `/organizations/${encodeURIComponent(labId)}/lab-orders/${encodeURIComponent(orderId)}/release-versions/${encodeURIComponent(releaseVersionId)}/report`,
       { method: 'GET', signal: options.signal },
       options.token,
     )

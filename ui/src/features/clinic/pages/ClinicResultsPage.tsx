@@ -8,6 +8,7 @@ import type {
   ProviderReleaseVersionContent,
   ProviderReleaseVersionSummary,
   ProviderResultReviewQueueEntry,
+  ReleasedReport,
 } from '../../../api/exchangeTypes'
 import {
   Button,
@@ -18,6 +19,7 @@ import {
   StatusBadge,
 } from '../../../design-system'
 import { PatientIdentity } from '../components/PatientIdentity'
+import { ReleasedReportDocument } from '../../report/ReleasedReportDocument'
 import { useClinic } from '../ClinicContext'
 
 // DH-CLINIC-007 §64: distinct from ACCEPTED's own meaning elsewhere in this app -- these three
@@ -515,9 +517,55 @@ export function ClinicResultsPage() {
     )
   }
 
+  /**
+   * DHEALTH-LAB-REPORT-001: the open report, and the version it belongs to.
+   *
+   * `versionId` travels with the payload so a slow response for one version cannot be rendered
+   * under another's heading, and so `handleOpenReport` can only ever be called with the version the
+   * clinician is currently looking at. There is no "print the latest" path.
+   */
+  const [reportState, setReportState] = useState<{
+    versionId: string | null
+    loading: boolean
+    error: string | null
+    report: ReleasedReport | null
+  }>({ versionId: null, loading: false, error: null, report: null })
+
+  const handleOpenReport = (versionId: string) => {
+    if (!activeProvider || !panel) return
+    const targetProvider = activeProvider.organization_id
+    setReportState({ versionId, loading: true, error: null, report: null })
+    client
+      .getReleaseVersionReport(targetProvider, panel.target.orderId, versionId)
+      .then((report) => {
+        if (currentProviderRef.current !== targetProvider) return
+        setReportState((prev) =>
+          prev.versionId === versionId ? { versionId, loading: false, error: null, report } : prev,
+        )
+      })
+      .catch(() => {
+        if (currentProviderRef.current !== targetProvider) return
+        setReportState((prev) =>
+          prev.versionId === versionId
+            ? {
+                versionId,
+                loading: false,
+                error: 'Impossible de charger le compte rendu de cette version.',
+                report: null,
+              }
+            : prev,
+        )
+      })
+  }
+
+  const handleCloseReport = () => {
+    setReportState({ versionId: null, loading: false, error: null, report: null })
+  }
+
   const handleClosePanel = () => {
     panelGenerationRef.current += 1
     setPanel(null)
+    handleCloseReport()
     setDisposition(null)
     setSubmitState({ submitting: false, error: null })
   }
@@ -938,11 +986,45 @@ export function ClinicResultsPage() {
                               {displayedContent.order_id}
                             </span>
                           </h2>
-                          <StatusBadge
-                            tone={reviewStatusTone(displayedReviewStatus)}
-                            label={formatReviewStatusLabel(displayedReviewStatus)}
-                          />
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                            <StatusBadge
+                              tone={reviewStatusTone(displayedReviewStatus)}
+                              label={formatReviewStatusLabel(displayedReviewStatus)}
+                            />
+                            {/* DHEALTH-LAB-REPORT-001: prints the version on screen, not the
+                                latest one. `displayedContent.release_version_id` is the id this
+                                panel actually fetched and rendered, so a clinician inspecting
+                                Version 1 while Version 2 is current gets Version 1's report. A
+                                legacy order released before versioning existed has no version to
+                                report on and gets no button. */}
+                            {displayedContent.release_version_id ? (
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                onClick={() =>
+                                  handleOpenReport(displayedContent.release_version_id as string)
+                                }
+                              >
+                                {reportState.versionId === displayedContent.release_version_id &&
+                                reportState.loading
+                                  ? 'Chargement du compte rendu…'
+                                  : 'Voir le compte rendu'}
+                              </Button>
+                            ) : null}
+                          </div>
                         </div>
+                        {reportState.error ? (
+                          <p
+                            role="alert"
+                            style={{
+                              margin: '0 0 var(--space-3)',
+                              color: 'var(--color-danger)',
+                              fontSize: 'var(--font-size-sm)',
+                            }}
+                          >
+                            {reportState.error}
+                          </p>
+                        ) : null}
 
                         {displayedContent.results.length === 0 ? (
                           <p style={{ color: 'var(--color-neutral-500)', fontStyle: 'italic' }}>
@@ -1144,6 +1226,11 @@ export function ClinicResultsPage() {
           ) : null}
         </div>
       )}
+      {/* Portals itself out of this subtree -- see `ReleasedReportDocument`. Its position here says
+          nothing about what reaches paper. */}
+      {reportState.report ? (
+        <ReleasedReportDocument report={reportState.report} onClose={handleCloseReport} />
+      ) : null}
     </div>
   )
 }

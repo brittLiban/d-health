@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ExchangeClient } from '../../../api/exchangeClient'
-import type { LabReleaseVersionContent, LabReleaseVersionSummary } from '../../../api/exchangeTypes'
+import type {
+  LabReleaseVersionContent,
+  LabReleaseVersionSummary,
+  ReleasedReport,
+} from '../../../api/exchangeTypes'
 import { Button, LoadingSkeleton } from '../../../design-system'
+import { ReleasedReportDocument } from '../../report/ReleasedReportDocument'
 
 const HISTORY_LOAD_ERROR = "Impossible de charger l'historique des versions."
 const CONTENT_LOAD_ERROR = 'Impossible de charger le contenu de cette version.'
+const REPORT_LOAD_ERROR = 'Impossible de charger le compte rendu de cette version.'
 
 /**
  * DH-USABILITY-001 §27: the same shape as every other date on this screen.
@@ -67,6 +73,20 @@ export function ReleaseVersionHistory({ client, labId, orderId }: ReleaseVersion
     error: string | null
     content: LabReleaseVersionContent | null
   }>({ versionId: null, loading: false, error: null, content: null })
+  /**
+   * DHEALTH-LAB-REPORT-001: the open report, and which version it belongs to.
+   *
+   * `versionId` is carried alongside the payload rather than inferred, so a slow response for
+   * Version 1 that arrives after the user asked for Version 2 can be discarded instead of being
+   * rendered under the wrong heading. The print action lives inside the document and prints what is
+   * on screen, so there is no path by which it could resolve "latest".
+   */
+  const [reportState, setReportState] = useState<{
+    versionId: string | null
+    loading: boolean
+    error: string | null
+    report: ReleasedReport | null
+  }>({ versionId: null, loading: false, error: null, report: null })
   const mountedRef = useRef(true)
 
   useEffect(() => {
@@ -97,7 +117,35 @@ export function ReleaseVersionHistory({ client, labId, orderId }: ReleaseVersion
     }
     setOpen(true)
     setContentState({ versionId: null, loading: false, error: null, content: null })
+    setReportState({ versionId: null, loading: false, error: null, report: null })
     load()
+  }
+
+  function handleOpenReport(versionId: string) {
+    setReportState({ versionId, loading: true, error: null, report: null })
+    client
+      .getLabOrderReleaseVersionReport(labId, orderId, versionId)
+      .then((report) => {
+        if (!mountedRef.current) return
+        // Guard against an out-of-order response: only the version still being requested wins.
+        setReportState((prev) =>
+          prev.versionId === versionId
+            ? { versionId, loading: false, error: null, report }
+            : prev,
+        )
+      })
+      .catch(() => {
+        if (!mountedRef.current) return
+        setReportState((prev) =>
+          prev.versionId === versionId
+            ? { versionId, loading: false, error: REPORT_LOAD_ERROR, report: null }
+            : prev,
+        )
+      })
+  }
+
+  function handleCloseReport() {
+    setReportState({ versionId: null, loading: false, error: null, report: null })
   }
 
   function handleOpenVersion(versionId: string) {
@@ -156,7 +204,31 @@ export function ReleaseVersionHistory({ client, labId, orderId }: ReleaseVersion
                         ? 'Masquer le contenu'
                         : 'Voir le contenu exact'}
                     </Button>
+                    {/* DHEALTH-LAB-REPORT-001: one button per version, each carrying its own
+                        immutable id. There is no single "Imprimer" that would have to work out
+                        which version was meant. */}
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => handleOpenReport(version.release_version_id)}
+                    >
+                      {reportState.versionId === version.release_version_id && reportState.loading
+                        ? 'Chargement du compte rendu…'
+                        : 'Voir le compte rendu'}
+                    </Button>
                   </div>
+                  {reportState.versionId === version.release_version_id && reportState.error ? (
+                    <p
+                      role="alert"
+                      style={{
+                        margin: '4px 0 0',
+                        color: 'var(--color-danger, #b91c1c)',
+                        fontSize: 'var(--font-size-sm)',
+                      }}
+                    >
+                      {reportState.error}
+                    </p>
+                  ) : null}
                   {contentState.versionId === version.release_version_id ? (
                     contentState.loading ? (
                       <LoadingSkeleton />
@@ -205,6 +277,12 @@ export function ReleaseVersionHistory({ client, labId, orderId }: ReleaseVersion
             </ul>
           ) : null}
         </div>
+      ) : null}
+      {/* Rendered last, but it portals itself out of this subtree entirely — see
+          `ReleasedReportDocument`. Nothing about this component's position in the laboratory page
+          affects what reaches paper. */}
+      {reportState.report ? (
+        <ReleasedReportDocument report={reportState.report} onClose={handleCloseReport} />
       ) : null}
     </div>
   )

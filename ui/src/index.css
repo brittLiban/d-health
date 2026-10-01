@@ -262,4 +262,22 @@ input {
     border: none;
     box-shadow: none;
   }
+
+  /* DHEALTH-LAB-REPORT-001/ADR-072 — the released laboratory report.
+   *
+   * The report is rendered through a portal into `document.body`, *outside* `#root`, and sets this
+   * class on `body` while it is open. So printing it removes the entire application — masthead,
+   * navigation rail, the page it was opened from, every button — rather than hiding parts of it and
+   * hoping the list stayed complete. The report then occupies ordinary static flow and paginates
+   * normally; the rest of its print layout lives in
+   * `features/report/ReleasedReportDocument.module.css`.
+   *
+   * This is deliberately a second, independent mechanism rather than an extension of the
+   * `[data-print-root]` rules above. Those hide by `visibility` and reposition the sheet
+   * absolutely, which is right for DH-PATIENT-001's single-page handoff slip and wrong for a
+   * document that may run to several pages. Neither mechanism can interfere with the other: this
+   * class is only ever set while the report is mounted, and the handoff carries no portal. */
+  body.dh-report-open #root {
+    display: none;
+  }
 }
