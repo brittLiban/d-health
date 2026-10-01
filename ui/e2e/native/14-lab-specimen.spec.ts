@@ -478,13 +478,13 @@ test.describe('DHEALTH-SPECIMEN-001 — a physical specimen, preserved', () => {
     labToken = await signIn(page, LAB_TECH)
     await openThisOrder(page)
 
-    await page.getByRole('button', { name: /Résoudre/ }).click()
-    await page
-      .getByLabel(/Note/)
-      .fill(`Nouveau prélèvement prévu — ${RUN}`)
-      .catch(() => undefined)
-    await page.getByRole('button', { name: /Confirmer la résolution/ }).click()
+    await page.getByRole('button', { name: 'Résoudre le blocage' }).click()
+    // The confirmation states where the order will go and offers no choice -- the resume state is
+    // `blocked_from_status`, recorded by the server when the block happened (ADR-068).
+    await expect(page.getByRole('alert')).toContainText(/reprendra à l.état/)
+    await page.getByRole('button', { name: 'Confirmer la reprise' }).click()
 
+    // ACCEPTED, because that is where the block interrupted it.
     await expect(page.getByText('Accepté').first()).toBeVisible({ timeout: 30_000 })
     await expect(page.getByText('Prélèvements (1)')).toBeVisible()
     const afterResolve = await readSpecimens(labToken)
@@ -546,12 +546,17 @@ test.describe('DHEALTH-SPECIMEN-001 — a physical specimen, preserved', () => {
     await expect(page.getByText('Prélèvements (2)')).toBeVisible({ timeout: 30_000 })
 
     // The order still starts processing: modelling specimens separately did not weaken the gate.
-    await page.getByRole('button', { name: /Commencer/ }).first().click()
-    await page.getByRole('button', { name: 'Commencer' }).last().click()
+    await page.getByRole('button', { name: "Commencer l'analyse" }).click()
+    await page.getByRole('button', { name: 'Commencer', exact: true }).click()
     await expect(page.getByText('En cours').first()).toBeVisible({ timeout: 30_000 })
 
-    // And a third specimen is still recordable while IN_PROGRESS, without disturbing the first two.
+    // Both specimens are still there after the transition, and the additional-specimen control is
+    // still offered -- `IN_PROGRESS` is in `SPECIMEN_RECORDABLE_ORDER_STATUSES`, which is the case
+    // §16's worked example produces and the one an ACCEPTED-only rule would have made impossible.
     await expect(page.getByText('Prélèvements (2)')).toBeVisible()
+    await expect(
+      page.getByRole('button', { name: 'Enregistrer un nouveau prélèvement' }),
+    ).toBeVisible()
     const unchanged = await readSpecimens(labToken)
     expect(unchanged.rows.map((row) => row.id)).toEqual(specimenIds)
   })
@@ -574,16 +579,33 @@ test.describe('DHEALTH-SPECIMEN-001 — a physical specimen, preserved', () => {
     )
     expect(overflow, 'the page must not scroll horizontally at 768px').toBeLessThanOrEqual(1)
 
-    // The collection control is reachable and operable from the keyboard, and focus is visible.
+    // The collection control is reachable **by keyboard**, and visibly focused once reached.
+    //
+    // Reached by pressing Tab rather than by calling `.focus()`, and the difference is the whole
+    // assertion: `index.css` styles `:focus-visible`, which Chromium deliberately does **not** match
+    // for programmatic focus. A `.focus()`-based test therefore reports "no focus ring" against a
+    // product that has a perfectly good one — control-verified here, where exactly that happened on
+    // the first run of this suite.
     const control = page.getByRole('button', { name: 'Enregistrer un nouveau prélèvement' })
     await expect(control).toBeVisible()
-    await control.focus()
-    await expect(control).toBeFocused()
+    await page.locator('body').click({ position: { x: 2, y: 2 } })
+
+    let reached = false
+    for (let presses = 0; presses < 80 && !reached; presses += 1) {
+      await page.keyboard.press('Tab')
+      reached = await control.evaluate((element) => element === document.activeElement)
+    }
+    expect(reached, 'the collection control must be reachable by Tab alone').toBe(true)
+
     const outlined = await control.evaluate((element) => {
       const style = getComputedStyle(element)
-      return style.outlineStyle !== 'none' || style.boxShadow !== 'none'
+      const width = Number.parseFloat(style.outlineWidth || '0')
+      return (
+        (style.outlineStyle !== 'none' && width > 0) ||
+        (style.boxShadow !== 'none' && style.boxShadow !== '')
+      )
     })
-    expect(outlined, 'a focused control must be visibly focused').toBe(true)
+    expect(outlined, 'a keyboard-focused control must show a visible focus ring').toBe(true)
 
     await page.setViewportSize({ width: 1280, height: 900 })
   })

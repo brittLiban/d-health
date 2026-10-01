@@ -241,9 +241,9 @@ Verified by reading code during this ticket. Evidence levels:
 | Explicit release by a separate authority | BUILT + RUNTIME-QUALIFIED | `LAB_RESULT_RELEASER`, ADR-044, entry ≠ release |
 | Post-release amendment + re-release | BUILT, NOT HUMAN-QUALIFIED | ADR-048; not browser-exercised |
 | **Lab reception / patient presents at the lab** | **NOT BUILT** | — |
-| **Specimen adequacy, rejection, recollection** | **PARTIAL** | Order-level `BLOCKED` is built (P0-4, ADR-068): a laboratory can say *this cannot continue*, why, and resume it. No specimen entity, no rejection of an individual specimen, no recollection linkage — **D-3** |
-| **Multi-specimen orders** | **NOT BUILT** | One collection row per order cannot express "blood taken, urine pending" |
-| **Specimen labels / barcodes** | **NOT BUILT** | — |
+| **Specimen adequacy, rejection, recollection** | **PARTIAL** | Order-level `BLOCKED` is built (P0-4, ADR-068) and a **durable specimen record** now exists (ADR-070): recollection is representable — a later collection creates a new `LabSpecimen` and never overwrites the earlier one. Still absent: rejection of an *individual* specimen as a specimen-level fact, and any explicit recollection *linkage* (the workflow input cannot say why a second sample was taken) — **D-3's participant half** |
+| **Multi-specimen orders** | **PARTIAL** | The schema no longer lies: `exchange_lab_specimens.lab_order_id` is **not** unique, so an order may hold any number of specimens (ADR-070). No multi-container *workflow* and no per-specimen test mapping, so "blood taken, urine pending" is still not expressible — that needs specimen types, which are **D-3's participant half** |
+| **Specimen labels / barcodes** | **NOT BUILT** | The specimen has a durable internal id suitable for a later label ticket to reference. It is **not** an accession number and nothing renders it as one (ADR-070 §5) |
 | **Lab billing** | **NOT BUILT** | — |
 | **Walk-in / self-pay laboratory patient** | **NOT BUILT** | Every order today originates from a provider organization |
 
@@ -778,20 +778,46 @@ attend, clarification needed*) and must be confirmed with a laboratory participa
 > **No reason may be added on an agent's or an author's own reasoning**, `TECHNICAL_ISSUE` included.
 > The free-text note is the honest home for whatever does not fit, and stays available for it.
 >
-> Still **not** built, and deliberately: the specimen entity (**D-3**), recollection linkage, and any
-> announcement of a block to an external system through Connect (§22 — Connect refuses to apply a
-> released result to a blocked order, which is correct, but nothing *tells* an external system).
+> **[Updated 2026-10-01, DHEALTH-SPECIMEN-001/ADR-070.** The specimen entity is now built, and
+> the worked example above is what the browser qualification actually drives: collect, block for
+> `SPECIMEN_UNUSABLE`, resolve, collect again — and **both specimens remain**. `BLOCKED` is
+> unchanged by that ticket; it is still the order-level cannot-continue fact, and it is still where
+> the operational reason lives. Nothing in the specimen record says *why* a later sample was
+> taken.]**
+>
+> Still **not** built, and deliberately: recollection *linkage* (an explicit "this replaced that" —
+> the collection action carries no such statement, and inferring it from two timestamps would be
+> fabricated provenance), specimen types, labels, and any announcement of a block to an external
+> system through Connect (§22 — Connect refuses to apply a released result to a blocked order,
+> which is correct, but nothing *tells* an external system). **Connect also cannot report a
+> recollection**: its collection event is keyless, so a second event for the same order is a
+> replay rather than a second specimen (ADR-070 §4).
 
-**P1 — a first-class specimen entity.** Needed for: one order spanning several specimen types (a CBC
-and a urine culture cannot share a tube, and one collection row per order cannot say "blood taken,
-urine pending"); one specimen satisfying several ordered items; accession identifiers; per-specimen
-received/rejected timestamps; recollection as a linked event.
+**P1 — a first-class specimen entity. [BUILT in its architectural half, 2026-10-01, ADR-070.]**
+`LabSpecimen` exists: any number per order, immutable, carrying when it was recorded and the
+authenticated actor who recorded it. What that bought is the thing a single collection row made
+impossible — **a recollection that preserves the earlier sample.**
+
+What it did *not* buy, and what the rest of this paragraph's original list still names as open:
+one order spanning several specimen **types** (a CBC and a urine culture cannot share a tube, and
+nothing yet says which analysis needs which sample — `TestCatalogEntry` carries no specimen-type
+field, so the type cannot even be derived); one specimen satisfying several ordered items;
+**accession identifiers**; per-specimen received/rejected timestamps; recollection as an explicitly
+**linked** event. All of those are **D-3's participant half** and need a laboratory participant.
 
 **Not required for Launch-1:** container types, volumes, storage and handling rules, aliquots,
 stability windows, chain-of-custody, analyser interfacing.
 
-> A first-class specimen entity is **D-3** in §28: whether Launch-1 needs it is a laboratory-workflow
-> question a real laboratory participant should answer, not an inference from this document.
+> **[Corrected 2026-10-01, DHEALTH-SPECIMEN-001.** D-3 is now **split**, and the distinction matters
+> because this sentence is the one a later reader will quote. The *architectural* question — does a
+> specimen entity exist, is its cardinality truthful, is collection provenance recorded, is a prior
+> specimen preserved — was answered by the operator directing DHEALTH-SPECIMEN-001, and ADR-070
+> implements it. The *participant* question is untouched: which specimen types a laboratory works
+> with and where their governed source is, whether staff need a human-facing accession number,
+> what a label must carry, when a specimen is invalid as a specimen rather than the order becoming
+> `BLOCKED`, whether a mistaken collection record may be voided, and whether an explicit
+> recollection link is needed. **No laboratory participant has been consulted.** Building the entity
+> did not answer any of that and must not be read as having done so.]**
 
 ### Barcode / specimen labels — P1
 
@@ -1280,7 +1306,7 @@ Only where different answers materially change architecture or workflow.
 | **D-1** | ~~**Which new backend authority does Front Desk need**, and does Billing share it or need its own?~~ **RESOLVED IN FULL.** Billing portion 2026-09-28 (ADR-066): its own — `BILLING_CLERK`, asked for as a *capability* rather than a role name. **Front Desk portion RESOLVED 2026-09-30, ADR-069**: three independently grantable capabilities and **no role** — `patient.directory.read`, `patient.register`, and the new **`visit.check_in`**. There is no `FRONT_DESK` role and nothing gates on one; `ORG_ADMIN` + a direct `visit.check_in` grant runs reception with no role change, which is how the browser qualification proves it. `visit.check_in` carries **no clinical read**: a holder cannot open a visit, its note history or its stated reason, even one they created. The answer to "does introducing it change what guards patient-directory reads" is yes, and in the safe direction — `require_clinician` narrowed from six capabilities to four, and the patient-directory routes now ask for `patient.directory.read` directly. | **RESOLVED** (ADR-066 + ADR-069) | **No longer blocks anything.** |
 | **D-2a** | **Who pays whom in a routed order** — lab bills patient, lab bills clinic, or clinic bills patient and settles with lab. **Interim answer 2026-09-28, ADR-066 §3**: each organization invoices only what it actually performed, enforced server-side at the invoice line. **Still open** for commercial arrangements over routed external laboratory work — settlement, commissions, referral fees, revenue sharing, pass-through billing, markup and inter-facility AP/AR are all deliberately unbuilt. | Product / commercial | No longer blocks the billing ticket. Blocks any inter-facility commercial model. |
 | **D-2b** | **What happens when payment is incomplete.** If anyone proposes unpaid → no release, that is clinical policy. | **HUMAN DECISION REQUIRED / CLINICAL POLICY** | Must never be encoded casually. Default until decided: billing never gates clinical release. |
-| **D-3** | **Is a first-class specimen entity required for Launch-1?** ~~(The order-level `BLOCKED` state, P0-4, is needed regardless.)~~ **P0-4 is now BUILT (2026-09-29, ADR-068) and D-3 is unaffected by it** — order-level blocking deliberately models no specimen, so this question is exactly as open as it was. | Product, needs a laboratory participant | Determines whether the lab ticket is small or large. |
+| **D-3** | ~~**Is a first-class specimen entity required for Launch-1?**~~ **SPLIT 2026-10-01 (ADR-070), and only one half is resolved.** **Architectural half — RESOLVED:** the entity exists (`LabSpecimen`, migration `0039`), its cardinality is truthful (`lab_order_id` is deliberately **not** unique), collection provenance is recorded (instant + authenticated actor), and a prior specimen is never overwritten when another is collected. Decided by the operator directing DHEALTH-SPECIMEN-001, which is an architecture decision and **not** a substitute for the conversation below. **Participant half — STILL OPEN, and no laboratory participant has been consulted:** which specimen **types** a laboratory works with and where their governed source is (`TestCatalogEntry` has no such field, so type cannot be derived); whether staff need a human-facing **accession number** distinct from the internal id; what a physical **label** must carry; when a specimen is invalid *as a specimen* rather than the order becoming `BLOCKED`; whether a mistaken collection record may be **voided** and with what audit semantics; whether an explicit **recollection link** is needed and what workflow input could truthfully supply it. **Nobody may read ADR-070 as "specimens are done."** | **Architectural: RESOLVED** (ADR-070) · **Participant: Product, needs a laboratory participant** | No longer blocks modelling a physical sample. Still blocks specimen types, labels, accessioning and any specimen-level rejection. |
 | **D-11** | **Is the block-reason catalog right, and are its French labels a laboratory's own words?** Four reasons ship as **provisional** (ADR-068), exactly the four §16 names. §16 requires confirmation with a laboratory participant before the list is fixed; **that has not happened, and neither the catalog nor the wording has been validated by anyone who works in a laboratory.** To be validated **during human usability / workflow qualification**, by asking a participant how *they* would categorise, in their own words: **analyser downtime · power outage · reagent shortage or unavailability · recollection needed · insufficient sample · damaged sample · incorrect/wrong sample · missing information.** The first four have no category today and go in the free-text note; the last four map to a reason only on our unverified assumption. **No reason is to be added on our own reasoning** — the free-text note stays the honest home for whatever does not fit. | Product, needs a laboratory participant | Does not block — the workflow is complete and qualified. Blocks calling the vocabulary settled, and is itself remaining Lab work. |
 | **D-4** | **Which patient attributes must a receiving laboratory see to confirm the presenting patient?** (`docs/MVP-1.0.md` gap 10.) | Product + clinical safety | Blocks Lab Reception. Must not be invented. |
 | **D-5** | **Diagnosis coding** — free text only, or a code system, and which? Clinician-recorded either way; system-generated never. | Clinical lead | Blocks any structured diagnosis. Free-text note is unaffected. |
@@ -1350,7 +1376,7 @@ Status: **BUILT** · **PARTIAL** · **NOT BUILT**. Every row names the data it m
 | Aujourd'hui (lab) | Lab Staff; Releaser | See lab work owed | Unaccepted, awaiting collection, processing, entry incomplete | Open the next order | Provider visit notes | Lab workflow | **BUILT** |
 | Réception | Reception *(D-1)* | Confirm who this is and why | Patient identity attributes (**D-4**), requested tests, order validity | Confirm arrival | Clinical notes; unrelated history | Orders + identity | **NOT BUILT** |
 | Ordres (lab) | Lab Staff | Work assigned orders | Order, patient, tests, status | Accept / reject | Other labs' orders | Lab workflow | **BUILT** |
-| Prélèvements | Lab Staff | Record collection; flag problems | Order, collection state, block reason | Record collection / block | Result values | Collection + `BLOCKED` | **PARTIAL** — milestone + `BLOCKED`/resolve/history are built (ADR-068) and live on `Ordres`; no separate `Prélèvements` section and no specimen entity (**D-3**) |
+| Prélèvements | Lab Staff | Record collection; flag problems | Order, specimen history (instant + recorded-by), block reason | Record collection / record another specimen / block | Result values; any specimen type, container or label field | Specimens + `BLOCKED` | **PARTIAL** — the milestone, `BLOCKED`/resolve/history and now a **durable specimen history** are built (ADR-070) and live on `Ordres` as a `Prélèvements` panel; still no separate top-level `Prélèvements` section, no specimen types and no labels (**D-3's participant half**) |
 | Saisie des résultats | Lab Staff | Enter structured values | Template fields, units, ranges | Save / complete entry | Release control | Templates + results | **BUILT** |
 | Libération | Releaser | Release results | Entered values, completeness, fingerprint | Release | Administration | Release | **BUILT** |
 | Rectificatifs | Lab Staff; Releaser | Amend after release | Prior version, revision | Release amendment | — | Amendments | **BUILT**, not browser-exercised |
@@ -1656,7 +1682,9 @@ never to what mature EMRs contain.
 
 ### P1 — high value; operable but materially incomplete or manual
 
-Appointments/calendar · Lab Reception screen · first-class specimen entity (**D-3**) · specimen labels
+Appointments/calendar · Lab Reception screen · ~~first-class specimen entity (**D-3**)~~ **[built
+2026-10-01, ADR-070 — architectural half only; specimen types, accessioning and specimen-level
+rejection remain D-3's participant half]** · specimen labels
 · facility profile · facility-owned result templates and offerings · printable result report ·
 browser-qualifying the amendment/correction lifecycle · browser-qualifying the patient status screen ·
 browser-qualifying native patient registration.

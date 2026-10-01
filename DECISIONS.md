@@ -9832,3 +9832,270 @@ Desk product, human-qualified usability, production deployment, or a switch-read
 usability is not claimed** — no receptionist and no clinician has used this surface, no timing has
 been measured against what it replaces, and product law 3 ("faster than what it replaces") therefore
 remains a validated target rather than a current claim.
+
+---
+
+## ADR-070 — ACCEPTED / IMPLEMENTED (2026-10-01, DHEALTH-SPECIMEN-001): a physical specimen is its
+## own durable record, an order may have more than one, and nothing clinical about it is invented
+
+**Date:** 2026-10-01 · **Status:** ACCEPTED (product + architecture), IMPLEMENTED (migration
+`0039_lab_specimens`, `LabSpecimen` in `exchange/models.py`, `record_collection` rewritten in
+`exchange/lab_workflow.py`, `GET …/specimens`, the `Prélèvements` history on `Ordres`) · **Decided
+by:** Liban (DHEALTH-SPECIMEN-001 ticket) · **Resolves:** **D-3's architectural half only** — see §9,
+which is the most important section of this ADR
+
+**Relationship to prior decisions.** DH-EX-011 created `LabSampleCollection`: one row per order
+carrying a single `recorded_at`, explicitly *not* a specimen entity, and explicitly the thing
+`ACCEPTED → IN_PROGRESS` is gated on. ADR-018's DH-011J2 addendum is why its timestamp is
+`recorded_at` and not `collected_at` — no reliable native collection signal existed even on the
+OpenMRS/OpenELIS connector track, so DHealth never infers a physical-world event from a database
+timestamp. ADR-068 built order-level `BLOCKED` and said in its own §8 that it modelled no specimen and
+was "not a partial down-payment on D-3". ADR-067 is why the authority here is a capability and not a
+role. This ADR spends ADR-068's groundwork without contradicting any of it: `BLOCKED` remains the
+order-level cannot-continue fact, and it is what makes a recollection reachable at all.
+
+### 1. The distinction, which is the entire content of the ticket
+
+A **`LabOrder`** is requested diagnostic work. A **`LabSpecimen`** is a physical sample instance
+collected in service of that work. Before this ticket DHealth could not tell those apart.
+
+The concrete harm was in the schema, not the code. `exchange_lab_sample_collections.lab_order_id`
+carries `unique=True` — correct for a once-per-order workflow milestone, and **false as a statement
+about physical reality**. Laboratory medicine is not one-order/one-specimen: a CBC and a urine culture
+cannot share a tube, and a sample that turns out to be unusable is replaced by a second sample rather
+than by an edit to the first. With that constraint in place, every future recollection had exactly two
+available outcomes — overwrite the earlier row, or go unrecorded — and the second is the one that gets
+chosen under deadline pressure.
+
+`exchange_lab_specimens.lab_order_id` is therefore **not unique**. The only uniqueness on the table is
+`(lab_order_id, idempotency_key)`, which is retry safety and not cardinality.
+
+This ticket builds no multi-container workflow and no multi-specimen UI. It refuses to let the schema
+assert something untrue, so that adding either later is not a destructive redesign.
+
+### 2. The source-of-truth invariant, and why it is enforceable rather than documented
+
+Two rows now exist per collection, and they mean different things:
+
+| Row | Meaning | Cardinality |
+|---|---|---|
+| `LabSampleCollection` | the **order-level workflow milestone** — what `ACCEPTED → IN_PROGRESS` is gated on | at most one per order |
+| `LabSpecimen` | a **physical sample instance** — how many, when each, by whom | any number per order |
+
+**The invariant: from this ticket onward a milestone is never created without a first specimen, and
+both take one `utc_now()` evaluated once**, so the milestone's instant and the earliest specimen's
+instant are the *same stored value* rather than two values that agree. Two clock reads would have
+differed by microseconds and falsified the invariant in the most confusing possible shape — it would
+read as noise.
+
+What makes this enforceable is that `LabWorkflowRepository.record_collection` is the **only** code
+path in the repository that writes either row. There is deliberately no sibling "create a specimen"
+entry point, and `connect/apply.py`'s source-observed collection event goes through that same method
+rather than beside it. Had Connect kept creating milestone-only rows, the historical asymmetry below
+would have leaked into new data forever and the invariant would have been false for a live population
+while every test still passed.
+
+### 3. Historical rows: the asymmetry is permanent, and that is the honest answer
+
+**Nothing is backfilled.** A pre-`0039` order with a milestone and no specimen means exactly *"the
+collection step was recorded in DHealth; how many physical samples there were, and who collected them,
+is not known"*.
+
+Manufacturing one specimen per existing milestone would assert two facts no migration can know: a
+cardinality of exactly one, and a collector identity — the DH-EX-011 milestone never recorded an actor
+at all, which is one of the gaps this ticket closes *going forward only*. `0038_visit_check_in`
+settled the identical question the identical way for `checked_in_by`: *"for every pre-0038 visit it
+could only ever be filled by guessing, which `AGENTS.md` forbids."*
+
+`record_collection` returns `specimen=None` for such an order rather than inventing one, and the
+laboratory screen keeps showing the milestone line rather than claiming "Prélèvements (0)", which
+would be a cardinality claim of its own.
+
+### 4. Retry safety without a false 1:1
+
+These are different facts and the design keeps them apart:
+
+- **a network retry** — same intended collection, resent → **one** specimen;
+- **a second physical sample** — a genuinely new collection → **two** specimen rows, the first
+  preserved.
+
+Carried by an explicit client request key, `idempotency_key`, reusing `LabOrder.idempotency_key`'s own
+vocabulary and its `(scope, key)` discipline. Enforcing idempotency by allowing one specimen per order
+would have made retries easy by making the domain false.
+
+The key is **nullable**, which preserves DH-EX-011's keyless contract byte-for-byte for its existing
+callers. A keyless call can record a first collection and can never record a second: the second is a
+replay. **That is a real recorded gap, not a property to be proud of** — a source LIS emitting two
+genuine collection events through Connect gets a replay on the second, so a partner-reported
+recollection is not representable today. Closing it needs a Connect envelope change carrying a
+per-event identity, which this ticket does not make.
+
+On the client side the key is minted per *intended collection* rather than per request, and held in a
+ref that the success path clears. A key minted per request would send a different key on the retry
+after an uncertain response, and a first write landing late would then become a second specimen — the
+exact double-click failure the mechanism exists to prevent. This was a real defect in the first
+implementation, caught by review before any browser run, and `SP-UI-1` is the test that pins it.
+
+### 5. What is deliberately absent, and why each absence is a decision
+
+**No specimen status enum.** No `COLLECTED`/`RECEIVED`/`REJECTED`/`DISCARDED`/`RECOLLECTED`. A sample
+that cannot be worked is already expressible: the *order* becomes `BLOCKED` with a `LabOrderBlock`
+episode naming `SPECIMEN_UNUSABLE` or `SPECIMEN_INSUFFICIENT` (ADR-068), which is an operational
+statement a worker made rather than a clinical adequacy judgement DHealth is entitled to record. A
+second state machine would have had to be kept consistent with the first forever, and its vocabulary
+would have been invented here rather than validated by anyone who works in a laboratory.
+
+**No specimen type, container, tube colour, anticoagulant, volume, anatomical source, storage
+location, quality grade or rejection category.** Not "not yet" — absent. `TestCatalogEntry` carries no
+specimen-type field, so the type cannot be *derived* truthfully either, and inventing one is what
+`AGENTS.md`'s "never invent clinical content" rule forbids. The endpoint now actively **refuses**
+`specimen_type` and `collected_at` with a 422 naming the field, rather than ignoring them.
+
+**No human-facing accession number.** `id` is a server-generated UUID, durable and suitable for a
+later label ticket to reference. It is emphatically not an accession identifier, nothing renders it as
+one, and the browser suite asserts it does not appear on screen.
+
+**No `recollection_of_specimen_id`.** The question *"was this sample collected because that earlier one
+had to be replaced?"* cannot be answered from the workflow input that exists: the collection action
+carries no such statement, an order may legitimately require more than one sample, and inferring the
+link from two timestamps would be fabricated provenance. Multiple immutable rows plus their recorded
+order preserve what is known — how many, when each, by whom — without claiming to know why.
+
+**No identity-confirmation ceremony.** No name-and-DOB prompt, no wristband scan, no national ID. D-4
+remains open and this ticket does not quietly solve it.
+
+### 6. Lifecycle, and why `IN_PROGRESS` is not a widening
+
+A **first** specimen (and with it the milestone) may only be created while `ACCEPTED` — DH-EX-011's
+rule, unchanged, so a legacy `IN_PROGRESS`/`COMPLETED` order that never had a milestone still cannot
+retroactively acquire one.
+
+An **additional** specimen, for an order whose milestone already exists, may be recorded while the
+order is in `SPECIMEN_RECORDABLE_ORDER_STATUSES` = `{ACCEPTED, IN_PROGRESS}` — the same two values
+`BLOCKABLE_ORDER_STATUSES` already names, meaning "work this laboratory has taken and has not yet
+released". A separate frozenset rather than an alias, because the two answer different questions and a
+future change to either must redden a test rather than silently move the other.
+
+`IN_PROGRESS` has to be there. `LabOrderBlock.resolve` restores `blocked_from_status`, there is no path
+from `IN_PROGRESS` back to `ACCEPTED`, and `docs/NATIVE-OPERATING-PRODUCT.md` §16's own worked example
+is an order blocked *from* `IN_PROGRESS` for an unusable specimen. An `ACCEPTED`-only rule would have
+made a second sample unrecordable for exactly the situation §16 describes.
+
+This is **not** a widening of the block-entry rule, which governs where a block may start and is
+untouched.
+
+### 7. Authority, tenancy, privacy, audit
+
+**Authority is `lab.queue.work`, and no capability was added.** Recording a physical specimen is
+laboratory queue work, performed by the same person who accepts the order and blocks it; a
+`lab.specimen.collect` capability would be the speculative seam ADR-067 §3A forbids. `lab.result.release`
+and `billing.operate` stay entirely separate and are each proved insufficient. `patient.directory.read`
+is **not** required — requiring it would mean every phlebotomist needed cross-facility
+patient-directory access to do their job.
+
+**Ownership is derived, never supplied.** `lab_organization_id` comes from the URL *after* `LabSelection`
+proves that laboratory owns the order; `recorded_by_identity_id` comes from the authenticated principal.
+A request body that could name a collector would let one worker attribute a sample to a colleague who
+never touched it. Both are `NOT NULL`: every caller has a real `exchange_identities` row, a human
+through `AuthenticatedPrincipal` and a Connect agent through `ConnectorServicePrincipal.identity_id`,
+which exists for exactly this purpose.
+
+**The specimen read is an exact closed projection** — `id`, `order_id`, `recorded_at`,
+`recorded_by_identity_id`, `idempotency_key`, and `extra="forbid"`. No patient, visit, reason for visit,
+note, diagnosis, result, review or invoice. A specimen endpoint must not become a side door into the
+clinic record.
+
+**Audit reuses `resource_type="lab_order"`**, matching every lab event including `lab_order_blocked`,
+whose episode row has its own UUID and its own by-id endpoint and still deliberately did not get a
+per-child resource type. One new event, `lab_specimen_recorded`, fires once per specimen row created;
+`lab_sample_collection_recorded` keeps firing once per milestone created. The first collection writes
+both, an additional specimen writes only the first, and a replay writes neither — decided from explicit
+booleans on the returned outcome rather than by comparing two timestamps, which would have been the
+inference this package refuses everywhere else.
+
+### 8. Immutability, and the correction question left open
+
+No code path updates a row of `exchange_lab_specimens` after insert, and no `PATCH`/`PUT`/`DELETE`
+route exists that could — asserted over the router's real route table, not by probing one guessed URL.
+
+There is **no void or correct path**, and that is left open rather than invented. A mistaken collection
+record is history; `LabOrderBlock` chose the same shape ("a block that turned out to be a mistake is
+resolved with a note saying so, not erased"). Whether a specimen record may be voided, and with what
+audit semantics, is a new open decision (§9).
+
+Migration `0039`'s downgrade **refuses** while any specimen row or any `lab_specimen_recorded` audit row
+exists, following `0014`'s own contract. Both guards run before any DDL, so a refusal leaves the
+database completely unchanged. Nothing is deleted to make a downgrade pass; that is an operator
+decision, never a migration's.
+
+### 9. D-3 is SPLIT, not closed — and this is the part a later reader must not misread
+
+**D-3 asked: "is a first-class specimen entity required for Launch-1?" Its recorded decision kind is
+"Product, needs a laboratory participant."** No laboratory participant has been consulted. What
+happened instead is that the operator directed this ticket, which is a legitimate decision about
+*architecture* and is not a substitute for the participant conversation.
+
+So D-3 splits:
+
+| Half | Status |
+|---|---|
+| **Architectural** — does a specimen entity exist; is its cardinality truthful; is collection provenance (when, who) recorded; is a prior specimen preserved when another is collected | **RESOLVED** by this ADR |
+| **Participant** — which specimen *types* a laboratory works with and where their governed source is; whether staff need a human-facing accession number distinct from the internal id; what a physical label must carry; when a specimen is invalid *as a specimen* rather than the order becoming `BLOCKED`; whether and how a mistaken collection record may be voided; whether an explicit recollection link is needed and what workflow input could truthfully supply it | **OPEN — needs a laboratory participant** |
+
+**Nobody may read this ADR as "specimens are done."** Labels, barcodes, specimen types,
+accessioning, analyser interfacing, inventory and chain of custody are all unbuilt, and the first four
+are blocked on the participant half above.
+
+**D-4** (which patient attributes a receiving laboratory needs to confirm identity), **D-8**
+(auditing successful sensitive reads) and **D-11** (the block-reason catalogue's validation) are
+**untouched and exactly as open as they were.** This ticket added no reason vocabulary, no identity
+ceremony and no read auditing.
+
+### 10. Consequences
+
+- One new table; one widened audit `event_type` CHECK; one new audit event type; one new read
+  endpoint; the existing `record-collection` endpoint gains an **optional** body with exactly one
+  field, so DH-EX-011's bodyless request stays valid verbatim.
+- No separate index on `lab_order_id`: the `(lab_order_id, idempotency_key)` unique constraint is a
+  btree with `lab_order_id` leading, so it already serves both the per-order history read and the
+  per-key replay lookup. A second index would be dead weight on every insert.
+- `record_collection`'s return type changed from a tuple to `LabCollectionOutcome`, which reports
+  milestone creation and specimen creation as **two** booleans. The three outcomes are genuinely
+  distinct and the audit writer must not have to guess which happened.
+- Specimen history is its own bounded read, not a field on the work queue — specimen count per order is
+  unbounded in principle and the queue is a fixed-width view. `list_blocks_for_order` made the same
+  choice for block history, and `collection_recorded_at` is unchanged.
+- `exchange_lab_specimens` is in `demo_seed._WORKFLOW_TABLES`, ordered before `exchange_lab_orders`.
+- The UI's specimen history **replaces** the single milestone timestamp once any specimen exists
+  rather than sitting beside it: after a second collection the milestone line would keep showing the
+  *first* instant next to a two-row history, which reads as a contradiction.
+
+### 11. One defect this ticket introduced, and one weak test it exposed
+
+**The duplicate-specimen defect**, described in §4: both confirmation handlers minted a fresh
+idempotency key, while the recovery comment promised the retry would reuse one. Found by review before
+any browser run; fixed with `??=`; pinned by `SP-UI-1` and `SP-UI-2`.
+
+**A concurrency test that passed without the thing it tested.** The twelve-thread barrier test for
+concurrent identical collections stayed green with `.with_for_update()` deleted — the GIL plus
+per-thread session setup staggers the threads enough that each commits before the next reads, so the
+race it is named after did not reliably happen. Found by negative control NC-SP-11, which is exactly
+what negative controls are for. `PG-SPEC-1a` now creates the contention deterministically with two
+transactions the test owns, and reddens on the mutation; the barrier test is kept with a docstring that
+says plainly what it does and does not prove.
+
+### 12. What may and may not be claimed
+
+**May:** Hawva records physical specimen collection as a durable laboratory record linked to the
+diagnostic order, preserving collection provenance — when, and the authenticated actor who recorded it —
+and preserving prior specimen records when another collection occurs. A retry of the same collection
+action does not create a second specimen. Specimen access is capability-driven, tenant-scoped to the
+laboratory the order was routed to, and carries no clinic clinical content.
+
+**May not:** full specimen management, an accessioning system, specimen types, barcode or label
+workflow, validated specimen identification, a validated specimen-rejection vocabulary, chain of
+custody, inventory, analyser integration, human usability, staff-ready, switch-ready, production-ready,
+pilot-ready, or clinically live. **Human usability is not claimed** — nobody who works at a laboratory
+bench has used this surface, no timing has been measured against what it replaces, and product law 3
+("faster than what it replaces") therefore remains a validated target rather than a current claim. No
+real-patient data has been through any of it.
