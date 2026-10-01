@@ -6,6 +6,100 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-10-01, DHEALTH-LAB-OFFERINGS-001, directly on `master`.** From `7fe77fb`. **A laboratory can
+now see and change which analyses it accepts through Hawva — and the model it changes had existed
+since DH-EX-003.** Alembic head is **unchanged at `0039_lab_specimens`**, exactly one head: this
+ticket added **no migration, no capability, no role and no new state**. **ADR-071.**
+
+**The honest headline is that the offering model was already built and already enforced, and this
+ticket says so.** `LabOffering` carried `lab_organization_id` + `catalog_entry_id` + `active` with
+`UNIQUE(lab_organization_id, catalog_entry_id)`; it copied none of the catalogue's identity;
+`OfferingInactiveConflict` already refused silent reactivation; both mutations were already audited;
+`eligible-labs` already filtered on `active`; `assign_by_provider` already revalidated availability
+**inside its locked mutation**; and `_get_offerings_for_order` already deliberately did *not* filter on
+`active` so a disabled offering kept its historical commitment. The ticket's success condition was met
+before the ticket started, and `PROJECT_STATE.md` maps all of it field by field — recorded **before any
+code was written**, so a build-shaped prompt could not become the deliverable.
+
+**What was genuinely missing was a laboratory that could look at it.** The endpoints were reachable
+only by an API client, and `docs/NATIVE-OPERATING-PRODUCT.md` had the honest status recorded for
+months: `Lab offerings | BACKEND ONLY | APIs exist; no facility-facing screen`. An administrator
+holding `facility.configure` could not answer *"which analyses do we accept?"* anywhere in the product.
+
+**`Analyses réalisées` now lives on `Services et tarifs`, and is deliberately not a new section.**
+That screen already *is* the facility-configuration surface for what a facility offers and what it
+charges; a second entry over the same subject is the two-doors-into-one-room problem
+`staffSections.ts` refuses elsewhere — the same reasoning that kept `Réception` from being added over
+the `Nouveaux` queue. The section is now reachable through `facility.configure` as well as
+`billing.configure_prices`, and **the two halves are gated independently**: a facility administrator
+sees the analyses and not the price editor, a price-setter sees prices and never even fires the
+offerings request, and holding both shows both.
+
+**Three row states, not two**, because the third is the one a boolean hides: *non proposée par ce
+laboratoire* / *accepte les nouveaux ordres* / *n'accepte plus de nouveaux ordres*. A service never
+declared is not the same fact as one declared and switched off.
+
+**The name on screen is always the catalogue's.** The offering carries no name, so the panel reads the
+canonical catalogue and the offerings separately and joins on `catalog_entry_id` — there is no second
+copy of a service name that could disagree. `NC-OF-9` is what holds that.
+
+**One real defect, in an existing code path.** `set_offering_active` did `session.get`, compared, and
+wrote, with **no row lock**. `outcome` is not cosmetic — `api.py` writes it straight into the
+`lab_offering_status_changed` audit row, so it is what an administrator reads back to answer *"when was
+this analysis turned off, and by whom?"*. Unlocked, two administrators acting at the same instant both
+read `active=False`, the second's `UPDATE` blocked and then proceeded anyway on its stale decision, and
+**two audit rows described one state change**. The stored value was right and the accountability record
+was wrong. Now `select(...).with_for_update()`. `NC-OF-13` reddens `PG-OF-1a` without it, and the real
+stack confirmed it: the browser run's disable-then-re-enable produced **exactly two** `updated` audit
+rows for two changes, not four.
+
+**The deactivation rule is the half that could cause harm, and it has the most evidence.** Disabling
+stops NEW ordering and nothing else: the already-routed order keeps its status, its selection and its
+`LabOrderItem`'s frozen code and display-name snapshots; the laboratory's own queue still lists it; and
+the laboratory can still accept and work it. The confirmation says so to the person doing it — *"Les
+ordres déjà reçus ne changent pas."* `NC-OF-6` cancels matching orders on disable and reddens.
+
+**Five truths stay apart, and each has its own test** because letting any one imply another is how this
+feature goes wrong: service identity (`TestCatalogEntry`), laboratory availability
+(`LabOffering.active`), organization relationship (`ProviderLabRoute`, pinned in both directions),
+billing price (`LabPrice`; an offering needs none and **D-2a stays open**), and specimen requirements
+(**not modelled, D-3's participant half, fourteen forbidden column names**).
+
+**Evidence actually executed:** 27 new adapter tests at the HTTP edge and the domain boundary; 11 new
+real-PostgreSQL-16.15 tests covering the row lock deterministically, enable-vs-disable, the
+order-versus-disable race, the historical rule, the constraint set and both foreign keys; **13
+browser phases** against real Chromium, Caddy, Keycloak 26.7.1 and PostgreSQL 16 on a **rebuilt** stack
+*proved* to carry both halves of the change; **61 further browser phases across six sibling
+suites**, each from its own reset baseline, including the billing and capabilities suites that assert
+the two files this ticket edited; the whole adapter suite **2076 passed, 260 skipped**
+(reconciling exactly: 2049 + 27 unit, 249 + 11 PostgreSQL); **1009 UI unit tests across 62
+files, reconciled**; **15 negative controls**, all reverted byte-for-byte; `ruff`, `ruff format`,
+`tsc -b`, `tsc -p e2e/tsconfig.json` clean; `oxlint` **0 errors and 0 new warnings** against the
+pre-ticket baseline on the three changed files; the UI build and its no-secrets check clean.
+
+**🛑 Three controls did not redden on the first attempt, and all three times the control was right.**
+`NC-OF-1` showed the repository's ownership filter was defence in depth that nothing tested;
+`NC-OF-4` showed the model and the migration are two statements of one rule and each needs a guard;
+`NC-OF-5` showed the availability check has a **second, independent** defence, so an order can never be
+routed for a disabled analysis even if that line is deleted — a stronger property than the test had
+been claiming. All three tests were strengthened and the reasons are recorded.
+
+**Five questions this ticket exposed and did not answer**, all `Human Decision Required`: who at a real
+laboratory maintains this list; whether temporary unavailability needs richer semantics than
+active/inactive; whether local aliases or laboratory-owned codes are needed; whether each laboratory
+may customise its result templates; whether offered-service configuration needs effective dates. None
+was built.
+
+**D-3's participant half, D-4, D-8, D-11 and D-2a are untouched and exactly as open as they were.**
+
+**Human usability is UNQUALIFIED.** Nobody who administers a laboratory has used this screen, nothing
+was timed, and law 3 remains a validated target rather than a current claim. Green browser phases are
+evidence that the software works, not that the workflow is workable. **Pilot-ready is still not
+clinically live.** All data synthetic; no facility database contacted; GitHub Actions untouched; nothing
+pushed.
+
+### Previous as-of — 2026-10-01, DHEALTH-SPECIMEN-001
+
 **2026-10-01, DHEALTH-SPECIMEN-001, directly on `master`.** From `7f4e6f5`. **A physical specimen is
 now its own durable record, an order may hold more than one, and a recollection no longer has to
 overwrite the sample it replaces.** Alembic head moves `0038_visit_check_in` → **`0039_lab_specimens`**,

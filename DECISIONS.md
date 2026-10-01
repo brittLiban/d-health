@@ -10099,3 +10099,206 @@ pilot-ready, or clinically live. **Human usability is not claimed** — nobody w
 bench has used this surface, no timing has been measured against what it replaces, and product law 3
 ("faster than what it replaces") therefore remains a validated target rather than a current claim. No
 real-patient data has been through any of it.
+
+---
+
+## ADR-071 — ACCEPTED / IMPLEMENTED (2026-10-01, DHEALTH-LAB-OFFERINGS-001): laboratory service
+## availability was already modelled; what was missing was a laboratory that could see it
+
+**Date:** 2026-10-01 · **Status:** ACCEPTED (architecture restated, one defect fixed), IMPLEMENTED
+(`Analyses réalisées` on `Services et tarifs`, `facility.configure` reaching that section,
+`set_offering_active` row lock) · **Decided by:** Liban (DHEALTH-LAB-OFFERINGS-001 ticket) ·
+**Migration:** **none** — see §2 · **Resolves:** the `BACKEND ONLY` status
+`docs/NATIVE-OPERATING-PRODUCT.md` had recorded against laboratory offerings since
+DH-MVP-ONBOARD-001
+
+**Why this ADR exists at all, given that it builds almost nothing.** Because the honest record of this
+ticket is a *scoping* finding, and a scoping finding that lives only in a commit message gets
+rediscovered. `LabOffering` has existed since DH-EX-003. The server has enforced it at order
+assignment since DH-MVP-ONBOARD-001. A future reader asking "when did Hawva learn which analyses a
+laboratory accepts?" must land on DH-EX-003, not here — and must also learn that until this ticket no
+laboratory could *look* at it.
+
+### 1. What already existed, and the five truths it already kept apart
+
+`PROJECT_STATE.md`'s entry for this ticket maps it field by field. The short form:
+
+| Truth | Owner, before this ticket |
+|---|---|
+| **service identity** | `TestCatalogEntry` — `code`, `display_name`, `version`, `active`, `is_synthetic` |
+| **laboratory availability** | `LabOffering` — `lab_organization_id` + `catalog_entry_id` + `active`, `UNIQUE(lab_organization_id, catalog_entry_id)` |
+| **organization relationship** | `ProviderLabRoute.active`, checked separately (`ProviderLabRouteNotActive`) |
+| **billing price** | `LabPrice`, keyed on the offering, superseded rather than mutated |
+| **specimen requirements** | **nobody** — not modelled anywhere, and still not |
+
+The offering already copied **none** of the canonical identity: no name, no unit, no reference range,
+no result field. It already had `local_test_code` for the laboratory's own alias.
+`OfferingInactiveConflict` already refused to silently reactivate. `lab_offering_created` and
+`lab_offering_status_changed` were already audited with actor and organization. `eligible-labs` already
+filtered on `LabOffering.active`, and `assign_by_provider` already revalidated availability **inside
+its locked mutation** rather than trusting order-creation time. `_get_offerings_for_order` already
+deliberately did *not* filter on `active`, with the historical-commitment reason written at the call
+site.
+
+**So the ticket's success condition was already met**, and this ADR's job is to say so and to record
+the two things that were not.
+
+### 2. There is no migration, and that is a decision rather than an omission
+
+The head stays `0039_lab_specimens`. The relationship exists; nothing needed a column.
+
+**No `updated_at` and no `changed_by` column was added**, which the ticket invited considering. Who
+changed an offering and when is already recorded, truthfully and for every row including the ones that
+predate this ticket, by the two audit events. A column would be a second, weaker copy of an audit row,
+and for every existing offering it could only ever be filled by guessing. `0038_visit_check_in`
+refused `checked_in_by` on exactly this reasoning and it applies here unchanged.
+
+`PG-OF-7` asserts the single head and the real `pg_constraint` contents, so "no migration" is a
+checkable claim rather than a sentence in this document.
+
+### 3. The defect: `set_offering_active` compared an unlocked read
+
+`outcome` is not cosmetic. `api.py` writes it straight into the `lab_offering_status_changed` audit
+row, so it is what an administrator reads back to answer *"when was this analysis turned off, and by
+whom?"*.
+
+Deciding it from `session.get` made that answer wrong under concurrency. Two administrators enabling
+the same offering at the same instant both read `active=False`; the second one's `UPDATE` blocks on
+the first's row lock and then proceeds anyway, because its *decision* was already made against a stale
+read. Both report `"updated"` and **two** audit rows describe **one** state change. The stored value is
+right and the accountability record is wrong — it says the service was switched twice when it was
+switched once, which is precisely the question that table exists to answer.
+
+Now `select(...).with_for_update()`, so the comparison happens against committed truth and the loser
+correctly reports `"unchanged"` and writes nothing. Same discipline `lab_workflow.py` applies to every
+mutation it owns. `create_offering` needed no change: it is already insert-first-wins with
+`begin_nested()` and `IntegrityError` recovery, which `PG-OF-5` pins.
+
+### 4. The surface: `Analyses réalisées`, and why it is not a new section
+
+A laboratory administrator holding `facility.configure` could not answer *"which analyses do we
+accept?"* anywhere in the product. `docs/NATIVE-OPERATING-PRODUCT.md` had the honest status recorded —
+`BACKEND ONLY | APIs exist; no facility-facing screen` — and §30's `Paramètres` row said `Add — P1`.
+
+**No new top-level section was added.** `Services et tarifs` already *is* the facility-configuration
+surface for what a facility offers and what it charges, and a second entry over the same subject would
+be the two-doors-into-one-room problem `staffSections.ts` refuses elsewhere — the same reasoning that
+kept `Réception` from being added over the `Nouveaux` queue.
+
+`availableSections` now reaches that section through `facility.configure` as well as
+`billing.configure_prices`. The capability's own French description already said this was its subject,
+before the ticket existed: *"Gérer le catalogue, les modèles de résultats et la fiche de
+l'établissement."*
+
+**The two halves of the screen are gated independently**, exactly as `Facturation`'s till and price
+halves already are. A `facility.configure` holder sees the analyses and not the price editor; a
+`billing.configure_prices` holder sees the prices and never even fires the offerings request. Holding
+both shows both. Setting what a facility charges and deciding what it accepts are different
+authorities and ADR-066 §2 already keeps them in different hands.
+
+**Two reads joined in the browser**, and the split is the contract rather than a round-trip missed.
+`LabOffering` carries `catalog_entry_id` and no name, so the panel reads the canonical catalogue for
+names and the offerings for availability and joins on `catalog_entry_id`. There is no second copy of a
+service name that could disagree with the catalogue.
+
+**Three row states, not two**, because the third is the one a boolean hides: *non proposée par ce
+laboratoire* / *accepte les nouveaux ordres* / *n'accepte plus de nouveaux ordres*. A service never
+declared is not the same fact as one declared and switched off, and collapsing them would tell an
+administrator they had turned something off when they had never offered it.
+
+### 5. The deactivation rule, which is the half that could cause harm
+
+Disabling an offering stops **new** ordering and does nothing else:
+
+- the already-routed order keeps its status, its `LabSelection`, and its `LabOrderItem`'s frozen
+  `catalog_code_snapshot`/`catalog_display_name_snapshot`;
+- the laboratory's own queue still lists it — a queue that dropped the order would be the same harm as
+  cancelling it, reached by a different route;
+- the laboratory can still accept, collect, process, enter and release it.
+
+The confirmation wording carries this to the person doing it: *"Les ordres déjà reçus ne changent
+pas."* That sentence is the difference between an administrator switching something off confidently
+and one worrying they have just cancelled a patient's test. `NC-OF-6`, which cancels matching orders
+on disable, is the control that proves the rule is enforced rather than merely intended.
+
+### 6. What a disable does **not** reach, and what an offering is **not**
+
+**An active offering is not authorization to send work.** *"Lab X performs CBC"* and *"Clinic Y may
+send work to Lab X"* are different facts, both required, and both directions are pinned: an active
+offering with no active route is refused, and an active route with a disabled offering is refused.
+`NC-OF-7` removes the route check and reddens.
+
+**An offering needs no price.** Availability and pricing are separate and nothing gates on payment.
+**D-2a stays open.** `NC-OF-8` makes a new offering inert until priced and reddens.
+
+**An offering carries no specimen configuration** — no type, tube, container, volume, collection
+method, anatomical site, anticoagulant, accession format or barcode content. That a laboratory's
+offering is the plausible eventual home for *"this analysis needs this kind of sample"* is exactly why
+`NC-OF-15` exists: the next author will find it natural to add one, and it is **D-3's participant
+half**, a clinical decision nobody has made. `TestCatalogEntry` has no specimen field either, so the
+type cannot even be derived.
+
+**No per-laboratory result template customization**, no units, no reference intervals, no
+age/sex-specific ranges, no interpretation rules, no analyzer configuration.
+
+**No marketplace.** No ranking, ratings, reviews, cheapest-first sorting, public discovery or patient
+shopping. `LabRoutingStep.tsx`'s own docstring already recorded that the Clinic-facing client has no
+marketplace methods to call at all, and that is unchanged.
+
+### 7. Connect compatibility
+
+The offering belongs to the **organization**, not to the Native Lab UI: `lab_organization_id` plus
+`catalog_entry_id`, with no Native-only column and nothing keyed to a connector installation. A future
+Connect enrolment can populate the same rows, and `untemplated_native_entries_in_session` already
+treats a CONNECT laboratory differently by construction (its result structure is the partner's).
+
+**No vendor adapter was built and no real-vendor compatibility is claimed.** What is claimed is only
+that the schema would not need replacing.
+
+### 8. One finding worth recording: the availability check has two independent defences
+
+`NC-OF-5` removed `assign_by_provider`'s own active-offering check and the stale-browser test stayed
+green. Probed rather than assumed: the refusal still arrived, from
+`is_operationally_ready_in_session`. So **an order can never be routed for a disabled analysis even if
+that specific line is deleted** — a stronger safety property than the test was claiming.
+
+What the specific check protects is **diagnostic precision**, which `selection.py` protects
+deliberately: without it the clinic is told the laboratory *"cannot currently receive production work
+— its facility enrollment is blocked, or it lacks the staffing DHealth requires"*, naming neither the
+analysis nor the cause. The test now asserts the refusal names the offering, which is the property
+worth having.
+
+### 9. Open decisions this ticket exposed and did not answer
+
+Recorded as **Human Decision Required**, in `PROJECT_STATE.md`:
+
+1. **Who at a real laboratory maintains this list**, and is `facility.configure` the right shape for
+   them, or is managing the catalogue a different job from administering the facility?
+2. **Does temporary unavailability need richer semantics than active/inactive** — an analyser down for
+   two days is operationally different from a service the laboratory has stopped offering, and today
+   both are one boolean.
+3. **Do laboratories need local aliases or their own codes** beyond `local_test_code`, which exists,
+   is informational, and is surfaced nowhere?
+4. **May each laboratory customise its result templates**, which the schema already permits
+   (`LabResultTemplate` is offering-scoped) and no screen exposes?
+5. **Does offered-service configuration need effective dates** — "we stop accepting this from the
+   first of the month" — rather than taking effect at the instant of the click?
+
+**D-3's participant half, D-4, D-8 and D-11 are untouched and exactly as open as they were.** This
+ticket added no specimen field, no identity ceremony, no successful-read auditing and no reason
+vocabulary.
+
+### 10. What may and may not be claimed
+
+**May:** Hawva records which diagnostic services a laboratory is configured to receive through the
+network, a laboratory administrator can start and stop accepting each one through the product, and new
+clinic orders are limited to currently eligible service/laboratory combinations — enforced by the
+server inside the assignment transaction, not by the browser. Disabling an offering stops new orders
+without changing historical orders.
+
+**May not:** complete laboratory catalogue management, real-world service-availability accuracy,
+laboratory accreditation, clinical validation of service names, specimen requirements, pricing
+transparency, universal laboratory discovery, a marketplace, human usability, staff-ready,
+switch-ready, production-ready, pilot-ready, or clinically live. **Human usability is not claimed** —
+nobody who administers a laboratory has used this screen, nothing was timed, and product law 3
+("faster than what it replaces") remains a validated target rather than a current claim.

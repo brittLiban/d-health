@@ -263,7 +263,8 @@ Verified by reading code during this ticket. Evidence levels:
 | `Équipe et accès` — list, deactivate, reactivate, add/remove role | BUILT + RUNTIME-QUALIFIED | DHEALTH-NATIVE-ACCESS-001 |
 | Last-active-administrator invariant | BUILT + RUNTIME + PG-QUALIFIED | ADR-063 |
 | Platform facility enrollment, readiness, routing, connectors | BUILT, **NOT browser-exercised** | Platform scope, not facility-owned |
-| Lab offerings and result templates | BACKEND ONLY | APIs exist; no facility-facing screen |
+| Lab offerings | **BUILT + RUNTIME-QUALIFIED** | ADR-071. `Analyses réalisées` on `Services et tarifs`, gated on `facility.configure`. A laboratory can see which analyses it accepts and start or stop accepting each one; disabling stops NEW orders and changes nothing historical |
+| Lab result templates | BACKEND ONLY | APIs exist; no facility-facing screen. **Unchanged by ADR-071**, which deliberately did not fold result structure into availability |
 | Lab pricing | BACKEND ONLY | `LabPrice` exists; no screen; see §18 |
 | **Organization profile, contact details, hours** | **NOT BUILT** | — |
 | **Facility-owned service/price administration** | **NOT BUILT** | — |
@@ -695,7 +696,7 @@ changes.
 | **Réception** | **Not added** — `Ordres` opening on `Nouveaux` *is* this surface (§42, 2026-09-30). A second navigation entry over the same projection would be two doors into one room. Still open for a walk-in laboratory (§17), which is a different question |
 | **Prélèvements** | **Add — P1** for the entity; the blocking part is P0-4 below |
 | **Facturation** | **Add — P0** (§18) |
-| **Paramètres** | **Add — P1** — offerings, prices, templates are backend-only today |
+| **Paramètres** | **Not added as a section** — `Services et tarifs` already *is* the facility-configuration surface, and ADR-071 put laboratory offerings on it rather than opening a second door over the same subject (the reasoning `Réception` records above). Result templates and the facility profile remain backend-only and are the remaining content a `Paramètres` section would hold |
 
 ### The questions a Lab specification must answer
 
@@ -931,9 +932,9 @@ carry the result.
 |---|---|---|
 | `Équipe et accès` | **BUILT** | — |
 | Organization profile — name, address, phone | NOT BUILT | P1 |
-| Services and prices | NOT BUILT (backend partial for labs) | **P0 with billing** |
+| Services and prices | **BUILT** — clinic services and prices (ADR-066); laboratory *offerings* added 2026-10-01 (ADR-071) on the same screen, gated independently | — |
 | Lab result templates | BACKEND ONLY | P1 |
-| Lab offerings | BACKEND ONLY | P1 |
+| Lab offerings | **BUILT** (2026-10-01, ADR-071) | — |
 | Provider–lab routing (view; edit as policy allows) | BACKEND ONLY, platform-scoped | P1 |
 | Opening hours | NOT BUILT | P2 — only if a workflow needs it |
 | Notification configuration *status* | NOT BUILT | P2 — read-only status, never credentials |
@@ -1685,7 +1686,8 @@ never to what mature EMRs contain.
 Appointments/calendar · Lab Reception screen · ~~first-class specimen entity (**D-3**)~~ **[built
 2026-10-01, ADR-070 — architectural half only; specimen types, accessioning and specimen-level
 rejection remain D-3's participant half]** · specimen labels
-· facility profile · facility-owned result templates and offerings · printable result report ·
+· facility profile · facility-owned result templates · ~~offerings~~ **[built 2026-10-01,
+ADR-071]** · printable result report ·
 browser-qualifying the amendment/correction lifecycle · browser-qualifying the patient status screen ·
 browser-qualifying native patient registration.
 

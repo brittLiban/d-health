@@ -1,5 +1,22 @@
 # Current State — Daher Health
 
+> **Laboratory service availability, 2026-10-01 (DHEALTH-LAB-OFFERINGS-001, ADR-071):** a
+> laboratory can now see and change which analyses it accepts through Hawva, on
+> `Services et tarifs`, gated on `facility.configure`. **The model it changes is not new** --
+> `LabOffering` has existed since DH-EX-003 and the server has enforced it at order assignment
+> since DH-MVP-ONBOARD-001; what was missing was any screen, which
+> `docs/NATIVE-OPERATING-PRODUCT.md` had recorded as `BACKEND ONLY` for months.
+>
+> Disabling an analysis stops **new** orders and changes nothing historical: the already-routed
+> order keeps its status, its selection and its frozen service snapshots, and the laboratory can
+> still work it. One real defect fixed -- `set_offering_active` compared an unlocked read, so two
+> simultaneous administrators produced two audit rows for one state change.
+>
+> No migration (head stays `0039_lab_specimens`), no new capability, no new state. Availability,
+> service identity, organization relationship, price and specimen requirements remain five
+> separate truths. **Human usability is not claimed** -- no laboratory administrator has used
+> the screen. See ADR-071.
+
 > **DHealth Connect lifetime correction, 2026-09-23 (DH-CONNECT-AGENT-001, third pass):** two
 > defects in the provider half, both found by review before any partner data existed, both fixed.
 >

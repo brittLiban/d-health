@@ -556,6 +556,13 @@ describe('analyses réalisées', () => {
     renderBilling(offeringsClient(), 'prices')
 
     expect(await screen.findByRole('heading', { name: 'Analyses réalisées' })).toBeInTheDocument()
+    // **Await a row, not just the heading.** The heading renders as soon as the capability check
+    // passes; the rows need two network reads to resolve and show a `LoadingSkeleton` until they do.
+    // Awaiting only the heading made this test pass in isolation and fail in the full 62-file run,
+    // where CPU contention is enough for the synchronous queries below to hit the skeleton -- a flaw
+    // in the test, not a flake in the product, and the reason the whole suite is run rather than the
+    // touched files.
+    await screen.findByText('Analyse de démonstration A')
 
     // Asserted on each row's own text rather than with a text matcher: the code and the state are
     // separate JSX expressions, so the DOM splits them across text nodes and a single regex would
@@ -674,6 +681,9 @@ describe('analyses réalisées', () => {
   it('OF-UI-8: the panel shows no price, no specimen field and no ranking', async () => {
     renderBilling(offeringsClient(), 'prices')
     await screen.findByRole('heading', { name: 'Analyses réalisées' })
+    // The rows, not just the heading -- see OF-UI-1. Reading the panel's text while the skeleton is
+    // still up would assert the absence of words against an element that has no words yet.
+    await screen.findByText('Analyse de démonstration A')
 
     const heading = screen.getByRole('heading', { name: 'Analyses réalisées' })
     const panel = (heading.closest('section') ?? document.body) as HTMLElement

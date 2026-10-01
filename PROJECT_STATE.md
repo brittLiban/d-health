@@ -23503,3 +23503,106 @@ is recorded as part of that open decision, not acted on.
 age/sex-specific ranges, no interpretation rules, no abnormal flags, no analyzer configuration.
 
 **No marketplace**, no ranking, no ratings, no public discovery, no patient shopping.
+
+### 🛑 Recorded findings — five questions this ticket exposed and did not answer · **Human Decision Required: Yes** · raised 2026-10-01
+
+Each of these is imaginable, each would have been easy to build, and each is a product or clinical
+judgement nobody has made. None was built.
+
+1. **Who at a real laboratory maintains this list?** Today it is `facility.configure`, which also
+   covers result templates and the facility profile. That may be right, or managing the analysis
+   catalogue may be a different job from administering the facility — in which case the capability
+   splits, and that is a decision with its own blast radius.
+2. **Does temporary unavailability need richer semantics than active/inactive?** An analyser down for
+   two days is operationally different from a service the laboratory has stopped offering, and today
+   both are one boolean. The ticket explicitly forbade inventing `PAUSED`/`TEMPORARILY_UNAVAILABLE`
+   and none was invented — but the question is real and a laboratory participant should answer it.
+3. **Do laboratories need local aliases or their own codes?** `LabOffering.local_test_code` exists, is
+   nullable, is informational, and is surfaced on **no** screen. Either it matters and should be
+   visible, or it does not and should be questioned.
+4. **May each laboratory customise its result templates?** The schema already permits it —
+   `LabResultTemplate` is offering-scoped — and no screen exposes it. This ticket deliberately did not
+   open that door, because per-laboratory reference ranges and units are clinical content.
+5. **Does offered-service configuration need effective dates?** "We stop accepting this from the first
+   of the month" is a normal operational statement and today a change takes effect at the instant of
+   the click.
+
+**Unchanged and untouched:** **D-3's participant half** (specimen types and their governed source,
+accession identifiers, label content, specimen-level invalidity, void semantics, recollection
+linkage), **D-4** (identity-confirmation attributes), **D-8** (successful-read auditing — offering
+*mutations* are audited, the offering *read* is not), **D-11** (laboratory reason vocabulary),
+**D-2a** (who pays whom in a routed order).
+
+### §Evidence — what was actually executed, with measured counts
+
+| What | Result |
+|---|---|
+| New adapter tests (`test_dhealthlabofferings001_offerings.py`) | **27 passed** |
+| New PostgreSQL qualification (`test_dhealthlabofferings001_postgres_qualification.py`) | **11 passed** against a disposable PostgreSQL **16.15** |
+| Whole adapter suite | **2076 passed, 260 skipped**, exit 0, 939s. Reconciles exactly: 2049 + 27 new unit tests = 2076; 249 + 11 new PostgreSQL tests (skipped without `DHOFF_PG_*`) = 260 |
+| UI unit suite | **1009 passed across 62 files, RECONCILED** — batched 7 at a time with the reported file count checked against the count handed in, because a single whole-suite `vitest run` silently reported only **41 of 62 files** on this machine, exactly the documented failure mode |
+| Offerings browser qualification (`15-lab-offerings.spec.ts`) | **13 of 13 phases green**, 25.4s, on the first run against the rebuilt stack |
+| Sibling browser suites re-run on this stack | **61 phases green** — `09-billing` 6, `10-capabilities` 6, `01-golden-journey` 12, `13-lab-reception` 10, `14-lab-specimen` 14, `11-lab-blocked` 13. The first two are the suites that assert the behaviour of the two files this ticket edited |
+| Negative controls | **15 distinct**, all reverted byte-for-byte |
+| `ruff check` / `ruff format --check` | clean, 261 files |
+| `tsc -b --noEmit` / `tsc -p e2e/tsconfig.json` | clean |
+| `oxlint` | **0 errors**, and **0 new warnings** against the pre-ticket baseline measured on the three changed files (1 before, 1 after) |
+| Alembic | head **unchanged** at `0039_lab_specimens`, exactly one head — **no migration added**, asserted by `PG-OF-7` against the live database |
+
+### §NC — the negative controls, executed and reverted
+
+Each applied one exact literal mutation with an asserted occurrence count, `ast.parse`d before being
+written, then reverted with `git checkout --` and `git status --porcelain` checked clean before the
+next. **Three of the fifteen did not redden on the first attempt, and all three times the control was
+right and the test was weak** — which is what controls are for, and is recorded below rather than
+quietly patched.
+
+| # | Mutation | Target | Result |
+|---|---|---|---|
+| **NC-OF-1** | remove the laboratory ownership filter from `list_offerings_for_lab` | the repository-level ownership test | **1 failed** — *after* strengthening; see below |
+| **NC-OF-2** | authorize facility configuration on the `ORG_ADMIN` role name instead of the capability | direct-GRANT · DENY-beats-template | **2 failed** |
+| **NC-OF-3** | make `lab.queue.work` sufficient to read offering configuration | the parametrised separation test | **1 failed, 2 passed** |
+| **NC-OF-4** | turn the model's `UniqueConstraint` into a plain `Index` | the model-shape test | **1 failed** — *after* adding it; see below |
+| **NC-OF-5** | stop re-checking offering availability at assignment | the stale-browser test | **1 failed** — *after* asserting diagnostic precision; see below |
+| **NC-OF-6** | cancel existing orders when an offering is disabled | the historical-preservation test | **1 failed** |
+| **NC-OF-7** | skip the provider-lab route check, treating an offering as authorization | the offering-is-not-authorization test | **1 failed** |
+| **NC-OF-8** | make a new offering inactive until a price exists | the no-price-offering test | **1 failed** |
+| **NC-OF-9** | copy the canonical service name onto `LabOfferingResponse` | the no-duplicated-identity test | **1 failed** |
+| **NC-OF-10** | remove the configuration gate from the status-change endpoint | clinic-cannot-configure · the separation test | **4 failed** |
+| **NC-OF-11** | make `lab.result.release` sufficient to change what the laboratory accepts | the separation test | **1 failed, 2 passed** |
+| **NC-OF-12** | render a disabled analysis as though it still accepts orders | `OF-UI-1` | **1 failed, 52 passed** |
+| **NC-OF-13** | remove the `FOR UPDATE` row lock this ticket added | `PG-OF-1a` | **1 failed** |
+| **NC-OF-14** | offer the configuration section regardless of capability | the navigation tests | **6 failed, 47 passed** |
+| **NC-OF-15** | add a `specimen_type` column to the offering | the no-specimen-configuration test | **1 failed** |
+
+**The three that found weak tests, and what each taught:**
+
+**NC-OF-1** stayed green because the HTTP route refuses a foreign laboratory on the *membership* check
+before the repository is ever reached, so deleting the repository's own ownership filter changed no
+HTTP outcome. That filter is defence in depth behind the gate — and defence in depth nothing tests is
+defence in depth that gets deleted by accident. Now asserted directly at the repository.
+
+**NC-OF-4** stayed green because `PG-OF-5` asserts the constraint on the live PostgreSQL schema, which
+alembic created; a SQLAlchemy model edit does not change it. The model and the migration are two
+separate statements of the same rule and each needs its own guard. The model's half was added.
+
+**NC-OF-5** stayed green because there is a **second, independent** defence —
+`is_operationally_ready_in_session` — so an order can never be routed for a disabled analysis even if
+`assign_by_provider`'s own check is deleted. That is a stronger safety property than the test was
+claiming. What the specific check protects is diagnostic precision, which the test now asserts.
+
+**One process mistake, recorded because the ticket warned about exactly it.** The NC-OF-5 test
+strengthening was written, verified green, and *then* the control was run — and the control's
+`git checkout --` revert wiped the uncommitted test edit along with the mutation. The ticket says
+"commit legitimate work before mutation controls" and this is why. Redone and committed first.
+
+### §Environment and cleanup
+
+| Item | State |
+|---|---|
+| Disposable PostgreSQL | container `dhoff-qual-pg`, `postgres:16-alpine`, port 55441, **destroyed at the end of the ticket**. Never a facility database |
+| Demo stack | rebuilt (`up -d --build`, both images) and left **running**. Left **post-`11-lab-blocked`-qualification and not reset** — run `scripts/demo/reset.sh` before the next browser suite. The offering is **active**, restored by `OF-F` |
+| `exchange_lab_offerings` after `reset.sh` | **not cleared, deliberately** — it is baseline *configuration*, not workflow state, and is correctly absent from `demo_seed._WORKFLOW_TABLES`. `OF-F` therefore re-enables the offering explicitly, and `qualify-offerings.sh` documents the one-line SQL to restore it after a crashed run |
+| Recovery / restore drill | **not run.** This ticket required none, and the existence of backup tooling is not a claim that recovery has been demonstrated for this change |
+| Pushed | **no** |
+| GitHub Actions | **untouched** — `git diff 7fe77fb..HEAD -- .github/` is **0 lines** |
