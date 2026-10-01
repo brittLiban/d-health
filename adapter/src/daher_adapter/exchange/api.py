@@ -2452,6 +2452,110 @@ class LabReleaseVersionContentResponse(BaseModel):
     results: list[LabReleaseVersionItemResponse]
 
 
+# -- DHEALTH-LAB-REPORT-001: the printable released-report projection ---------------------------
+#
+# One projection, two routes (laboratory-side and ordering-clinic-side), built by one function --
+# `_released_report_response`. Two shapes would be two places for a forbidden field to reappear.
+#
+# Every clinical value below comes from `get_manifest_for_version`, the immutable manifest bound to
+# one exact `release_version_id`. Nothing here reads the order's current-effective observation set,
+# so a later amendment cannot change what an earlier version's report renders.
+
+
+class ReleasedReportOrganizationResponse(BaseModel):
+    """One organization as a report header names it: id and current display name, nothing else.
+
+    **This is CURRENT REFERENCE DATA, not release-snapshot truth.** `Organization` carries no
+    address, telephone, registration or accreditation number (see its own `models.py` docstring --
+    it is deliberately thin), so none is offered here and none is invented. `name` is read live: if
+    a laboratory is renamed tomorrow, a reprint of today's release shows tomorrow's name. That is
+    recorded as a limitation rather than papered over with a speculative snapshot column -- see
+    ADR-072 §5."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    organization_id: uuid.UUID
+    name: str
+
+
+class ReleasedReportObservationResponse(BaseModel):
+    """One released observation value, exactly as the manifest-bound `LabObservation` row holds it.
+
+    `reference_range_low`/`reference_range_high` are included because they are already governed
+    released data on that same immutable row and the clinician's result screen already renders them
+    (`ClinicResultsPage`). **No flag, no verdict, and no comparison is derived from them anywhere**
+    -- not here, not in the frontend. Printing a range the laboratory released is reporting;
+    computing "normal"/"abnormal"/H/L from it would be clinical interpretation, which this product
+    does not do (AGENTS.md, ADR-043 §13).
+
+    `source_code`/`source_system`/`recorded_at`/`template_observation_definition_id` are
+    deliberately absent: internal coding and entry-workflow provenance, not report content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: uuid.UUID
+    display_label_snapshot: str
+    result_type: str
+    numeric_value: Decimal | None
+    numeric_unit: str | None
+    reference_range_low: Decimal | None
+    reference_range_high: Decimal | None
+    text_value: str | None
+
+
+class ReleasedReportItemResponse(BaseModel):
+    """One ordered diagnostic service and the observations released under it for this exact version.
+
+    `catalog_code_snapshot`/`catalog_display_name_snapshot` are RELEASE-SNAPSHOT TRUTH: frozen onto
+    `LabOrderItem` when the order was placed, so a later catalogue revision cannot rewrite what
+    this report says was ordered."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    catalog_code_snapshot: str
+    catalog_display_name_snapshot: str
+    observations: list[ReleasedReportObservationResponse]
+
+
+class ReleasedReportResponse(BaseModel):
+    """DHEALTH-LAB-REPORT-001/ADR-072: one printable laboratory report, bound to one exact released
+    version.
+
+    `released_at` is `LabResultReleaseVersion.created_at`, which is **not** a near-miss for the
+    authoritative release instant -- it is assigned from the very same `released_at` value written
+    to `LabResultRelease.released_at` (version 1) or `LabResultAmendment.released_at` (version 2+),
+    inside the same `LabOrder`-locked transaction (`results.py`'s `release`/`release_amendment`).
+    `test_dhealthlabreport001_report.py` asserts that equality so the claim stays checkable.
+
+    `is_current_version`/`current_release_version_number` are **derived metadata** -- computed from
+    the highest `version_number` for this order, stored nowhere. They say which release is the
+    reference result now; they never alter what an older version's report renders. The domain has
+    no "cancelled", "invalid" or "revoked" release, so no such word appears here or in the UI.
+
+    Deliberately absent, and each absence is asserted by an exact-key test: `DoctorReview` status /
+    reviewer / review timestamp (clinician workflow metadata, not laboratory report content -- no
+    recorded decision puts it on the report), visit or reason-for-visit, clinic notes, laboratory
+    block notes, price/invoice/payment/balance, specimen facts (D-3's participant half is open),
+    practitioner identity, the releasing identity's id, `idempotency_key`, result-entry actor ids
+    and timestamps, patient contact channel/value, capability or membership metadata, and audit
+    rows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID
+    release_version_id: uuid.UUID
+    release_version_number: int
+    is_amendment: bool
+    released_at: datetime
+    is_current_version: bool
+    current_release_version_number: int
+    laboratory: ReleasedReportOrganizationResponse
+    ordering_organization: ReleasedReportOrganizationResponse
+    patient: LabPatientIdentityResponse
+    results: list[ReleasedReportItemResponse]
+
+
 class DoctorReviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -8877,6 +8981,145 @@ def build_exchange_router(
             ],
         )
 
+    # -- DHEALTH-LAB-REPORT-001: the printable released report ----------------------------------
+
+    def _released_report_response(
+        *,
+        order_id: uuid.UUID,
+        release_version_id: uuid.UUID,
+        provider_organization_id: uuid.UUID,
+        patient_reference_id: uuid.UUID,
+    ) -> ReleasedReportResponse:
+        """ADR-072: the one report builder, shared by the laboratory-side and the clinic-side route.
+
+        **The clinical source of truth is `get_manifest_for_version(release_version_id)` and nothing
+        else.** This function never touches `LabResultRepository.get_for_lab`'s item/observation
+        content, `get_manifest_for_order` ("latest"), `get_amendment_inspection` (a draft), or any
+        current-effective read. A caller resolves tenancy and hands over two reference ids; every
+        clinical value below is reconstructed from immutable manifest entries.
+
+        It also deliberately consults **no** `DoctorReview`: a report exists because a release
+        exists, never because a clinician review obligation does. The provider-side version-content
+        read gates on that review (409 when absent); copying that here would couple a laboratory
+        document to clinic workflow, which this ticket separates.
+
+        A report exists for a released version or not at all. There is no branch that renders
+        entered-but-unreleased content, because an unreleased result has no
+        `LabResultReleaseVersion` to name -- the 404s below are the whole pre-release refusal.
+        """
+        version = releases.get_release_version(release_version_id)
+        if version is None or version.lab_order_id != order_id:
+            # Never distinguished from "wrong tenant": the caller already passed its own
+            # organization gate, and a version id belonging to another order must not confirm its
+            # own existence.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="release version not found"
+            )
+        manifest = releases.get_manifest_for_version(release_version_id)
+        if manifest is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="release version not found"
+            )
+
+        # Derived, never stored. `get_latest_release_version` is the highest `version_number` for
+        # this order -- the same single definition of "current" the lab and clinic version lists
+        # already use, so three screens cannot disagree about which release counts now.
+        current = releases.get_latest_release_version(order_id)
+        if current is None:
+            # Structurally unreachable: the version fetched above is itself one of this order's
+            # versions, so a latest one exists. Proven absent rather than trusted absent.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="release version not found"
+            )
+
+        # The performing laboratory is the order's own `LabSelection` -- one immutable row per
+        # order. Not `LabResultRelease.lab_organization_id`, which exists only for version 1: an
+        # amendment release carries no laboratory column of its own, and reading the selection
+        # gives every version the same, correct answer instead of two code paths.
+        selection = selections.get_for_order(order_id)
+        if selection is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="release version not found"
+            )
+
+        laboratory = organizations.get(selection.lab_organization_id)
+        ordering = organizations.get(provider_organization_id)
+        patient_identity = _require_patient_identity(provider_organization_id, patient_reference_id)
+
+        return ReleasedReportResponse(
+            order_id=order_id,
+            release_version_id=version.id,
+            release_version_number=version.version_number,
+            is_amendment=version.version_number > 1,
+            # See `ReleasedReportResponse`'s docstring: the same value written to
+            # `LabResultRelease.released_at` / `LabResultAmendment.released_at`.
+            released_at=version.created_at,
+            is_current_version=version.id == current.id,
+            current_release_version_number=current.version_number,
+            laboratory=ReleasedReportOrganizationResponse(
+                organization_id=laboratory.id, name=laboratory.name
+            ),
+            ordering_organization=ReleasedReportOrganizationResponse(
+                organization_id=ordering.id, name=ordering.name
+            ),
+            # The narrow name-and-date-of-birth shape, on both routes. The clinic-side
+            # `PatientIdentitySummaryResponse` also carries `contact_channel_type`/`contact_value`,
+            # which a laboratory report has no business reproducing.
+            patient=_to_lab_patient_identity(patient_identity),
+            results=[
+                ReleasedReportItemResponse(
+                    item_id=item.item_id,
+                    catalog_code_snapshot=item.catalog_code_snapshot,
+                    catalog_display_name_snapshot=item.catalog_display_name_snapshot,
+                    observations=[
+                        ReleasedReportObservationResponse(
+                            observation_id=observation.id,
+                            display_label_snapshot=observation.display_label_snapshot,
+                            result_type=observation.result_type,
+                            numeric_value=observation.numeric_value,
+                            numeric_unit=observation.numeric_unit,
+                            reference_range_low=observation.reference_range_low,
+                            reference_range_high=observation.reference_range_high,
+                            text_value=observation.text_value,
+                        )
+                        for observation in item.observations
+                    ],
+                )
+                for item in manifest.items
+            ],
+        )
+
+    @router.get(
+        "/organizations/{lab_id}/lab-orders/{order_id}/release-versions/{release_version_id}"
+        "/report",
+        response_model=ReleasedReportResponse,
+    )
+    def get_lab_order_release_version_report(
+        lab_id: uuid.UUID,
+        order_id: uuid.UUID,
+        release_version_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ReleasedReportResponse:
+        # ADR-072 §4: the laboratory's own printable report. Authority is reused wholesale from the
+        # sibling exact-version content read above -- `LAB_QUEUE_WORK` or `LAB_RESULT_RELEASE`, no
+        # new capability. Release authority is not required to *read* a released report: a
+        # technician who may already open the exact version's content may print it.
+        response.headers["Cache-Control"] = "no-store"
+        _require_lab_tech_or_releaser(principal, lab_id)
+        # `get_for_lab` is called for its existing non-enumerating tenant check and for the two
+        # reference ids below only. Its `items`/observations are current-effective state and are
+        # deliberately never read here -- `_released_report_response` takes no content from it.
+        inspection = results.get_for_lab(order_id, lab_id)
+        if inspection is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+        return _released_report_response(
+            order_id=order_id,
+            release_version_id=release_version_id,
+            provider_organization_id=inspection.provider_organization_id,
+            patient_reference_id=inspection.patient_reference_id,
+        )
+
     def _amendment_response(record: LabResultAmendmentRecord) -> AmendmentResponse:
         return AmendmentResponse(
             amendment_id=record.id,
@@ -9408,6 +9651,42 @@ def build_exchange_router(
             reviewed_at=review.reviewed_at,
             reviewed_by_practitioner_reference_id=review.reviewed_by_practitioner_reference_id,
             results=_provider_manifest_results(manifest),
+        )
+
+    @router.get(
+        "/organizations/{provider_id}/orders/{order_id}/release-versions/{release_version_id}"
+        "/report",
+        response_model=ReleasedReportResponse,
+    )
+    def get_provider_release_version_report(
+        provider_id: uuid.UUID,
+        order_id: uuid.UUID,
+        release_version_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> ReleasedReportResponse:
+        # ADR-072 §4: the ordering clinic's printable report, the same document the laboratory
+        # prints. Authority is reused wholesale from the sibling exact-version content read above --
+        # `_require_clinician` (`ORDER_MANAGE`, whose own definition already names release versions
+        # as part of the order read surface), no new capability. `billing.operate` and
+        # `facility.configure` grant nothing here, and platform admin does not bypass it.
+        response.headers["Cache-Control"] = "no-store"
+        _require_clinician(principal, provider_id)
+        order = _existing_order_for_provider_or_404(order_id, provider_id)
+        if order.status != LabOrderStatus.COMPLETED.value:
+            # The order exists and is this clinic's own, so a bare 404 would misstate the reason --
+            # the same wording and the same code the sibling version-content read already uses. No
+            # clinical value is disclosed either way, and an unreleased order has no version to
+            # report on regardless.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="order results are not yet available",
+            )
+        return _released_report_response(
+            order_id=order_id,
+            release_version_id=release_version_id,
+            provider_organization_id=provider_id,
+            patient_reference_id=order.patient_reference_id,
         )
 
     @router.get(
