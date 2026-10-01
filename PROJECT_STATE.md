@@ -23424,3 +23424,82 @@ unvalidated by anyone who works in a laboratory, and this ticket added no fifth)
 **Nothing was pushed and GitHub Actions was not touched.** All data synthetic; no facility database
 was contacted — the PostgreSQL qualification ran only against a disposable container, destroyed
 afterwards.
+
+## DHEALTH-LAB-OFFERINGS-001 — the scoping finding, recorded before any code was written (2026-10-01)
+
+**The laboratory offering model already exists at `7fe77fb`, and the server already enforces it.**
+This ticket is therefore a **qualification plus one defect plus one missing surface**, and it is
+recorded that way before any implementation, because the ticket as written assumes the model must be
+built and describing existing work as newly delivered is the exact dishonesty `AGENTS.md`'s
+written/verified/demonstrated rule exists to prevent. DHEALTH-LAB-RECEPTION-001 reached the same
+conclusion about laboratory intake and this entry follows its shape deliberately.
+
+### What already existed, mapped before deciding anything
+
+| The ticket asks for | What is already there, at `7fe77fb` |
+|---|---|
+| canonical diagnostic-service identity, not duplicated | `TestCatalogEntry` (`exchange_test_catalog_entries`): `code`, `display_name`, `active`, `is_synthetic`, `UNIQUE(code, version)` |
+| "Laboratory X performs Service Y" | **`LabOffering`** (`exchange_lab_offerings`), DH-EX-003 — `lab_organization_id` + `catalog_entry_id`, both FK `RESTRICT` |
+| no duplicated service truth on the offering | already true: the offering carries **no** name, no result fields, no unit, no reference range. `LabOfferingResponse` exposes `catalog_entry_id` and never a display name |
+| the lab's own alias for the service | `LabOffering.local_test_code`, nullable |
+| smallest truthful availability state | `LabOffering.active`, a boolean. No `DRAFT`/`PENDING`/`PAUSED`/`RETIRED` was ever invented |
+| uniqueness preventing duplicate offering rows | `uq_exchange_lab_offerings_lab_catalog` over `(lab_organization_id, catalog_entry_id)` |
+| an index justified by real queries | `ix_exchange_lab_offerings_catalog_entry_id` |
+| enable / disable operations | `CatalogRepository.create_offering` and `set_offering_active` |
+| reactivation must be explicit | `OfferingInactiveConflict` — `create_offering` refuses to silently reactivate an inactive offering, and says so in the 409 detail |
+| organization ownership, not client-supplied | `lab_id` comes from the URL path and is checked by `_require_facility_configure`; `_existing_offering_for_lab_or_404` refuses another laboratory's offering id |
+| capability, not a role, and not a new one | **`facility.configure`** — already exists, already `_BOTH` organization types, already described to facility administrators in French as *"Gérer le catalogue, les modèles de résultats et la fiche de l'établissement"* |
+| audit on create and on status change | `lab_offering_created` and `lab_offering_status_changed`, both `resource_type="lab_offering"`, both carrying actor and organization |
+| price kept separate from availability | `LabPrice` is its own table keyed on `lab_offering_id`, with a partial unique index for the current price and supersession rather than mutation |
+| result templates kept separate | `LabResultTemplate` is keyed on `lab_offering_id` and has its own activation path |
+| **clinic ordering limited to offered services** | `selection.py::find_whole_order_eligible_labs` filters on `LabOffering.active` + `TestCatalogEntry.active`, and `GET …/orders/{id}/eligible-labs` serves it |
+| **server re-checks availability at order time** | `assign_by_provider` **revalidates fresh at assignment**, inside the locked mutation, never trusting what was true at order creation |
+| offering ≠ clinic authorization | `ProviderLabRoute.active` is checked **separately** (`ProviderLabRouteNotActive`), and a lab with no active result template is refused separately again (`LabCannotFulfillOrder`) |
+| disabling must not rewrite history | `catalog.py`'s `_get_offerings_for_order` **deliberately does not filter on `active`**, with the reason written at the call site: an offering that became inactive after a selection keeps its historical commitment |
+| truthful zero-eligible-labs state | `LabRoutingStep.tsx` already renders *"Aucun laboratoire configuré ne peut actuellement réaliser toutes les analyses de cet ordre."* — never a fabricated fallback lab |
+| stale-browser conflict handling | `LabRoutingStep.tsx` already has `ASSIGN_CONFLICT_MESSAGE` and refreshes the list on a 409 |
+| no marketplace | `LabRoutingStep.tsx`'s own docstring: no price, no ranking, no best/cheapest/star/distance/sponsored badge, and the Clinic-facing client **has no marketplace methods to call at all** |
+
+So the ticket's success condition — *"Does this laboratory currently accept this diagnostic service
+through Hawva, and is it enforced by the server when a clinic attempts NEW work"* — **was already
+met before this ticket started.** What was not done is proving it at the edges, and two concrete
+gaps below.
+
+### What was genuinely missing, and is what this ticket delivers
+
+**1. A laboratory had no surface through which to see or change its own offerings.** The endpoints
+existed and were reachable only by an API client. A laboratory administrator holding
+`facility.configure` could not answer *"which services do we accept?"* anywhere in the product, and
+could not turn one off. `Services et tarifs` existed but was reachable only through
+`billing.configure_prices` and rendered only `ClinicService` configuration.
+
+**2. `set_offering_active` read, compared and wrote without locking the row.** A real defect in
+operational-configuration accountability — see §Defect below.
+
+### What this ticket deliberately did NOT add, and why each absence is a decision
+
+**No migration, and the head stays `0039_lab_specimens`.** The ticket says a migration is expected
+*"if a facility-offering relationship does not already exist"*. It does.
+
+**No `updated_at` and no `changed_by` column on the offering**, which the ticket invites considering.
+Who changed an offering and when is **already recorded, truthfully and for every row including the
+historical ones**, by the `lab_offering_created`/`lab_offering_status_changed` audit events, which
+carry `actor_identity_id` and `created_at`. A column would be a second, weaker copy of an audit row,
+and for every pre-existing offering it could only ever be filled by guessing. `0038_visit_check_in`
+refused `checked_in_by` for exactly this reason and the same reasoning applies unchanged.
+
+**No new capability.** `facility.configure` already means this, in words a facility administrator
+already reads. A `lab.offerings.manage` would be the speculative seam ADR-067 §3A forbids.
+
+**No specimen field of any kind** on the offering — no type, tube, container, volume, collection
+method, anatomical site, anticoagulant, accession format or barcode content. DHEALTH-SPECIMEN-001
+left specimen-type configuration open as **D-3's participant half** and it stays open. That a
+laboratory's *offering* is the plausible eventual home for "this service needs this kind of sample"
+is recorded as part of that open decision, not acted on.
+
+**No price requirement for an offering to be active**, and no payment gating. **D-2a stays open.**
+
+**No per-laboratory result template customization**, no units, no reference intervals, no
+age/sex-specific ranges, no interpretation rules, no abnormal flags, no analyzer configuration.
+
+**No marketplace**, no ranking, no ratings, no public discovery, no patient shopping.
