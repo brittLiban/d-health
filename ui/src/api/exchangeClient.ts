@@ -46,6 +46,7 @@ import type {
   LabOrderBlock,
   LabOrderBlockReason,
   LabOrderCreateOutcome,
+  LabOffering,
   LabSpecimen,
   LabOrderCreateRequest,
   LabOrderIntent,
@@ -807,6 +808,86 @@ export class ExchangeClient {
     return this.request<CatalogEntry[]>(
       '/catalog/tests',
       { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{lab_id}/offerings
+   * DH-EX-003: which canonical catalog tests this laboratory is configured to receive, and whether
+   * each currently accepts new orders. Requires `facility.configure` at that laboratory.
+   *
+   * **This is laboratory configuration, not clinic-facing discovery.** A clinic never calls this:
+   * what a clinic may know is served by `getEligibleLabs`, which answers the narrower question
+   * "which of my authorized laboratories can perform *this order*" and exposes no configuration at
+   * all. Keeping them separate is what stops an offering from becoming a public catalogue.
+   */
+  async listLabOfferings(
+    labId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOffering[]> {
+    return this.request<LabOffering[]>(
+      `/organizations/${encodeURIComponent(labId)}/offerings`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{lab_id}/offerings
+   * DH-EX-003: declare that this laboratory performs a canonical catalog test.
+   *
+   * Carries only `catalog_entry_id` (and optionally the laboratory's own alias). It deliberately
+   * cannot carry a name, a price, a result structure or a specimen requirement -- the service's
+   * identity belongs to the catalogue entry, the price to `LabPrice`, the result structure to
+   * `LabResultTemplate`, and specimen requirements are not modelled at all (D-3's participant half).
+   *
+   * The server answers 409 if the offering exists but is **inactive**: reactivation is an explicit
+   * status change, never a side effect of re-creating.
+   */
+  async createLabOffering(
+    labId: string,
+    body: { catalog_entry_id: string; local_test_code?: string | null },
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOffering> {
+    return this.request<LabOffering>(
+      `/organizations/${encodeURIComponent(labId)}/offerings`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          catalog_entry_id: body.catalog_entry_id,
+          local_test_code: body.local_test_code ?? null,
+        }),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * PATCH /exchange/v1/organizations/{lab_id}/offerings/{offering_id}
+   * DH-EX-003: start or stop accepting NEW orders for this service.
+   *
+   * **Disabling changes nothing about work already routed here.** Existing orders keep their
+   * frozen service identity and continue through their own workflow; the server's own
+   * order-assignment path re-reads availability fresh, so this takes effect for new work
+   * immediately and for historical work never.
+   */
+  async setLabOfferingActive(
+    labId: string,
+    offeringId: string,
+    active: boolean,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<LabOffering> {
+    return this.request<LabOffering>(
+      `/organizations/${encodeURIComponent(labId)}/offerings/${encodeURIComponent(offeringId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active }),
+        signal: options.signal,
+      },
       options.token,
     )
   }

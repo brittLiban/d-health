@@ -49,9 +49,11 @@ import type {
   BillableOrder,
   BillableSource,
   BillingPatient,
+  CatalogEntry,
   ClinicService,
   Invoice,
   InvoiceLineRequest,
+  LabOffering,
   PaymentMethod,
 } from '../../api/exchangeTypes'
 import { Button, EmptyState, LoadingSkeleton, Select, StatusBadge, TextInput } from '../../design-system'
@@ -136,6 +138,11 @@ export function BillingPage({ surface = 'till' }: { surface?: BillingSurface } =
   const [newServiceName, setNewServiceName] = useState('')
   const [newServiceAmount, setNewServiceAmount] = useState('')
 
+  // DHEALTH-LAB-OFFERINGS-001: the canonical catalogue and this laboratory's own offerings, held
+  // separately because they are separate truths and joined only for display.
+  const [catalogEntries, setCatalogEntries] = useState<CatalogEntry[] | null>(null)
+  const [offerings, setOfferings] = useState<LabOffering[] | null>(null)
+
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmation, setConfirmation] = useState<string | null>(null)
@@ -149,6 +156,17 @@ export function BillingPage({ surface = 'till' }: { surface?: BillingSurface } =
   // and the surface check is what puts the price list on its own route rather than inside the till.
   const canOperate = surface === 'till' && can(capabilities, Capability.BILLING_OPERATE)
   const canConfigure = surface === 'prices' && can(capabilities, Capability.BILLING_CONFIGURE_PRICES)
+  // DHEALTH-LAB-OFFERINGS-001: the third authority on this screen, and the reason it is a third
+  // rather than folded into `canConfigure`. Which diagnostic services a laboratory accepts is
+  // `facility.configure`'s subject; what the facility charges is `billing.configure_prices`'. The
+  // two are independently grantable and this screen must render exactly the half each one earns --
+  // an administrator holding only one must not be shown controls the server would refuse.
+  //
+  // Laboratory-only, deliberately: `LabOffering` is a laboratory's declaration that it performs a
+  // canonical catalog test, and a provider organization has no offerings to configure. A provider
+  // administrator holding `facility.configure` sees no services panel here and that is correct.
+  const canConfigureOfferings =
+    surface === 'prices' && isLab && can(capabilities, Capability.FACILITY_CONFIGURE)
 
   const load = useCallback(async () => {
     if (!organizationId) return
@@ -165,10 +183,19 @@ export function BillingPage({ surface = 'till' }: { surface?: BillingSurface } =
       if (canOperate || canConfigure) {
         setServices(await client.listClinicServices(organizationId))
       }
+      if (canConfigureOfferings) {
+        // Two reads, joined in the browser, and the split is the contract rather than a round-trip
+        // saved or missed. `LabOffering` carries `catalog_entry_id` and deliberately **no** name:
+        // the service's identity belongs to the catalogue entry and must not be copied onto the
+        // offering. So the panel reads the canonical catalogue for names and codes, reads this
+        // laboratory's offerings for availability, and joins them on `catalog_entry_id`.
+        setCatalogEntries(await client.listCatalogTests())
+        setOfferings(await client.listLabOfferings(organizationId))
+      }
     } catch {
       setLoadFailed(true)
     }
-  }, [client, organizationId, canOperate, canConfigure, isLab])
+  }, [client, organizationId, canOperate, canConfigure, canConfigureOfferings, isLab])
 
   useEffect(() => {
     void load()
@@ -324,6 +351,43 @@ export function BillingPage({ surface = 'till' }: { surface?: BillingSurface } =
         `${service.name} : nouveau tarif ${formatMoney(next.trim(), service.currency ?? currency)}. Les factures déjà établies ne changent pas.`,
       )
       setServices(await client.listClinicServices(organizationId))
+    })
+
+  /**
+   * DHEALTH-LAB-OFFERINGS-001: start or stop accepting new orders for one diagnostic service.
+   *
+   * Always re-reads the offerings list from the server afterwards rather than flipping local state.
+   * The returned row is authoritative, but so is everything else on the panel, and a concurrent
+   * change by a colleague must show up rather than be overwritten by this browser's optimism.
+   *
+   * The confirmation wording is the load-bearing part. Disabling a service stops NEW orders and
+   * changes nothing about work already routed here, and saying so is the difference between an
+   * administrator turning something off confidently and an administrator worrying they have just
+   * cancelled a patient's test.
+   */
+  const toggleOffering = (offering: LabOffering, name: string, next: boolean) =>
+    run(async () => {
+      await client.setLabOfferingActive(organizationId, offering.id, next)
+      setConfirmation(
+        next
+          ? `${name} : ce laboratoire accepte désormais les nouveaux ordres.`
+          : `${name} : ce laboratoire n'accepte plus de nouveaux ordres. Les ordres déjà reçus ne changent pas.`,
+      )
+      setOfferings(await client.listLabOfferings(organizationId))
+    })
+
+  /**
+   * Declare that this laboratory performs a canonical catalogue test it does not yet offer.
+   *
+   * Carries `catalog_entry_id` and nothing else: no name (the catalogue owns it), no price
+   * (`LabPrice` owns it), no result structure (`LabResultTemplate` owns it), no specimen
+   * requirement (nothing owns it yet -- D-3's participant half).
+   */
+  const addOffering = (entry: CatalogEntry) =>
+    run(async () => {
+      await client.createLabOffering(organizationId, { catalog_entry_id: entry.id })
+      setConfirmation(`${entry.display_name} ajouté aux services de ${organizationName}.`)
+      setOfferings(await client.listLabOfferings(organizationId))
     })
 
   if (loadFailed) {
@@ -711,6 +775,86 @@ export function BillingPage({ surface = 'till' }: { surface?: BillingSurface } =
             )}
           </section>
         </div>
+      ) : null}
+
+      {/*
+        DHEALTH-LAB-OFFERINGS-001: which diagnostic services this laboratory accepts through Hawva.
+
+        Rendered before the price panel deliberately: a service has to be accepted before charging
+        for it means anything, and the two panels are gated on different capabilities so either can
+        appear without the other.
+
+        What this panel does NOT show, and each absence is a decision: no price (that is the panel
+        below, and a service does not need a price to be accepted), no result structure, no specimen
+        type or tube or container (nothing in Hawva models those -- D-3's participant half), no
+        ranking, no comparison with other laboratories, and no claim about what the laboratory can
+        perform in real life. It is Hawva configuration state and the wording says so.
+      */}
+      {canConfigureOfferings ? (
+        <section className={styles.panel} aria-labelledby="lab-offerings">
+          <h2 className={styles.panelTitle} id="lab-offerings">
+            Analyses réalisées
+          </h2>
+          <p className={styles.panelNote}>
+            Les analyses que {organizationName} accepte de recevoir via Hawva. Désactiver une analyse
+            arrête les nouveaux ordres : les ordres déjà reçus suivent leur cours et ne changent pas.
+          </p>
+
+          {catalogEntries === null || offerings === null ? (
+            <LoadingSkeleton />
+          ) : catalogEntries.length === 0 ? (
+            <EmptyState title="Aucune analyse au catalogue">
+              Le catalogue Hawva ne contient encore aucune analyse à proposer.
+            </EmptyState>
+          ) : (
+            <ul className={styles.list}>
+              {catalogEntries.map((entry) => {
+                // Joined on `catalog_entry_id`. The offering carries no name, so the name shown here
+                // is always the catalogue's -- there is no second copy that could disagree with it.
+                const offering = offerings.find((row) => row.catalog_entry_id === entry.id) ?? null
+                const offered = offering !== null && offering.active
+                return (
+                  <li key={entry.id} className={styles.row}>
+                    {/* The same identity/name/meta shape every other row on this screen uses. */}
+                    <span className={styles.identity}>
+                      <span className={styles.name}>{entry.display_name}</span>
+                      {/*
+                        Three states, not two, and the third is the one a boolean would have hidden:
+                        a service this laboratory has never declared is not the same fact as one it
+                        has declared and switched off.
+                      */}
+                      <span className={styles.meta}>
+                        {entry.code} —{' '}
+                        {offering === null
+                          ? 'non proposée par ce laboratoire'
+                          : offered
+                            ? 'accepte les nouveaux ordres'
+                            : "n'accepte plus de nouveaux ordres"}
+                      </span>
+                    </span>
+                    {offering === null ? (
+                      <Button
+                        variant="secondary"
+                        disabled={busy}
+                        onClick={() => void addOffering(entry)}
+                      >
+                        Proposer cette analyse
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="secondary"
+                        disabled={busy}
+                        onClick={() => void toggleOffering(offering, entry.display_name, !offered)}
+                      >
+                        {offered ? 'Ne plus accepter' : 'Accepter à nouveau'}
+                      </Button>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </section>
       ) : null}
 
       {canConfigure ? (

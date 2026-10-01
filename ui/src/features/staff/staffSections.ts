@@ -172,7 +172,27 @@ export function availableSections(
   // administration, so it does not belong inside `Équipe et accès`; and it is not the till, so it
   // does not belong inside `Facturation` either. Somebody holding both capabilities sees both
   // sections, which is the honest rendering of holding both jobs.
-  if (can(capabilities, Capability.BILLING_CONFIGURE_PRICES)) ids.push('prices')
+  //
+  // **[Widened 2026-10-01, DHEALTH-LAB-OFFERINGS-001.** `facility.configure` now reaches it too,
+  // because the section is `Services et tarifs` and a laboratory's *services* -- which diagnostic
+  // work it accepts through Hawva -- are `facility.configure`'s subject, not the price-setter's.
+  // The capability's own French description already said so before this ticket existed: *"Gérer le
+  // catalogue, les modèles de résultats et la fiche de l'établissement."*
+  //
+  // Deliberately **not** a new top-level section. `Services et tarifs` is already the configuration
+  // surface for what a facility offers and what it charges, and a second entry over the same
+  // subject would be the two-doors-into-one-room problem this file refuses elsewhere.
+  //
+  // The two halves of the screen are gated independently *inside* it, exactly as `Facturation`'s
+  // till and price halves already are: a `facility.configure` holder with no
+  // `billing.configure_prices` sees the services they may configure and not the prices they may
+  // not, and the reverse also holds. Holding both shows both.]**
+  if (
+    can(capabilities, Capability.BILLING_CONFIGURE_PRICES) ||
+    can(capabilities, Capability.FACILITY_CONFIGURE)
+  ) {
+    ids.push('prices')
+  }
 
   return ids.map((id) => ({ id, label: SECTION_LABELS[id] }))
 }

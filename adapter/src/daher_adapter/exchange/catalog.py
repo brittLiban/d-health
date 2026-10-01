@@ -343,7 +343,14 @@ class CatalogRepository:
     ) -> tuple[LabOfferingRecord, str]:
         """Returns ``(record, outcome)`` where outcome is ``"updated"`` or ``"unchanged"`` -- an
         inactive offering disappears from marketplace eligibility immediately; the row itself is
-        never deleted."""
+        never deleted.
+
+        **[Fixed 2026-10-01, DHEALTH-LAB-OFFERINGS-001: the row is now locked ``FOR UPDATE``.]**
+        ``outcome`` is not cosmetic -- ``exchange/api.py`` writes it straight into the
+        ``lab_offering_status_changed`` audit row's ``outcome`` column, so it is the thing an
+        administrator reads back to answer *"when was this service turned off, and by whom?"*.
+        Deciding it from an unlocked read made that answer wrong under concurrency: see
+        ``_set_offering_active_in_session``."""
         if session is not None:
             return self._set_offering_active_in_session(session, offering_id, active)
         with self._sessions.begin() as owned_session:
@@ -352,7 +359,23 @@ class CatalogRepository:
     def _set_offering_active_in_session(
         self, session: Session, offering_id: uuid.UUID, active: bool
     ) -> tuple[LabOfferingRecord, str]:
-        offering = session.get(LabOffering, offering_id)
+        # `with_for_update()`, not a plain `session.get`. This is a read-compare-write, and the
+        # comparison is what decides whether an audit row is written at all.
+        #
+        # Unlocked, two administrators enabling the same offering at the same instant both read
+        # `active=False`; the second one's UPDATE blocks on the first's row lock, and once it is
+        # released it proceeds anyway, because its *decision* was already made against a stale
+        # read. Both then report `"updated"` and `exchange/api.py` writes **two**
+        # `lab_offering_status_changed` audit rows for **one** state change. The final value is
+        # right and the accountability record is wrong -- it says the service was switched twice
+        # when it was switched once, which is exactly the question this table exists to answer.
+        #
+        # The lock makes the comparison happen against committed truth, so the loser reads
+        # `active=True` and correctly reports `"unchanged"` without writing a second audit row.
+        # Same discipline `exchange/lab_workflow.py` applies to every mutation it owns.
+        offering = session.scalar(
+            select(LabOffering).where(LabOffering.id == offering_id).with_for_update()
+        )
         if offering is None:
             raise OfferingNotFound(str(offering_id))
         if offering.active == active:

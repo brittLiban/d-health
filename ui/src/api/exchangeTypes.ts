@@ -198,6 +198,30 @@ export interface CatalogEntry {
 
 export type CatalogEntryResponse = CatalogEntry
 
+/**
+ * DH-EX-003: one laboratory's declaration that it performs one canonical catalog test.
+ *
+ * Mirrors the backend's `LabOfferingResponse` exactly, and the **absence** here is the contract:
+ * there is no `code`, no `display_name`, no result field, no unit and no reference range, because
+ * those belong to the `CatalogEntry` this row points at and must not be copied. A screen that needs
+ * a human-readable name reads the catalogue and joins on `catalog_entry_id` -- which is what
+ * `BillingPage`'s offerings panel does, rather than asking the server to duplicate the name here.
+ *
+ * `active` is the whole of availability: **may this laboratory receive NEW orders for this
+ * service.** It is deliberately not a lifecycle — there is no draft, pending, paused or retired
+ * state — and it says nothing about whether the laboratory can perform the test in real life.
+ * Disabling it never touches an existing order.
+ *
+ * `local_test_code` is the laboratory's own alias for the service, where it has one. Informational.
+ */
+export interface LabOffering {
+  id: string
+  lab_organization_id: string
+  catalog_entry_id: string
+  local_test_code: string | null
+  active: boolean
+}
+
 export interface LabOrderCreateRequest {
   patient_reference_id: string
   catalog_entry_ids: string[]
