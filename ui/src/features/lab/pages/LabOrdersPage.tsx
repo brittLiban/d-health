@@ -569,6 +569,12 @@ export function LabOrdersPage() {
     setWorkspaceState(null)
     setAmendmentDiscovery(null)
     setStartAmendmentState({ submitting: false })
+    // DHEALTH-SPECIMEN-001: an unconfirmed collection key belongs to the order it was minted for.
+    // Carrying it to a different order would send one order's retry key as another order's first
+    // collection -- harmless today (the key is scoped `(lab_order_id, idempotency_key)`, so it
+    // would simply not match anything) but meaningless, and it would make the ref's one invariant
+    // -- "non-null means an attempt on *this* order is outstanding" -- false.
+    collectionKeyRef.current = null
     loadPanel(orderId)
   }
 
@@ -1456,11 +1462,17 @@ export function LabOrdersPage() {
                       <Button
                         type="button"
                         onClick={() => {
-                          // DHEALTH-SPECIMEN-001: one key per *intended* collection, minted when the
-                          // confirmation opens so that every attempt at this collection -- including
-                          // a retry after an uncertain response -- carries the same one and cannot
-                          // produce a second physical specimen record.
-                          collectionKeyRef.current = crypto.randomUUID()
+                          // DHEALTH-SPECIMEN-001: one key per *intended* collection.
+                          //
+                          // `??=`, not `=`, and the difference is the whole duplicate-specimen
+                          // defence. A non-null ref means "an attempt at this collection is
+                          // outstanding and unconfirmed" -- the success path clears it to null, so
+                          // the only way it survives to here is a lost or refused response. Minting
+                          // a fresh key on that retry would send a *different* key for the same
+                          // physical collection, and a first POST that landed late would then have
+                          // become a second specimen: the exact double-click failure this
+                          // mechanism exists to prevent.
+                          collectionKeyRef.current ??= crypto.randomUUID()
                           setConfirming('collect')
                         }}
                         disabled={mutationState.submitting}
@@ -1689,10 +1701,11 @@ export function LabOrdersPage() {
                           type="button"
                           variant="secondary"
                           onClick={() => {
-                            // A new intended collection, so a new key. Minted here rather than in
-                            // `runCollection` so that a repeated "Confirmer" after an uncertain
-                            // response reuses one key and cannot duplicate the specimen.
-                            collectionKeyRef.current = crypto.randomUUID()
+                            // `??=` for the same reason as the primary action above: a surviving key
+                            // means an unconfirmed attempt at *this* collection is outstanding, and
+                            // the retry must carry it rather than mint a second one. The success
+                            // path clears the ref, so a genuinely new sample always gets a new key.
+                            collectionKeyRef.current ??= crypto.randomUUID()
                             setConfirming('collect')
                           }}
                           disabled={mutationState.submitting}

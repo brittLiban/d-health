@@ -1016,6 +1016,262 @@ describe('LabOrdersPage', () => {
     expect(screen.getByRole('button', { name: 'Enregistrer la collecte' })).toBeInTheDocument()
   })
 
+  // ── DHEALTH-SPECIMEN-001 ──────────────────────────────────────────────────────────────────────
+
+  it('SP-UI-1: an unconfirmed collection is retried with the SAME idempotency key', async () => {
+    // The single most load-bearing client-side assertion in this ticket.
+    //
+    // A key minted per *request* instead of per *intended collection* would send a different key on
+    // the retry, and a first POST that landed late would then have become a second physical
+    // specimen -- the exact double-click failure the key exists to prevent, and one no backend test
+    // can catch because the server would be correctly honouring two genuinely different keys.
+    //
+    // This test is what pins `??=` rather than `=` in both confirmation handlers.
+    const recordLabOrderCollection = vi.fn().mockRejectedValue(new Error('network lost'))
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockImplementation((_labId: string, orderId: string) =>
+        Promise.resolve(
+          makeOrder({ order_id: orderId, status: 'ACCEPTED', collection_recorded_at: null }),
+        ),
+      ),
+      // Empty: the server never recorded it, so recovery lands in the "unconfirmed" branch and the
+      // retry control stays offered.
+      listLabOrderSpecimens: vi.fn().mockResolvedValue([]),
+      recordLabOrderCollection,
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
+    expect(
+      await screen.findByText("L'action n'a pas pu être confirmée. Vous pouvez réessayer."),
+    ).toBeInTheDocument()
+
+    // The user tries again, through the control that is still offered.
+    await user.click(await screen.findByRole('button', { name: 'Enregistrer la collecte' }))
+    await user.click(await screen.findByRole('button', { name: 'Confirmer la collecte' }))
+
+    await waitFor(() => expect(recordLabOrderCollection).toHaveBeenCalledTimes(2))
+    const firstKey = recordLabOrderCollection.mock.calls[0][2].idempotencyKey
+    const secondKey = recordLabOrderCollection.mock.calls[1][2].idempotencyKey
+    expect(firstKey).toBeTruthy()
+    expect(secondKey).toBe(firstKey)
+  })
+
+  it('SP-UI-2: a settled collection is followed by a NEW key, so a real second sample is not a replay', async () => {
+    // The complement of SP-UI-1, and the reason the ref is cleared on success rather than left set.
+    // If the key survived a confirmed collection, a genuinely new physical sample would be sent with
+    // the key the server already knows and would be answered as a replay -- silently discarding a
+    // real specimen, which is worse than a duplicate.
+    const recordLabOrderCollection = vi.fn().mockResolvedValue(makeCollectionResponse())
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockImplementation((_labId: string, orderId: string) =>
+        Promise.resolve(
+          makeOrder({
+            order_id: orderId,
+            status: 'ACCEPTED',
+            collection_recorded_at: '2026-09-18T10:42:00Z',
+          }),
+        ),
+      ),
+      listLabOrderSpecimens: vi.fn().mockResolvedValue([makeSpecimen()]),
+      recordLabOrderCollection,
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    // The order already carries a milestone, so the *additional* specimen control is the one offered.
+    await user.click(
+      await screen.findByRole('button', { name: 'Enregistrer un nouveau prélèvement' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Confirmer le prélèvement' }))
+    await waitFor(() => expect(recordLabOrderCollection).toHaveBeenCalledTimes(1))
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Enregistrer un nouveau prélèvement' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Confirmer le prélèvement' }))
+    await waitFor(() => expect(recordLabOrderCollection).toHaveBeenCalledTimes(2))
+
+    const firstKey = recordLabOrderCollection.mock.calls[0][2].idempotencyKey
+    const secondKey = recordLabOrderCollection.mock.calls[1][2].idempotencyKey
+    expect(firstKey).toBeTruthy()
+    expect(secondKey).not.toBe(firstKey)
+  })
+
+  it('SP-UI-3: two specimens render oldest-first, and nothing calls the second a recollection', async () => {
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'IN_PROGRESS' })]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'IN_PROGRESS', collection_recorded_at: '2026-09-18T09:12:00Z' }),
+      ),
+      listLabOrderSpecimens: vi.fn().mockResolvedValue([
+        makeSpecimen({ id: 'specimen-1', recorded_at: '2026-09-18T09:12:00Z' }),
+        makeSpecimen({ id: 'specimen-2', recorded_at: '2026-09-18T09:46:00Z' }),
+      ]),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(await screen.findByText('Prélèvements (2)')).toBeInTheDocument()
+    const rows = screen.getAllByText(/Prélèvement enregistré/)
+    expect(rows).toHaveLength(2)
+    expect(rows[0].textContent).toMatch(/^1\./)
+    expect(rows[1].textContent).toMatch(/^2\./)
+
+    // The wording the domain is entitled to, and nothing beyond it. DHealth does not know *why* a
+    // second sample was recorded -- an order may legitimately need more than one -- so no row may
+    // imply the first was rejected or replaced. "Prélèvement effectué" is excluded for a different
+    // reason: the server recorded that someone entered it, never that collection physically
+    // happened at that instant.
+    const panel = document.body.textContent ?? ''
+    for (const forbidden of [
+      'recollecte',
+      'Recollecte',
+      'remplacement',
+      'Prélèvement rejeté',
+      'Prélèvement refusé',
+      'Prélèvement effectué',
+      'Nouveau prélèvement enregistré',
+    ]) {
+      expect(panel).not.toContain(forbidden)
+    }
+  })
+
+  it('SP-UI-4: the single milestone timestamp is NOT shown beside a specimen history', async () => {
+    // Two displays of an overlapping fact. For the first collection they are the same instant by
+    // construction; after a second one the milestone line would keep showing the *first* instant
+    // next to a two-row history, which reads as a contradiction.
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T09:12:00Z' }),
+      ),
+      listLabOrderSpecimens: vi.fn().mockResolvedValue([makeSpecimen()]),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(await screen.findByText('Prélèvements (1)')).toBeInTheDocument()
+    expect(screen.queryByText('Collecte enregistrée')).not.toBeInTheDocument()
+  })
+
+  it('SP-UI-5: a pre-specimen order keeps the milestone wording and claims no specimen count', async () => {
+    // The honest historical case: a collection recorded before specimens were modelled. The
+    // milestone is the only truth, and how many physical samples it stood for is unknown -- so
+    // "Prélèvements (0)" would be a false claim and must not appear.
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T09:12:00Z' }),
+      ),
+      listLabOrderSpecimens: vi.fn().mockResolvedValue([]),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(await screen.findByText('Collecte enregistrée')).toBeInTheDocument()
+    expect(screen.queryByText('Prélèvements (0)')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Prélèvements \(/)).not.toBeInTheDocument()
+  })
+
+  it('SP-UI-6: the additional-specimen control appears only where the server would accept it', async () => {
+    // Status-driven, exactly as every other action on this page is. Hiding a control that would be
+    // refused is usability; the boundary stays server-side, which is why the backend suite asserts
+    // the same four refusals independently.
+    const cases: Array<{
+      status: LabWorkflowOrder['status']
+      collection: string | null
+      offered: boolean
+    }> = [
+      { status: 'ACCEPTED', collection: '2026-09-18T09:12:00Z', offered: true },
+      { status: 'IN_PROGRESS', collection: '2026-09-18T09:12:00Z', offered: true },
+      // No milestone yet: the *primary* "Enregistrer la collecte" action is the right control.
+      { status: 'ACCEPTED', collection: null, offered: false },
+      { status: 'SELECTED', collection: null, offered: false },
+      { status: 'COMPLETED', collection: '2026-09-18T09:12:00Z', offered: false },
+      { status: 'REJECTED', collection: null, offered: false },
+    ]
+
+    for (const { status, collection, offered } of cases) {
+      const client = makeClient({
+        listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status })]),
+        getLabOrder: vi
+          .fn()
+          .mockResolvedValue(makeOrder({ status, collection_recorded_at: collection })),
+        listLabOrderSpecimens: vi.fn().mockResolvedValue(collection ? [makeSpecimen()] : []),
+      })
+      const user = userEvent.setup()
+      const { unmount } = render(<StaffApp client={client} initialSection="orders" />)
+      await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+      await waitFor(() => expect(screen.getByText(/Établissement prescripteur/)).toBeInTheDocument())
+
+      const control = screen.queryByRole('button', { name: 'Enregistrer un nouveau prélèvement' })
+      if (offered) {
+        expect(control, `expected the control for ${status}/${collection}`).toBeInTheDocument()
+      } else {
+        expect(control, `did not expect the control for ${status}/${collection}`).toBeNull()
+      }
+      unmount()
+    }
+  })
+
+  it('SP-UI-7: a blocked order offers no collection control at all', async () => {
+    // BLOCKED means this laboratory cannot currently continue, and DHEALTH-LAB-BLOCKED-001's rule
+    // that every continuation refuses must not have been punched through by this ticket.
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'BLOCKED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({
+          status: 'BLOCKED',
+          collection_recorded_at: '2026-09-18T09:12:00Z',
+          active_block: makeBlock(),
+        }),
+      ),
+      listLabOrderSpecimens: vi.fn().mockResolvedValue([makeSpecimen()]),
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+    await waitFor(() => expect(screen.getByText('Prélèvements (1)')).toBeInTheDocument())
+
+    expect(
+      screen.queryByRole('button', { name: 'Enregistrer un nouveau prélèvement' }),
+    ).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Enregistrer la collecte' })).toBeNull()
+  })
+
+  it('SP-UI-8: the specimen history is read per opened order, and a failure is reported not hidden', async () => {
+    const listLabOrderSpecimens = vi.fn().mockRejectedValue(new Error('history unavailable'))
+    const client = makeClient({
+      listLabOrders: vi.fn().mockResolvedValue([makeOrder({ status: 'ACCEPTED' })]),
+      getLabOrder: vi.fn().mockResolvedValue(
+        makeOrder({ status: 'ACCEPTED', collection_recorded_at: '2026-09-18T09:12:00Z' }),
+      ),
+      listLabOrderSpecimens,
+    })
+    const user = userEvent.setup()
+    render(<StaffApp client={client} initialSection="orders" />)
+    await user.click(await screen.findByRole('button', { name: /^Examiner/ }))
+
+    expect(
+      await screen.findByText('Impossible de charger les prélèvements de cet ordre.'),
+    ).toBeInTheDocument()
+    // A failed history read must not be rendered as "no specimens": the milestone line is shown
+    // instead, which is the one thing still known to be true.
+    expect(screen.queryByText(/Prélèvements \(/)).not.toBeInTheDocument()
+    expect(screen.getByText('Collecte enregistrée')).toBeInTheDocument()
+    expect(listLabOrderSpecimens).toHaveBeenCalledWith('lab-a', 'order-a', expect.anything())
+  })
+
   it('LR-C3: collection response lost, order moved on -- current state shown, never fabricated', async () => {
     let calls = 0
     const client = makeClient({
