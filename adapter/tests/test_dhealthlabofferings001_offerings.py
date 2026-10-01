@@ -987,3 +987,64 @@ def test_the_clinic_never_receives_laboratory_configuration(
 
     # A clinic has no route to laboratory configuration at all, which is the stronger statement.
     assert _list_offerings(client, clinician, lab.id).status_code == 404
+
+
+def test_the_offerings_read_is_filtered_by_laboratory_in_the_repository_itself(
+    organizations, catalog, directory, sessions
+):
+    """**Added because NC-OF-1 did not redden**, which was the control doing its job.
+
+    The HTTP route refuses a foreign laboratory on the *membership* check before the repository is
+    ever reached, so deleting the repository's own ownership filter changed no HTTP outcome and the
+    rival-laboratory test stayed green. That filter is defence in depth behind the gate -- and
+    defence in depth that nothing tests is defence in depth that can be deleted by accident.
+
+    So this asserts it directly, at the repository, where it is the only thing standing between a
+    caller and every laboratory's configuration. Two laboratories, each offering its own analysis:
+    each read returns exactly its own row."""
+    lab_a, entry_a, offering_a = _lab_with_offering(
+        catalog, directory, organizations, name="FilterA", code="FILTER-A"
+    )
+    lab_b, entry_b, offering_b = _lab_with_offering(
+        catalog, directory, organizations, name="FilterB", code="FILTER-B"
+    )
+
+    a_rows = catalog.list_offerings_for_lab(lab_a.id)
+    b_rows = catalog.list_offerings_for_lab(lab_b.id)
+
+    assert [row.id for row in a_rows] == [offering_a.id]
+    assert [row.id for row in b_rows] == [offering_b.id]
+    assert all(row.lab_organization_id == lab_a.id for row in a_rows)
+    assert all(row.lab_organization_id == lab_b.id for row in b_rows)
+    # The sharpest form: neither read may contain the other's catalogue entry.
+    assert entry_b.id not in {row.catalog_entry_id for row in a_rows}
+    assert entry_a.id not in {row.catalog_entry_id for row in b_rows}
+
+    # And a laboratory with nothing configured reads empty rather than everything.
+    empty_lab = make_lab(organizations, name="FilterEmpty")
+    assert catalog.list_offerings_for_lab(empty_lab.id) == []
+
+
+def test_the_model_declares_one_offering_per_laboratory_and_service():
+    """**Added because NC-OF-4 did not redden**, and the reason is worth recording.
+
+    `PG-OF-5` asserts the constraint against the live PostgreSQL schema, which alembic created. A
+    mutation to the SQLAlchemy model therefore changes nothing that test can see -- the database
+    still has the constraint. The model and the migration are two separate statements of the same
+    rule and both need a guard.
+
+    This is the model's half. It reddens if `UniqueConstraint` becomes a plain `Index`, which is
+    exactly the shape a well-meaning "this was slowing inserts down" change would take."""
+    unique_pairs = {
+        tuple(sorted(column.name for column in constraint.columns))
+        for constraint in LabOffering.__table__.constraints
+        if type(constraint).__name__ == "UniqueConstraint"
+    }
+    assert ("catalog_entry_id", "lab_organization_id") in unique_pairs, (
+        "the model must declare one offering per (laboratory, service) -- without it two rows can "
+        "disagree about whether the laboratory accepts the analysis"
+    )
+    # Scoped to the laboratory, never global: the same canonical analysis is offered by many
+    # laboratories and each one's availability is its own fact.
+    assert ("catalog_entry_id",) not in unique_pairs
+    assert not LabOffering.__table__.c.catalog_entry_id.unique
