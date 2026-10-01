@@ -1018,9 +1018,9 @@ def test_extra_body_fields_rejected(
     This ticket gives the route a real `LabCollectionRequest` with `extra="forbid"`, so an invented
     clinical attribute is now actively rejected with a 422 naming the offending field. That is the
     structural guard `AGENTS.md`'s "never invent clinical content" rule wants at the HTTP boundary:
-    `specimen_type`, `collected_at`, tube, volume and container are not "not yet supported", they are
-    refused, and the refusal is what this test now pins. The bodyless request DH-EX-011 shipped stays
-    valid verbatim, which is the second half of the assertion.]**"""
+    `specimen_type`, `collected_at`, tube, volume and container are not "not yet supported", they
+    are refused, and the refusal is what this test now pins. The bodyless request DH-EX-011
+    shipped stays valid verbatim, which is the second half of the assertion.]**"""
     private_key, _ = keypair
     provider, order_id, entry_id, clinician_token = _create_order(
         client, private_key, organizations, catalog, patients, name="NoBody"
