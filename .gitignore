@@ -99,3 +99,8 @@ native-reception-results.json
 # by scripts/demo/qualify-specimen.sh. Evidence of a run, not part of the source -- same treatment
 # as its ten siblings above.
 native-specimen-results.json
+
+# DHEALTH-LAB-OFFERINGS-001: the laboratory service-availability qualification report, written at
+# the repository root by scripts/demo/qualify-offerings.sh. Evidence of a run, not part of the
+# source -- same treatment as its eleven siblings above.
+native-offerings-results.json
