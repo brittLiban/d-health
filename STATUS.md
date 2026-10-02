@@ -61,7 +61,7 @@ compares a value to one**; a test puts `9.9` against a released `3.5–5.5` rang
 document says nothing about it. An older version reads "Version remplacée — résultat actuel :
 version N", never invalid, cancelled or revoked.
 
-**Evidence:** 32 HTTP-edge tests, 6 real-PostgreSQL tests, 34 UI unit tests, 19 real-browser phases
+**Evidence:** 35 HTTP-edge tests, 6 real-PostgreSQL tests, 40 UI unit tests, 19 real-browser phases
 (print media, two generated PDFs, 1280/768/390 with no horizontal overflow, zero console errors).
 **Eleven questions recorded for a human and none answered** — accession number, specimen type,
 collection time, laboratory address/licence, named releaser, signatory, cryptographic signature,

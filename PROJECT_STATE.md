@@ -23689,6 +23689,15 @@ release reprints under the new name, and `RP-I1` renames it and asserts that the
 the clinical content does not. The report is **not** described as immutable — its released clinical
 content is.
 
+### Legacy releases: nothing to backfill, and nothing fabricated
+
+ADR-044's grandfather rule leaves one shape: a `COMPLETED` order with no `LabResultRelease`, hence
+**no release version at all**, and not amendment-eligible (ADR-048 Decision 6). A version-bound
+report has nothing to name for it, so there is nothing to backfill and no provenance was invented:
+the laboratory's version-history section lists zero versions, the clinic's button is suppressed
+because `release_version_id` is `null`, and the routes answer `404` for any id supplied. No migration
+asserts what a historical report "looked like" for a release that never produced one.
+
 ### Defect found, and where it could only have been found
 
 **The report printed a blank page**, and every jsdom test passed while it did.
@@ -23726,9 +23735,9 @@ rediscover it:
 
 | Suite | Result |
 |---|---|
-| `tests/test_dhealthlabreport001_report.py` | **32 passed** (28 behavioural + 4 structural guards) |
+| `tests/test_dhealthlabreport001_report.py` | **35 passed** (28 behavioural + 3 capability-override + 4 structural guards). The three override tests each assert a **transition on one unchanged bearer token** (200 → 403 on a `DENY`, 403 → 200 on a `GRANT`, 200 → 403 on clearing it), so a gate that ignored overrides fails the second assertion — they cannot pass vacuously |
 | `tests/integration/test_dhealthlabreport001_postgres_qualification.py` | **6 passed** on real PostgreSQL 16 |
-| UI unit: report component / print styles / entry points | **34 passed** across 3 files |
+| UI unit: report component / print styles / entry points | **40 passed** across 3 files (18 + 16 + 6). An earlier draft of this entry said 34 — it had added two of the three files and omitted `reportEntryPoints` entirely. Re-measured |
 | Full UI suite | **65 of 65 files, 1049 tests passed, 0 failed** on an idle machine, measured in reconciled batches of 7. An earlier run of the same suite *while the PostgreSQL suite was running concurrently* dropped one file from each of two batches (known vitest behaviour; re-run split, both green) and failed `ExchangeAuthProvider.test.tsx > retry() re-runs initialization from scratch` — the **catalogued load-sensitive flake**. The idle run reproduces neither. Not a regression from this ticket |
 | Full adapter suite | **2108 passed, 266 skipped, 0 failed** (981s) |
 | `npm run build` + `postbuild` no-secrets check | clean — **"No secrets found across 28 built file(s)"** |

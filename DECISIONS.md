@@ -10362,6 +10362,19 @@ to store and did not find one:
 The report's reference is the order's own id. Human-facing accession numbering remains unresolved
 laboratory workflow and this ticket did not quietly settle it.
 
+### 3a. Legacy releases, and why none of them needed backfilling
+
+ADR-044's grandfather rule left one shape in existence: a `COMPLETED` order with **no**
+`LabResultRelease`, created before the explicit release step existed. Such an order has **no release
+version at all** and is not amendment-eligible (ADR-048 Decision 6).
+
+The report therefore needs no migration, no backfill and no fabricated provenance for it, and it gets
+none. A version-bound report simply has nothing to name: the laboratory's version history section is
+bound to a `COMPLETED` order and lists zero versions, the clinic's report button is suppressed
+because `displayedContent.release_version_id` is `null`, and the report routes answer `404` for any
+id supplied. **Nothing asserts "this is what the historical report looked like" for a release that
+produced no report**, which is the fabrication the ticket warned against.
+
 ### 4. Authorization is reused wholesale; release authority is not read authority
 
 Two routes, both carrying `Cache-Control: no-store`:
@@ -10502,9 +10515,9 @@ that patient's identity at collection (**D-4**).
 
 ### 9. Evidence, and the boundary of the claim
 
-32 HTTP-edge tests, 6 real-PostgreSQL tests (including a report read while a Version 2 release is
+35 HTTP-edge tests, 6 real-PostgreSQL tests (including a report read while a Version 2 release is
 genuinely blocked on the order's row lock — the deterministic proof that no reader sees half of one
-version and half of another), 34 UI unit tests, and 19 real-browser phases against real Keycloak, a
+version and half of another), 40 UI unit tests, and 19 real-browser phases against real Keycloak, a
 real adapter and real PostgreSQL.
 
 **May now be claimed:** Hawva can render a printable laboratory report for an exact released result

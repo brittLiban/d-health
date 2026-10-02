@@ -260,6 +260,51 @@ def _member_token(client, private_key, org_id, subject: str, roles: list[str]) -
     return make_token(private_key, subject=subject)
 
 
+def _member_with_membership(
+    client, private_key, org_id, subject: str, roles: list[str]
+) -> tuple[str, str]:
+    """Same as `_member_token`, but keeps the membership id the override endpoint needs."""
+    identity_id = _bootstrap_identity(client, private_key, subject)
+    admin_token = make_token(
+        private_key, subject=f"setup-admin-{subject}", roles=[PLATFORM_ADMIN_ROLE]
+    )
+    response = client.post(
+        f"/exchange/v1/organizations/{org_id}/memberships",
+        headers=_auth(admin_token),
+        json={"identity_id": identity_id, "roles": roles},
+    )
+    assert response.status_code in (200, 201), response.text
+    return make_token(private_key, subject=subject), response.json()["membership_id"]
+
+
+def _set_override(client, private_key, org_id, membership_id: str, capability: str, effect: str):
+    """ADR-067's per-member override. Applied by an ORG_ADMIN of that organization."""
+    admin_token = _member_token(
+        client, private_key, org_id, f"capadmin-{membership_id[:8]}", ["ORG_ADMIN"]
+    )
+    response = client.put(
+        f"/exchange/v1/organizations/{org_id}/memberships/{membership_id}"
+        f"/capabilities/{capability}",
+        headers=_auth(admin_token),
+        json={"effect": effect},
+    )
+    assert response.status_code == 200, response.text
+    return response
+
+
+def _clear_override(client, private_key, org_id, membership_id: str, capability: str):
+    admin_token = _member_token(
+        client, private_key, org_id, f"capclear-{membership_id[:8]}", ["ORG_ADMIN"]
+    )
+    response = client.delete(
+        f"/exchange/v1/organizations/{org_id}/memberships/{membership_id}"
+        f"/capabilities/{capability}",
+        headers=_auth(admin_token),
+    )
+    assert response.status_code == 200, response.text
+    return response
+
+
 def _priced_lab(catalog, directory, organizations, *, name: str, entry_id: uuid.UUID):
     lab = make_lab(organizations, name=name)
     offering, _ = catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry_id)
@@ -1037,6 +1082,99 @@ def test_rp_e8_an_unauthenticated_request_is_refused(
         ).status_code
         == 401
     )
+
+
+def test_rp_e9_a_deny_override_on_the_read_capability_refuses_the_report(
+    client, keypair, organizations, catalog, directory, patients, sessions
+):
+    """ADR-067 per-member overrides reach the report because the gate is a capability gate.
+
+    The report adds no authority of its own, so this is not a new boundary -- it is evidence
+    that the boundary it reuses is the real one. A `LAB_TECH` who may read the report loses it
+    when an administrator denies `lab.queue.work` for that one member, **on the next request**,
+    with no logout and no token refresh: the same bearer token is used before and after.
+    """
+    private_key, _ = keypair
+    scenario = _ready_released_scenario(
+        client, private_key, organizations, catalog, directory, patients, sessions, "E9"
+    )
+    version_id = _version_id(client, scenario, 1)
+    token, membership_id = _member_with_membership(
+        client, private_key, scenario.lab_id, "e9-tech", ["LAB_TECH"]
+    )
+
+    before = client.get(
+        _lab_report_url(scenario.lab_id, scenario.order_id, version_id), headers=_auth(token)
+    )
+    assert before.status_code == 200, before.text
+
+    _set_override(client, private_key, scenario.lab_id, membership_id, "lab.queue.work", "DENY")
+
+    # Same token, no re-authentication.
+    after = client.get(
+        _lab_report_url(scenario.lab_id, scenario.order_id, version_id), headers=_auth(token)
+    )
+    assert after.status_code == 403, after.text
+    assert "4.2" not in after.text
+
+
+def test_rp_e10_a_grant_override_alone_is_enough_to_read_the_report(
+    client, keypair, organizations, catalog, directory, patients, sessions
+):
+    """The other direction: a membership whose role template carries no laboratory clinical
+    authority at all reads the report once `lab.queue.work` is granted to that one member. The
+    report's gate is the capability, never the role name."""
+    private_key, _ = keypair
+    scenario = _ready_released_scenario(
+        client, private_key, organizations, catalog, directory, patients, sessions, "E10"
+    )
+    version_id = _version_id(client, scenario, 1)
+    # BILLING_CLERK: money authority and nothing clinical (ADR-066).
+    token, membership_id = _member_with_membership(
+        client, private_key, scenario.lab_id, "e10-clerk", ["BILLING_CLERK"]
+    )
+
+    refused = client.get(
+        _lab_report_url(scenario.lab_id, scenario.order_id, version_id), headers=_auth(token)
+    )
+    assert refused.status_code == 403, refused.text
+
+    _set_override(client, private_key, scenario.lab_id, membership_id, "lab.queue.work", "GRANT")
+
+    granted = client.get(
+        _lab_report_url(scenario.lab_id, scenario.order_id, version_id), headers=_auth(token)
+    )
+    assert granted.status_code == 200, granted.text
+
+
+def test_rp_e11_clearing_the_override_returns_the_member_to_their_role(
+    client, keypair, organizations, catalog, directory, patients, sessions
+):
+    """Revocation is not a separate mechanism, and it takes effect on the same token. Granted,
+    readable; cleared, refused again -- because the member's role template never carried it."""
+    private_key, _ = keypair
+    scenario = _ready_released_scenario(
+        client, private_key, organizations, catalog, directory, patients, sessions, "E11"
+    )
+    version_id = _version_id(client, scenario, 1)
+    token, membership_id = _member_with_membership(
+        client, private_key, scenario.lab_id, "e11-clerk", ["BILLING_CLERK"]
+    )
+
+    _set_override(client, private_key, scenario.lab_id, membership_id, "lab.queue.work", "GRANT")
+    assert (
+        client.get(
+            _lab_report_url(scenario.lab_id, scenario.order_id, version_id), headers=_auth(token)
+        ).status_code
+        == 200
+    )
+
+    _clear_override(client, private_key, scenario.lab_id, membership_id, "lab.queue.work")
+    revoked = client.get(
+        _lab_report_url(scenario.lab_id, scenario.order_id, version_id), headers=_auth(token)
+    )
+    assert revoked.status_code == 403, revoked.text
+    assert "4.2" not in revoked.text
 
 
 # ==================================================================================================
