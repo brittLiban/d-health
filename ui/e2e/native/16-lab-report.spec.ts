@@ -80,6 +80,20 @@ const LAB_TECH = {
   username: process.env.DEMO_LAB_TECH_USERNAME ?? 'demo-lab-tech',
   password: process.env.DEMO_LAB_TECH_PASSWORD ?? '',
 }
+/**
+ * `demo-releaser` holds `LAB_RESULT_RELEASER` and nothing else; `demo-lab-tech` holds `LAB_TECH` and
+ * nothing else. ADR-044 keeps entry and release as separate authorities, and the demo baseline
+ * models that honestly, so this suite needs both.
+ */
+const RELEASER = {
+  username: process.env.DEMO_RELEASER_USERNAME ?? 'demo-releaser',
+  password: process.env.DEMO_RELEASER_PASSWORD ?? '',
+}
+/**
+ * `demo-lab-admin` holds `ORG_ADMIN` only -- `facility.configure`, no clinical role of any kind. It
+ * appears here for two opposite reasons: RP-I needs it to switch the analysis off, and RP-H needs it
+ * to prove that configuration authority grants no report read.
+ */
 const LAB_ADMIN = {
   username: process.env.DEMO_LAB_ADMIN_USERNAME ?? 'demo-lab-admin',
   password: process.env.DEMO_LAB_ADMIN_PASSWORD ?? '',
@@ -155,8 +169,16 @@ function reportDocument(page: Page) {
   return page.locator('[data-released-report]')
 }
 
-async function openLabReportForVersion(page: Page, versionNumber: number): Promise<void> {
+/**
+ * Opens this run's order in the laboratory's Ordres page.
+ *
+ * The `Tous` tab is not optional. That page filters by status and opens on `Nouveaux`, so an order
+ * that has been accepted, processed or released is not in the default list at all -- which looks
+ * exactly like "the order is missing" to a locator.
+ */
+async function openLabOrderPanel(page: Page): Promise<void> {
   await openSection(page, 'Ordres')
+  await page.getByRole('tab', { name: 'Tous', exact: true }).click()
   const card = page
     .locator('li,div')
     .filter({ hasText: orderReference })
@@ -164,6 +186,10 @@ async function openLabReportForVersion(page: Page, versionNumber: number): Promi
     .first()
   await expect(card).toBeVisible({ timeout: 30_000 })
   await card.getByRole('button', { name: new RegExp(`Examiner l.ordre de ${PATIENT}`) }).click()
+}
+
+async function openLabReportForVersion(page: Page, versionNumber: number): Promise<void> {
+  await openLabOrderPanel(page)
   await page.getByRole('button', { name: "Voir l'historique des versions" }).click()
   const row = page
     .getByRole('listitem')
@@ -276,18 +302,22 @@ test.describe('DHEALTH-LAB-REPORT-001 — one exact released version, printable'
     watchForBrowserProblems(page)
     const techToken = await signIn(page, LAB_TECH)
 
-    await openSection(page, 'Ordres')
-    const card = page
-      .locator('li,div')
-      .filter({ hasText: orderReference })
-      .filter({ hasText: PATIENT })
-      .first()
-    await card.getByRole('button', { name: new RegExp(`Examiner l.ordre de ${PATIENT}`) }).click()
-    await page.getByRole('button', { name: "Voir l'historique des versions" }).click()
+    await openLabOrderPanel(page)
 
-    // The result is entered and the entry is complete. There is still no released version, so there
-    // is no per-version report button anywhere on the screen.
+    /*
+     * The result is entered and the entry is complete, and the order is still IN_PROGRESS. What the
+     * laboratory's panel offers at this point is stronger than "no report button": the whole version
+     * history section does not exist, because it is bound to a COMPLETED order. There is no version
+     * to list, so there is nothing to print, and the product does not offer a control that would
+     * have to refuse.
+     */
+    await expect(
+      page.getByRole('button', { name: "Voir l'historique des versions" }),
+    ).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Voir le compte rendu' })).toHaveCount(0)
+    // And this is the panel for the right order, so the two absences above are not passing because
+    // the screen is empty.
+    await expect(page.getByText(/Saisie terminée/).first()).toBeVisible({ timeout: 30_000 })
 
     const ctx = await api()
     try {
@@ -317,8 +347,9 @@ test.describe('DHEALTH-LAB-REPORT-001 — one exact released version, printable'
 
   test('RP-C: the releaser releases Version 1', async ({ page }) => {
     watchForBrowserProblems(page)
-    // The demo lab administrator holds the release authority; the technician deliberately does not.
-    await signIn(page, LAB_ADMIN)
+    // The releaser, not the technician who entered the values and not the administrator: ADR-044
+    // keeps the three apart, and the demo baseline grants LAB_RESULT_RELEASER to this identity only.
+    await signIn(page, RELEASER)
     await openSection(page, 'Résultats')
     await page
       .getByRole('button', { name: new RegExp(`Examiner les résultats de ${PATIENT}`) })
@@ -497,13 +528,7 @@ test.describe('DHEALTH-LAB-REPORT-001 — one exact released version, printable'
       await ctx.dispose()
     }
 
-    await openSection(page, 'Ordres')
-    const card = page
-      .locator('li,div')
-      .filter({ hasText: orderReference })
-      .filter({ hasText: PATIENT })
-      .first()
-    await card.getByRole('button', { name: new RegExp(`Examiner l.ordre de ${PATIENT}`) }).click()
+    await openLabOrderPanel(page)
 
     await page.getByRole('button', { name: 'Commencer un amendement' }).click()
     await page.getByRole('button', { name: "Commencer l'amendement" }).click()
@@ -542,8 +567,11 @@ test.describe('DHEALTH-LAB-REPORT-001 — one exact released version, printable'
 
   test('RP-F: Version 2 is released', async ({ page }) => {
     watchForBrowserProblems(page)
-    await signIn(page, LAB_ADMIN)
+    await signIn(page, RELEASER)
     await openSection(page, 'Résultats')
+    // The release page keeps two queues behind two tabs: results awaiting a first release, and
+    // amendments awaiting theirs. An amendment is not in the default one.
+    await page.getByRole('tab', { name: 'Amendements', exact: true }).click()
     await page
       .getByRole('button', { name: new RegExp(`Examiner l.amendement de ${PATIENT}`) })
       .first()
@@ -662,10 +690,16 @@ test.describe('DHEALTH-LAB-REPORT-001 — one exact released version, printable'
 
   test('RP-H: unauthorized and rival actors cannot read the report', async ({ page }) => {
     watchForBrowserProblems(page)
-    // A real token from a real login, used against a report that is not this actor's to read. The
-    // browser cannot demonstrate this -- the control is not offered to them at all -- so the
+    // Real tokens from real logins, used against a report that is not theirs to read. The browser
+    // cannot demonstrate most of this -- the control is simply not offered to these actors -- so the
     // boundary is asserted where it actually lives.
     const adminToken = await signIn(page, LAB_ADMIN)
+
+    // First, in the browser: this administrator's navigation has no Resultats section at all, so
+    // there is no screen from which a report could be opened.
+    await expect(
+      page.getByRole('navigation').getByRole('button', { name: 'Résultats', exact: true }),
+    ).toHaveCount(0)
 
     const ctx = await api()
     try {
@@ -675,8 +709,17 @@ test.describe('DHEALTH-LAB-REPORT-001 — one exact released version, printable'
       )
       expect(anonymous.status()).toBe(401)
 
-      // The laboratory's own actor asking through the *clinic's* route: a laboratory membership is
-      // not a clinician membership at the ordering organization.
+      // **The facility-configuration separation.** demo-lab-admin holds ORG_ADMIN at this exact
+      // laboratory -- it is the identity RP-I uses to switch the analysis off -- and holds no
+      // clinical role. facility.configure must not read a released clinical result.
+      const configurer = await ctx.get(
+        `${API}/organizations/${labId}/lab-orders/${orderId}/release-versions/${versionOneId}/report`,
+        { headers: { Authorization: `Bearer ${adminToken}` } },
+      )
+      expect(configurer.status()).toBe(403)
+      expect(await configurer.text()).not.toContain(V1_VALUE)
+
+      // The same actor through the clinic's route, where they hold no membership at all.
       const wrongRoute = await ctx.get(
         `${API}/organizations/${providerId}/orders/${orderId}/release-versions/${versionOneId}/report`,
         { headers: { Authorization: `Bearer ${adminToken}` } },
@@ -705,16 +748,34 @@ test.describe('DHEALTH-LAB-REPORT-001 — one exact released version, printable'
     }
   })
 
-  test('RP-I: switching the analysis off does not hide the historical reports', async ({ page }) => {
+  /*
+   * Three tests, not one, and the reason is the Keycloak session.
+   *
+   * This phase needs two different identities: the administrator who switches the analysis off, and
+   * the technician who then still opens the report. Signing in twice inside one test does not switch
+   * identity -- the Keycloak SSO cookie is still live, so the second `goto('/')` silently
+   * re-authenticates as the first user and never reaches the login form. Playwright gives each test
+   * its own browser context, so splitting is what makes each sign-in a real one. They run in order
+   * because this file is serial.
+   */
+
+  test('RP-I: the administrator switches the analysis off, and both reports still answer', async ({
+    page,
+  }) => {
     watchForBrowserProblems(page)
-    const adminToken = await signIn(page, LAB_ADMIN)
+    await signIn(page, LAB_ADMIN)
 
     await openSection(page, 'Services et tarifs')
     const row = page.locator('li').filter({ hasText: ANALYSIS }).first()
     await expect(row).toBeVisible({ timeout: 30_000 })
-    await row.getByRole('button', { name: 'Ne plus accepter' }).click()
-    const confirm = page.getByRole('button', { name: /Confirmer|Ne plus accepter/ }).last()
-    await confirm.click()
+    await expect(row).toContainText('accepte les nouveaux ordres')
+
+    // One click, no confirmation step: the control is its own confirmation, and the row's own
+    // wording is how the screen reports the new state. An extra "Confirmer" click here would land on
+    // the toggle again and silently switch it back -- which is exactly what an earlier draft of this
+    // test did.
+    await row.getByRole('button', { name: 'Ne plus accepter', exact: true }).click()
+    await expect(row).toContainText("n'accepte plus de nouveaux ordres", { timeout: 30_000 })
 
     const ctx = await api()
     try {
@@ -735,17 +796,34 @@ test.describe('DHEALTH-LAB-REPORT-001 — one exact released version, printable'
     } finally {
       await ctx.dispose()
     }
+  })
 
-    // Restore it explicitly. The golden journey and every sibling laboratory suite need this
-    // offering accepting, and `reset.sh` does not restore it -- offerings are baseline
-    // configuration, not workflow state.
-    await page.reload()
+  test('RP-I2: with the analysis switched off, the technician still opens the report', async ({
+    page,
+  }) => {
+    watchForBrowserProblems(page)
+    // By clicking the product, not only through the API -- and as the technician, because an
+    // ORG_ADMIN membership has no Ordres section at all (RP-H asserts the same for Resultats). The
+    // actor who switched the analysis off is not the actor who reads results, and this phase needs
+    // both.
+    await signIn(page, LAB_TECH)
+    await openLabReportForVersion(page, 1)
+    await expect(reportDocument(page)).toContainText(V1_VALUE)
+    await expect(reportDocument(page)).toContainText('Version remplacée')
+  })
+
+  test('RP-I3: the administrator switches it back on, for every sibling suite', async ({ page }) => {
+    watchForBrowserProblems(page)
+    // Explicitly, not by relying on reset.sh: offerings are baseline configuration rather than
+    // workflow state and are deliberately absent from its `_WORKFLOW_TABLES`. The golden journey and
+    // every sibling laboratory suite need this analysis accepting.
+    const adminToken = await signIn(page, LAB_ADMIN)
     await openSection(page, 'Services et tarifs')
-    const restoreRow = page.locator('li').filter({ hasText: ANALYSIS }).first()
-    await expect(restoreRow).toBeVisible({ timeout: 30_000 })
-    await restoreRow.getByRole('button', { name: /Accepter à nouveau|Accepter/ }).first().click()
-    const restoreConfirm = page.getByRole('button', { name: /Confirmer|Accepter/ }).last()
-    await restoreConfirm.click()
+    const row = page.locator('li').filter({ hasText: ANALYSIS }).first()
+    await expect(row).toBeVisible({ timeout: 30_000 })
+    await expect(row).toContainText("n'accepte plus de nouveaux ordres")
+    await row.getByRole('button', { name: 'Accepter à nouveau', exact: true }).click()
+    await expect(row).toContainText('accepte les nouveaux ordres', { timeout: 30_000 })
 
     const verify = await api()
     try {

@@ -100,6 +100,39 @@ describe('released report print styles — the application is removed, not parti
   })
 })
 
+describe('released report print styles — the third print mechanism this repository already had', () => {
+  /*
+   * `features/billing/Billing.module.css` hides `body *` in print so a patient's receipt prints
+   * alone. That rule is global and reaches *everything*, including a report portalled outside
+   * `#root`. DHEALTH-LAB-REPORT-001's browser qualification printed a blank page because of it,
+   * while every jsdom test passed — no unit test here evaluates a print cascade, so this is as close
+   * as a unit test can get: assert that the hiding rule still exists (so the fix is still needed)
+   * and that the report still re-reveals itself (so the fix is still there).
+   */
+  const billingCss = stripComments(
+    readFileSync(
+      join(process.cwd(), 'src', 'features', 'billing', 'Billing.module.css'),
+      'utf-8',
+    ),
+  )
+
+  it('the billing receipt still hides everything under body in print', () => {
+    expect(billingCss.length).toBeGreaterThan(500)
+    expect(printBlockOf(billingCss)).toMatch(/body\s*\*\s*\{\s*visibility:\s*hidden/)
+  })
+
+  it('the report re-reveals its own subtree, so it does not print blank', () => {
+    const printBlock = printBlockOf(moduleCss)
+    expect(printBlock).toMatch(/\.overlay,\s*\n?\s*\.overlay\s*\*\s*\{\s*visibility:\s*visible/)
+  })
+
+  it('and the action bar stays off paper despite that re-reveal', () => {
+    // `display: none` is not undone by `visibility: visible`, which is the only reason re-revealing
+    // the whole subtree is safe.
+    expect(printBlockOf(moduleCss)).toMatch(/\.actions\s*\{\s*display:\s*none/)
+  })
+})
+
 describe('released report print styles — the document paginates', () => {
   it('returns the overlay to static flow in print', () => {
     const printBlock = printBlockOf(moduleCss)

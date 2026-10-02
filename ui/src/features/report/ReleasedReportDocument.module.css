@@ -299,6 +299,27 @@
  * cannot reach `#root`. Everything else is scoped here, to this component's own classes.
  */
 @media print {
+  /* ── Re-reveal, because something else in this application hides everything ───────────────────
+   *
+   * `features/billing/Billing.module.css` ends its own print block with `body * { visibility:
+   * hidden }` so a patient's receipt prints alone. That rule is global, it applies on every screen
+   * in the bundle, and it hides `body *` rather than `#root *` — so it reaches this report too, even
+   * though the report is portalled outside `#root` specifically to escape the *other* print
+   * mechanism in `index.css`.
+   *
+   * This was found by DHEALTH-LAB-REPORT-001's browser qualification, which printed a blank page
+   * while every jsdom test passed: no unit test in this repository evaluates a print cascade. The
+   * two declarations below are the smallest fix, and they are scoped to this component's own
+   * classes — the billing receipt's rules are not touched, because a receipt and a report must each
+   * be able to print alone without knowing about the other.
+   *
+   * `.actions` is still `display: none` below, so re-revealing this subtree does not put the back
+   * and print buttons on paper. */
+  .overlay,
+  .overlay * {
+    visibility: visible;
+  }
+
   .overlay {
     /* Back to ordinary static flow. This is the whole reason the report does not reuse the
        `[data-print-root]` mechanism: a fixed or absolutely positioned root does not fragment
