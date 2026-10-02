@@ -23741,14 +23741,19 @@ rediscover it:
 | Full UI suite | **65 of 65 files, 1049 tests passed, 0 failed** on an idle machine, measured in reconciled batches of 7. An earlier run of the same suite *while the PostgreSQL suite was running concurrently* dropped one file from each of two batches (known vitest behaviour; re-run split, both green) and failed `ExchangeAuthProvider.test.tsx > retry() re-runs initialization from scratch` — the **catalogued load-sensitive flake**. The idle run reproduces neither. Not a regression from this ticket |
 | Full adapter suite | **2108 passed, 266 skipped, 0 failed** (981s) |
 | `npm run build` + `postbuild` no-secrets check | clean — **"No secrets found across 28 built file(s)"** |
-| `ui/e2e/native/16-lab-report.spec.ts` | **19 of 19 phases passed** against real Chromium, Caddy, Keycloak 26.7.1, the adapter and PostgreSQL 16 |
+| `ui/e2e/native/16-lab-report.spec.ts` | **19 of 19 phases passed** against real Chromium, Caddy, Keycloak 26.7.1, the adapter and PostgreSQL 16. Re-run green after the five sibling suites below, from a fresh `reset.sh` |
+| **Sibling browser regression** | Run because this ticket touched three *shared* surfaces, so a green report suite is not evidence for them: `ClinicResultsPage` (the golden journey's review phase runs through it), `ReleaseVersionHistory` (mounted in both `LabOrdersPage` and `LabReleasePage`), and a **global** print rule in `index.css`. Each from its own `reset.sh` baseline: **golden journey + authorization (01/02) 12 passed**, **lab offerings (15) 13 passed**, **lab reception (13) 10 passed**, **lab specimen (14) 14 passed**, **lab blocked (11) 13 passed**. 62 sibling phases, 0 failed |
 | `ruff check` / `ruff format` | clean |
 | `npm run typecheck` (`tsc -b`) | clean |
 | `npm run typecheck:e2e` | clean |
 | `oxlint` | **0 errors.** 53 warnings, identical to the pre-ticket baseline; the new files contribute **0** |
 
 **Not run:** CI itself. Full CI cannot run before a push-triggered commit, and nothing here was
-pushed — so every number above is a local measurement, not a green CI run. **No restore drill** —
+pushed — so every number above is a local measurement, not a green CI run. The browser suites not
+in the sibling list above — `03`/`04` recovery, `05`/`06` security, `07` access lifecycle, `08`
+clinic visit, `09` billing, `10` capabilities, `12` front desk — were **not** run: none of them
+mounts a surface this diff touched, and the adapter suite (2108 passed) covers their backend
+contracts. Said here rather than left to be inferred from "the regression passed". **No restore drill** —
 this ticket required none, and the existence of backup tooling is not a claim that recovery was
 demonstrated for this change. **No manual human walkthrough** of the report by anyone who works in a
 laboratory or a clinic.
@@ -23827,7 +23832,7 @@ D-4 and D-11 are untouched and exactly as open as they were.**
 |---|---|
 | Disposable PostgreSQL | container `dhrp-qual-pg`, `postgres:16-alpine`, port 55461, migrated to `0039_lab_specimens`, **destroyed** (`docker rm -f`, verified no qualification container remains). Never a facility database |
 | Generated test documents | the PDFs `RP-D2`/`RP-J` emit go to the OS temp directory and are deleted by the test that made them. **Nothing commits them.** `RP-G`'s screenshots land in gitignored `ui/test-results/` for a human to look at; nothing asserts on them |
-| Demo stack | rebuilt (`up -d --build`, both images) and left **running**, left **post-report-qualification and not reset** — run `scripts/demo/reset.sh` before the next browser suite |
+| Demo stack | rebuilt (`up -d --build`, both images) and left **running**, left **post-report-qualification and not reset** — run `scripts/demo/reset.sh` before the next browser suite. All five containers were healthy at the end; note the Docker daemon in this environment bounces every so often and restarted them mid-run once, which `waitForEdge` surfaced as a `beforeAll` timeout rather than a product failure |
 | Laboratory offering | **active**, restored explicitly by `RP-I3`. `reset.sh` does not restore it (baseline configuration, not workflow state); `qualify-report.sh` documents the one-line SQL for a crashed run |
 | Orders left behind | one, released twice. Nothing deletes a lab order by design; `reset.sh` clears it as workflow state |
 | Pushed | **no** |
