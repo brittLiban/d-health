@@ -23729,16 +23729,62 @@ rediscover it:
 | `tests/test_dhealthlabreport001_report.py` | **32 passed** (28 behavioural + 4 structural guards) |
 | `tests/integration/test_dhealthlabreport001_postgres_qualification.py` | **6 passed** on real PostgreSQL 16 |
 | UI unit: report component / print styles / entry points | **34 passed** across 3 files |
-| Full UI suite | **65 of 65 files pass.** Measured in reconciled batches of 7; two batches silently dropped one file each (known vitest behaviour) and were re-run split. One failure, `ExchangeAuthProvider.test.tsx > retry() re-runs initialization from scratch` — the **catalogued load-sensitive flake**, which occurred while the PostgreSQL suite ran concurrently and **passes on an idle machine**. Not a regression from this ticket |
+| Full UI suite | **65 of 65 files, 1049 tests passed, 0 failed** on an idle machine, measured in reconciled batches of 7. An earlier run of the same suite *while the PostgreSQL suite was running concurrently* dropped one file from each of two batches (known vitest behaviour; re-run split, both green) and failed `ExchangeAuthProvider.test.tsx > retry() re-runs initialization from scratch` — the **catalogued load-sensitive flake**. The idle run reproduces neither. Not a regression from this ticket |
+| Full adapter suite | **2108 passed, 266 skipped, 0 failed** (981s) |
+| `npm run build` + `postbuild` no-secrets check | clean — **"No secrets found across 28 built file(s)"** |
 | `ui/e2e/native/16-lab-report.spec.ts` | **19 of 19 phases passed** against real Chromium, Caddy, Keycloak 26.7.1, the adapter and PostgreSQL 16 |
 | `ruff check` / `ruff format` | clean |
 | `npm run typecheck` (`tsc -b`) | clean |
 | `npm run typecheck:e2e` | clean |
 | `oxlint` | **0 errors.** 53 warnings, identical to the pre-ticket baseline; the new files contribute **0** |
 
-**Not run:** `npm run build`, the full adapter suite, and the no-secrets bundle check — all three are
-run before the final commit; see the handoff. **No restore drill** — this ticket required none, and
-the existence of backup tooling is not a claim that recovery was demonstrated for this change.
+**Not run:** CI itself. Full CI cannot run before a push-triggered commit, and nothing here was
+pushed — so every number above is a local measurement, not a green CI run. **No restore drill** —
+this ticket required none, and the existence of backup tooling is not a claim that recovery was
+demonstrated for this change. **No manual human walkthrough** of the report by anyone who works in a
+laboratory or a clinic.
+
+### Negative controls — 16 run, 16 reddened, every one reverted byte-for-byte
+
+Run as the repository owner against committed work, each weakening exactly one real invariant and
+then checked against the specific evidence that claims to guard it. `git status --porcelain` and
+`git diff --stat` proved a clean tree before and after every single one.
+
+| Control | What was weakened | Evidence that went red |
+|---|---|---|
+| NC-RP-1 | the report renders "the latest manifest" instead of the requested version's | `RP-D1`, `RP-S2` |
+| NC-RP-2 | the clinic route stops refusing a non-`COMPLETED` order | `RP-A3` |
+| NC-RP-3 | the report stops checking the version belongs to this order | `RP-D3` — and the failure output shows a `200` serving **another order's** catalogue snapshot and value |
+| NC-RP-4 | the clinician's review disposition is put on the report | `RP-F1`, `RP-F2` |
+| NC-RP-5 | the wider patient summary leaks contact channel and value | `RP-F1`, `RP-F2` |
+| NC-RP-6 | release authority becomes the only way to *read* a report | `RP-E1` |
+| NC-RP-7 | any active membership (a cashier included) may read a clinic report | `RP-E4` |
+| NC-RP-8 | the laboratory button resolves "current" instead of the version pressed | `reportEntryPoints` |
+| NC-RP-9 | the application is no longer removed from the printed page | `releasedReportPrintStyles` |
+| NC-RP-10 | the release version is removed from the document's identity block | `ReleasedReportDocument` |
+| NC-RP-11 | current offering availability starts deciding whether a *historical* report opens | `RP-G1` |
+| NC-RP-12 | the report prefers a `PREPARING` amendment's proposed observations | `RP-C1`, `RP-S2` |
+| NC-RP-13 | the laboratory response stops declaring `no-store` | `RP-F3[lab]` |
+| NC-RP-14 | the document derives an abnormal flag from the released range | `ReleasedReportDocument` |
+| NC-RP-16 | the report stops re-revealing itself past the billing receipt's `body *` hide | `releasedReportPrintStyles` |
+| NC-RP-17 | `released_at` reports the *current* version's instant | `RP-D1` |
+
+**Two controls had to be re-run, and the first attempts were the fault — not the tests.** NC-RP-1 and
+NC-RP-3 initially stayed green because their anchor text also appears in
+`get_lab_order_release_version_content`, the pre-existing exact-version read that sits **earlier** in
+`api.py`: `str.replace(..., 1)` took that first occurrence, so the mutation weakened a function the
+targeted tests do not exercise. Re-anchored on comment text unique to `_released_report_response`,
+with an assertion that the mutation landed inside the builder, both reddened. A control that does not
+redden is a question about the control as well as about the test, and it was the control here.
+
+**One control legitimately did not cover what it looked like it covered.** NC-RP-1 reddened `RP-D1`
+and `RP-S2` but **not** `RP-C1` — correctly: swapping to "latest" changes nothing while an amendment
+is merely *prepared*, because no Version 2 exists and "latest" and "Version 1" are the same manifest.
+`RP-C1`'s invariant is guarded by a different property — that a draft never becomes a version — so
+**NC-RP-12 was written specifically to reach draft content**, and that is what reddens `RP-C1`.
+
+The ticket's NC-RP-15 ("use current release when an explicit old version is requested") is the same
+single line as NC-RP-1 and is not duplicated as a separate mutation.
 
 ### Concurrency: proven, and one case proven impossible
 
@@ -23770,7 +23816,7 @@ D-4 and D-11 are untouched and exactly as open as they were.**
 
 | Item | State |
 |---|---|
-| Disposable PostgreSQL | container `dhrp-qual-pg`, `postgres:16-alpine`, port 55461, migrated to `0039_lab_specimens`, **destroyed at the end of the ticket**. Never a facility database |
+| Disposable PostgreSQL | container `dhrp-qual-pg`, `postgres:16-alpine`, port 55461, migrated to `0039_lab_specimens`, **destroyed** (`docker rm -f`, verified no qualification container remains). Never a facility database |
 | Generated test documents | the PDFs `RP-D2`/`RP-J` emit go to the OS temp directory and are deleted by the test that made them. **Nothing commits them.** `RP-G`'s screenshots land in gitignored `ui/test-results/` for a human to look at; nothing asserts on them |
 | Demo stack | rebuilt (`up -d --build`, both images) and left **running**, left **post-report-qualification and not reset** — run `scripts/demo/reset.sh` before the next browser suite |
 | Laboratory offering | **active**, restored explicitly by `RP-I3`. `reset.sh` does not restore it (baseline configuration, not workflow state); `qualify-report.sh` documents the one-line SQL for a crashed run |
