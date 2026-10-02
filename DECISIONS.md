@@ -10302,3 +10302,219 @@ transparency, universal laboratory discovery, a marketplace, human usability, st
 switch-ready, production-ready, pilot-ready, or clinically live. **Human usability is not claimed** —
 nobody who administers a laboratory has used this screen, nothing was timed, and product law 3
 ("faster than what it replaces") remains a validated target rather than a current claim.
+
+---
+
+## ADR-072 — ACCEPTED / IMPLEMENTED (2026-10-02, DHEALTH-LAB-REPORT-001): a laboratory report
+## belongs to a release version, and the only thing it stores is nothing
+
+**Date:** 2026-10-02 · **Status:** ACCEPTED, IMPLEMENTED (two report routes, one shared projection,
+one printable document, two entry points) · **Decided by:** Liban (DHEALTH-LAB-REPORT-001 ticket) ·
+**Migration:** **none** — see §3 · **Builds on:** ADR-044 (explicit release), ADR-048
+(release versions and post-release amendments), ADR-071 (offering availability)
+
+### 1. What a report is, in this product
+
+> A report is a deterministic rendering of one immutable release manifest, plus current reference
+> identity. Nothing else.
+
+`LabResultReleaseVersion` + `LabResultReleaseManifestEntry` (ADR-048) already named *which exact
+observation rows* one release authorized. The report adds no versioning, no second notion of
+"released", and no durable record of its own. `get_manifest_for_version(release_version_id)` is its
+only clinical source, and the report code references neither `get_manifest_for_order` (which means
+"latest", and would let an old version silently become the current one) nor the amendment
+inspection (a draft) nor the laboratory inspection record's own current-effective observations.
+
+That last exclusion is not theoretical. The laboratory route *does* call
+`LabResultRepository.get_for_lab`, because it is the existing non-enumerating tenant check — and
+that record carries live observations. The route takes exactly two reference ids from it and no
+content. `test_rp_s2` asserts the forbidden names are absent from the report functions' own code,
+read as code with docstrings and comments stripped, because an assertion over raw source matched
+this ticket's own explanatory prose.
+
+### 2. The release timestamp is the stored one, not a near miss
+
+`released_at` on the report is `LabResultReleaseVersion.created_at`. That is not an approximation of
+the release instant: `release()` and `release_amendment()` each compute one `released_at` and assign
+it both to `LabResultRelease.released_at` / `LabResultAmendment.released_at` **and** to the new
+version's `created_at`, inside the same `LabOrder`-locked transaction. `RP-B2`/`RP-D2` assert that
+equality against the database on SQLite, and `PG-RP-1` asserts it against a real `timestamptz` with
+no timezone normalisation at all.
+
+This is why the report needs no branch for "version 1 versus an amendment": one field is truthful
+for both.
+
+### 3. No migration, and no report number
+
+Alembic head stays `0039_lab_specimens`, exactly one head. The ticket looked for a durable new fact
+to store and did not find one:
+
+| Candidate | Why it is not stored |
+|---|---|
+| report number / accession | No product decision defines a format. Inventing `LAB-2026-000001` would be inventing clinical paperwork. **Open question (§8).** |
+| frozen report metadata | The clinical content is already frozen, by the manifest. Header identity is deliberately *not* frozen — see §5. |
+| generated-artifact identity | No artifact is generated and kept. The PDF a browser prints is the browser's. |
+
+`PG-RP-7` reads the live database and asserts the head, that **no table whose name contains
+`report` or `accession` exists**, and that the manifest's foreign keys are still `RESTRICT` — so
+"no migration" is a checkable claim rather than a sentence in a commit message.
+
+The report's reference is the order's own id. Human-facing accession numbering remains unresolved
+laboratory workflow and this ticket did not quietly settle it.
+
+### 4. Authorization is reused wholesale; release authority is not read authority
+
+Two routes, both carrying `Cache-Control: no-store`:
+
+| Route | Gate | Capability |
+|---|---|---|
+| `GET /organizations/{lab_id}/lab-orders/{order_id}/release-versions/{id}/report` | `_require_lab_tech_or_releaser` | `lab.queue.work` **or** `lab.result.release` |
+| `GET /organizations/{provider_id}/orders/{order_id}/release-versions/{id}/report` | `_require_clinician` | `order.manage` |
+
+Both gates are lifted unchanged from the sibling exact-version content reads those routes sit beside.
+**No new capability, no new role.** `order.manage`'s own definition already names release versions as
+part of the order read surface.
+
+Three separations are asserted rather than assumed. **Release authority is not required to read**: a
+`LAB_TECH` who may already inspect the exact version may print it (`RP-E1`), which is why
+`lab.result.release` is deliberately *not* the gate. **`billing.operate` reads nothing** (`RP-E3`/
+`RP-E4`). **`facility.configure` reads nothing** — and that one is qualified in a real browser against
+the real identity that switches an analysis off (`RP-H`: `demo-lab-admin` holds `ORG_ADMIN` only, is
+refused `403`, and has no Résultats section to open). Platform administration does not bypass either
+gate (`RP-E7`).
+
+A guessed version id is refused with the repository's existing non-enumerating response, and a
+**real** version id belonging to a different order is refused rather than substituted with this
+order's own current release (`RP-D3`, `PG-RP-6`).
+
+### 5. Snapshot truth versus current reference data — stated, not blurred
+
+This is the one place the report could have overclaimed, so it says plainly which is which:
+
+| Report field | Kind |
+|---|---|
+| observation value, unit, reference range, label snapshot | **RELEASE-SNAPSHOT TRUTH** — manifest-bound immutable rows |
+| ordered service code and display name | **RELEASE-SNAPSHOT TRUTH** — frozen onto `LabOrderItem` at ordering |
+| release version number, `released_at` | **RELEASE-SNAPSHOT TRUTH** |
+| laboratory display name | **CURRENT REFERENCE DATA** — read live from `Organization.name` |
+| ordering clinic display name | **CURRENT REFERENCE DATA** |
+| patient display name, date of birth | **CURRENT REFERENCE DATA** — read live from `Patient` |
+| `is_current_version`, `current_release_version_number` | **DERIVED** — highest version number, stored nowhere |
+
+So a laboratory renamed tomorrow reprints today's release under tomorrow's name. `RP-I1` renames the
+laboratory and asserts exactly that: the name moves, the clinical content does not. **The report is
+not described as immutable.** Its *released clinical content* is, and that is the claim.
+
+No speculative snapshot columns were added for dozens of organization and patient fields. The
+smallest truthful representation plus a recorded limitation beat a schema change nobody asked for.
+
+### 6. The printable document, and the third print mechanism this repository already had
+
+The report is a dedicated document, not `window.print()` over an application page. It renders through
+a **portal into `document.body`, outside `#root`**, and sets `dh-report-open` on the body while open;
+`index.css` then carries one new rule, `body.dh-report-open #root { display: none }`. Printing
+therefore removes the entire application rather than maintaining a list of chrome to hide — a list
+that goes stale the first time the shell grows a part nobody remembers to add.
+
+That is deliberately a **second, independent** mechanism rather than an extension of DH-PATIENT-001's
+`[data-print-root]` rules. Those hide by `visibility` and reposition the sheet `absolute`, which is
+right for a one-page handoff slip and wrong for a document that may run to several pages: an
+absolutely positioned root does not fragment. The handoff's rules are untouched, and a test asserts
+they still are.
+
+**And then the browser found a third mechanism nobody had accounted for.** `Billing.module.css` ends
+its own print block with `body * { visibility: hidden }` so a patient's receipt prints alone. That
+rule is global and hides `body *`, **not** `#root *` — so it reached a report that had been portalled
+outside `#root` precisely to escape the other mechanism. The report printed blank while every jsdom
+test passed, and they were right to pass: no unit test in this repository evaluates a print cascade.
+The fix is two declarations scoped to the report's own classes. Three unit assertions now pin all
+three halves — the hiding rule still exists, the re-reveal still exists, and `.actions` is still
+`display: none`, which is the only reason re-revealing a whole subtree is safe.
+
+**Recorded as a finding, not just a fix:** any future print surface in this bundle is invisible by
+default. A fourth one will have to re-reveal itself too.
+
+Print layout specifics: `display: table-header-group` so a multi-page report keeps its column
+headings, `break-inside: avoid` on rows so a label never lands on one page and its value on the next,
+`break-inside: auto` on a service block so a long one continues rather than being pushed whole and
+clipped, and the narrow stacked layout scoped `@media screen` — print resolves a width query against
+the page box, so an unscoped `max-width: 760px` was one printer margin away from emitting the phone
+layout onto paper.
+
+**No `@page` rule, and no PDF library.** Paper size and margins belong to the print dialog and the
+application does not pretend otherwise; the document is laid out to fit A4 at ordinary margins.
+`RP-D2` and `RP-J` generate ephemeral PDFs as *test evidence* — one page for a short report, more than
+one for a deliberately long synthetic one — and delete them. **Hawva does not offer a PDF download,
+and this ADR does not claim one.**
+
+### 7. What the document never says
+
+No signature, no "digitally signed", no certification seal, no laboratory director approval, no
+accreditation logo — none of those exists in this product. The release footer names the **releasing
+laboratory**, which is a governed fact, and not a person: `ExchangeIdentity` carries no display name
+by design, so there is no staff name to print and none is invented. Naming the laboratory is not a
+signature claim.
+
+No clinical interpretation. Reference ranges are printed when the laboratory released them — they are
+governed data on the same immutable observation row and the clinician's result screen already renders
+them — and **nothing anywhere compares a value to one**. A unit test puts `9.9` against a released
+`3.5–5.5` range and asserts the document says nothing about it. This is the single discretionary
+inclusion in the projection, and it is recorded here as such.
+
+An older released version is labelled **"Version remplacée — résultat actuel : version N"**, reusing
+the wording the laboratory and clinic screens already use. The domain has no cancelled, invalid or
+revoked release, so the report never uses one of those words: an older version is a true record of
+what was reported, not a mistake. One wording for both rooms — the clinician's screen says
+"rectificatif" and the laboratory's history says "amendement" for the same thing, and the report
+leads with the version number and qualifies it with the clinician-side word rather than inventing a
+third term.
+
+### 8. What this ticket deliberately did not decide
+
+Recorded for a human, not answered here:
+
+1. Does a released report require a **human-facing accession or report number**? No format exists and
+   none was invented.
+2. Must the report carry a **specimen type**? **D-3's participant half is open**; no specimen fact
+   appears on the report at all.
+3. Must it carry a **collection time**? Same answer, same reason.
+4. Does a laboratory need its **address, telephone or licence number** on the report?
+   `Organization` holds none of those, so none is shown and no placeholder is printed.
+5. Should a **named staff releaser** appear? `ExchangeIdentity` holds no display name, so this cannot
+   be shown today without adding one.
+6. Does a laboratory require a **director or signatory**?
+7. Is a **cryptographic signature** eventually required?
+8. Should **older released versions stay printable** after an amendment? The architecture says yes,
+   and that is what is built — but a real laboratory's workflow may want restrictions.
+9. Does a corrected report need a **visible amendment reason**? No reason field exists.
+10. Should **patients** eventually download the formal report? Out of scope here; the patient surface
+    is unchanged, and no public, shared or unauthenticated report URL exists.
+11. Should **printing or downloading be successful-read audited**? This is **D-8**, which stays open.
+
+**D-8 is preserved, not quietly resolved.** A report view is a clinical read and it is **not** audited
+as a successful read — exactly as the existing exact-version content reads it sits beside are not.
+Creating a one-off audit scheme for this one page would have defined the product's successful-read
+policy by accident, in the wrong ticket.
+
+**D-2a, D-3's participant half, D-4 and D-11 are untouched and exactly as open as they were.**
+Showing a patient's name and date of birth on a released result is not a claim that Hawva verified
+that patient's identity at collection (**D-4**).
+
+### 9. Evidence, and the boundary of the claim
+
+32 HTTP-edge tests, 6 real-PostgreSQL tests (including a report read while a Version 2 release is
+genuinely blocked on the order's row lock — the deterministic proof that no reader sees half of one
+version and half of another), 34 UI unit tests, and 19 real-browser phases against real Keycloak, a
+real adapter and real PostgreSQL.
+
+**May now be claimed:** Hawva can render a printable laboratory report for an exact released result
+version, and a later amendment does not change the clinical content of an earlier released-version
+report. Authorized laboratory and ordering-clinic users can view that report without exposing
+unreleased result content.
+
+**May not be claimed:** a certified, legally compliant, digitally signed or accreditation-backed
+report; an immutable PDF archive; complete report management; a layout validated by laboratory staff;
+human usability; staff-ready; switch-ready; production-ready; pilot-ready; or clinically live.
+**Human usability is not claimed** — no laboratory technician and no clinician has looked at this
+document and said it is their compte rendu, nothing was timed, and product law 3 ("faster than what
+it replaces") remains a validated target rather than a current claim.

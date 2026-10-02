@@ -23606,3 +23606,174 @@ strengthening was written, verified green, and *then* the control was run — an
 | Recovery / restore drill | **not run.** This ticket required none, and the existence of backup tooling is not a claim that recovery has been demonstrated for this change |
 | Pushed | **no** |
 | GitHub Actions | **untouched** — `git diff 7fe77fb..HEAD -- .github/` is **0 lines** |
+
+---
+
+## DHEALTH-LAB-REPORT-001 — version-bound printable released laboratory report (2026-10-02)
+
+**From `acc7345` (DHEALTH-LAB-OFFERINGS-001's ending SHA, verified against `origin/master`: clean
+tree, ahead 50, behind 0, not pushed).** Alembic head **unchanged at `0039_lab_specimens`**, exactly
+one head — measured with `alembic heads`, not inferred from a directory listing. **ADR-072.**
+GitHub Actions untouched. Nothing pushed.
+
+### What the ticket asked, and what the answer turned out to be
+
+> *Give Hawva a deliberate, printable laboratory report for an EXACT released result version.*
+
+The release-version architecture ADR-048 built was already sufficient. `LabResultReleaseVersion`
+names the version, `LabResultReleaseManifestEntry` names *which exact observation rows* that version
+released, and `get_manifest_for_version` already reconstructed one historically — reading
+observations **by manifest entry**, never filtered by their own current `superseded_at`. Two
+exact-version content reads already existed, one per side.
+
+So the report is a **rendering**, and the honest answer to "do we need a new table?" was **no**. See
+ADR-072 §3: the ticket looked for a durable new fact and found none. No migration, no report number,
+no capability, no role, no new state.
+
+### The first question, answered before any code
+
+| Question | Answer |
+|---|---|
+| Durable object representing a release | `LabResultRelease` (ADR-044), order-level, immutable, one per `LabOrder` |
+| What identifies a version | `LabResultReleaseVersion`, `UNIQUE(lab_order_id, version_number)`; V1 binds `lab_result_release_id`, V2+ binds `amendment_id`, mutually exclusive by `ck_exchange_release_versions_v1_bound_to_release` |
+| Which observations belong to it | `LabResultReleaseManifestEntry`, `UNIQUE(release_version_id, lab_observation_id)` |
+| Immutable manifest? | Yes. `_manifest_record_for_version` reads by manifest entry, never by current effective state |
+| Authoritative timestamps | `LabResultRelease.released_at` (V1) / `LabResultAmendment.released_at` (V2+). The version's `created_at` is **assigned from that same value** in the same locked transaction — so one report field is truthful for both kinds of version with no branch |
+| Who released | `released_by_identity_id` → `ExchangeIdentity`, which **holds no display name by design**. There is no staff name to print |
+| Which laboratory released | the order's `LabSelection.lab_organization_id` — one immutable row per order, and the same correct answer for every version. Not `LabResultRelease.lab_organization_id`, which exists only for V1 |
+| How an amendment produces the next version | `LabResultAmendment` PREPARING → RELEASED creates a brand-new version plus a complete new manifest. V1 and `LabResultRelease` are never mutated |
+| How "current" is determined | highest `version_number` (`get_latest_release_version`). Derived, stored nowhere |
+| Can observation rows change after release | `LabObservation` is append-only with a supersession chain; a manifest points at exact rows, so later supersession cannot reach a historical manifest |
+
+### What was built
+
+| Piece | Detail |
+|---|---|
+| `ReleasedReportResponse` + 3 nested models | `extra="forbid"`, one shared projection |
+| `_released_report_response` | **one** builder, both routes. Two shapes would be two places for a forbidden field to reappear |
+| `GET .../lab-orders/{order_id}/release-versions/{id}/report` | `_require_lab_tech_or_releaser`, `Cache-Control: no-store` |
+| `GET .../orders/{order_id}/release-versions/{id}/report` | `_require_clinician`, `Cache-Control: no-store` |
+| `features/report/ReleasedReportDocument.tsx` + `.module.css` | the printable document, portalled outside `#root` |
+| `index.css` | one new rule: `body.dh-report-open #root { display: none }` |
+| Entry points | lab: one button **per version** in `ReleaseVersionHistory` (so it appears on all three of its mount points); clinic: one button on the version the panel actually fetched |
+| Client methods | `getLabOrderReleaseVersionReport`, `getReleaseVersionReport` — both take an explicit `release_version_id` and have **no "latest" mode** |
+
+### The projection, exactly
+
+**Present:** `order_id`, `release_version_id`, `release_version_number`, `is_amendment`,
+`released_at`, `is_current_version`, `current_release_version_number`,
+`laboratory{organization_id,name}`, `ordering_organization{organization_id,name}`,
+`patient{patient_id,display_name,date_of_birth}`, and per item
+`{item_id, catalog_code_snapshot, catalog_display_name_snapshot, observations[]}` where each
+observation is `{observation_id, display_label_snapshot, result_type, numeric_value, numeric_unit,
+reference_range_low, reference_range_high, text_value}`.
+
+**Absent, and asserted absent recursively at every depth, on both routes:** `DoctorReview` status /
+reviewer / timestamp, visit or reason-for-visit, any note, block notes, price / invoice / payment /
+balance, every specimen field, practitioner identity, the releasing identity's id,
+`idempotency_key`, result-entry actor ids, `recorded_at` / `entry_completed_at`, `source_code` /
+`source_system`, patient contact channel and value, capability and membership metadata, audit rows,
+and every interpretation-shaped key (`flag`, `abnormal`, `normal`, `interpretation`, `severity`,
+`urgency`, `verdict`, `summary`).
+
+The clinic's own version-content read carries `review_status`, `reviewed_at`,
+`reviewed_by_practitioner_reference_id` **and** the wider `PatientIdentitySummaryResponse` with
+contact channel and value. The report carries none of them, which is why `RP-F2` runs on both routes
+rather than one.
+
+### Snapshot versus live — documented, and tested
+
+See ADR-072 §5 for the field-by-field table. The short form: **released clinical content is
+exact-version immutable; header identity is current reference data.** A laboratory renamed after a
+release reprints under the new name, and `RP-I1` renames it and asserts that the name moves while
+the clinical content does not. The report is **not** described as immutable — its released clinical
+content is.
+
+### Defect found, and where it could only have been found
+
+**The report printed a blank page**, and every jsdom test passed while it did.
+
+`features/billing/Billing.module.css` ends its print block with `body * { visibility: hidden }` so a
+patient's receipt prints alone. That rule is global and hides `body *` — **not** `#root *` — so it
+reached a report deliberately portalled *outside* `#root` to escape the other print mechanism in
+`index.css`. No unit test in this repository evaluates a print cascade, so jsdom was right to pass.
+Chromium found it in one assertion.
+
+Fixed with two declarations scoped to the report's own classes; the billing receipt's rules are
+untouched, because a receipt and a report each have to print alone without knowing the other exists.
+Three unit assertions now pin all three halves. **Recorded as a finding, not just a fix: any future
+print surface in this bundle is invisible by default and will have to re-reveal itself.**
+
+### What the qualification taught about the product
+
+Each of these cost a failed run, and each is now written into the spec so the next author does not
+rediscover it:
+
+- the laboratory's `Ordres` page filters by status and opens on `Nouveaux`; an accepted or released
+  order is not in the default list, which looks exactly like a missing order to a locator;
+- **before release there is no version-history section at all** — not merely no report button. It is
+  bound to a `COMPLETED` order. `RP-B` asserts that stronger fact;
+- the release page keeps results and amendments behind two tabs;
+- the offering toggle has **no confirmation step**, and an earlier draft's extra "Confirmer" click
+  landed back on the toggle and silently switched it on again;
+- `demo-lab-admin` holds `ORG_ADMIN` only — it cannot release, and has no `Ordres` or `Résultats`
+  section. That made `RP-H` a better test: the facility-configuration separation is now asserted in a
+  real browser against the exact identity `RP-I` uses to switch an analysis off;
+- signing in twice inside one test does **not** switch identity — the Keycloak SSO cookie is live and
+  the second visit never reaches the login form. `RP-I` is three tests so each sign-in is real.
+
+### Evidence actually executed
+
+| Suite | Result |
+|---|---|
+| `tests/test_dhealthlabreport001_report.py` | **32 passed** (28 behavioural + 4 structural guards) |
+| `tests/integration/test_dhealthlabreport001_postgres_qualification.py` | **6 passed** on real PostgreSQL 16 |
+| UI unit: report component / print styles / entry points | **34 passed** across 3 files |
+| Full UI suite | **65 of 65 files pass.** Measured in reconciled batches of 7; two batches silently dropped one file each (known vitest behaviour) and were re-run split. One failure, `ExchangeAuthProvider.test.tsx > retry() re-runs initialization from scratch` — the **catalogued load-sensitive flake**, which occurred while the PostgreSQL suite ran concurrently and **passes on an idle machine**. Not a regression from this ticket |
+| `ui/e2e/native/16-lab-report.spec.ts` | **19 of 19 phases passed** against real Chromium, Caddy, Keycloak 26.7.1, the adapter and PostgreSQL 16 |
+| `ruff check` / `ruff format` | clean |
+| `npm run typecheck` (`tsc -b`) | clean |
+| `npm run typecheck:e2e` | clean |
+| `oxlint` | **0 errors.** 53 warnings, identical to the pre-ticket baseline; the new files contribute **0** |
+
+**Not run:** `npm run build`, the full adapter suite, and the no-secrets bundle check — all three are
+run before the final commit; see the handoff. **No restore drill** — this ticket required none, and
+the existence of backup tooling is not a claim that recovery was demonstrated for this change.
+
+### Concurrency: proven, and one case proven impossible
+
+`PG-RP-3` holds the order's own row with `SELECT ... FOR UPDATE` — the exact row
+`release_amendment` locks first — so a Version 2 release genuinely **blocks mid-flight with its
+manifest not yet written**, and the Version 1 report is read while that is true. It is complete
+Version 1, the reader is not blocked, and the currentness fields are internally consistent with what
+is committed. After the lock is released, V1 is unchanged in every clinical field and only the two
+derived currentness fields move.
+
+"Half V1 and half V2" is **structurally impossible** rather than merely untested: content comes from
+manifest entries bound to one `release_version_id`, and V2's entries are never bound to V1's id. The
+only thing a concurrent release can change between two reads is `is_current_version`, which the
+ticket itself says may legitimately flip.
+
+### Human Decisions Required: none for this ticket; eleven recorded for a human
+
+ADR-072 §8 lists all eleven (accession number, specimen type, collection time, laboratory
+address/licence, named releaser, director/signatory, cryptographic signature, whether old versions
+stay printable, visible amendment reason, patient download, and whether report reads are
+successful-read audited). **None was answered.** The report was built with the smallest truthful
+presentation in each case, so nothing was blocked waiting on them.
+
+**D-8 stays open.** A report view is a clinical read and is **not** audited as a successful read —
+exactly as the exact-version content reads it sits beside are not. **D-2a, D-3's participant half,
+D-4 and D-11 are untouched and exactly as open as they were.**
+
+### Housekeeping
+
+| Item | State |
+|---|---|
+| Disposable PostgreSQL | container `dhrp-qual-pg`, `postgres:16-alpine`, port 55461, migrated to `0039_lab_specimens`, **destroyed at the end of the ticket**. Never a facility database |
+| Generated test documents | the PDFs `RP-D2`/`RP-J` emit go to the OS temp directory and are deleted by the test that made them. **Nothing commits them.** `RP-G`'s screenshots land in gitignored `ui/test-results/` for a human to look at; nothing asserts on them |
+| Demo stack | rebuilt (`up -d --build`, both images) and left **running**, left **post-report-qualification and not reset** — run `scripts/demo/reset.sh` before the next browser suite |
+| Laboratory offering | **active**, restored explicitly by `RP-I3`. `reset.sh` does not restore it (baseline configuration, not workflow state); `qualify-report.sh` documents the one-line SQL for a crashed run |
+| Orders left behind | one, released twice. Nothing deletes a lab order by design; `reset.sh` clears it as workflow state |
+| Pushed | **no** |
+| GitHub Actions | **untouched** — `git diff acc7345..HEAD -- .github/` is **0 lines** |

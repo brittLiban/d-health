@@ -1,5 +1,33 @@
 # Current State — Daher Health
 
+> **Printable released laboratory report, 2026-10-02 (DHEALTH-LAB-REPORT-001, ADR-072):** an
+> authorized laboratory technician or ordering clinician can open and print a laboratory report for
+> **one exact released result version**, and a later amendment does not change the clinical content
+> of an earlier released-version report.
+>
+> **The report stores nothing.** It is a deterministic rendering of the immutable release manifest
+> ADR-048 already built, plus current reference identity — so there is no report table, no report
+> number and **no migration** (head stays `0039_lab_specimens`). No new capability and no new role:
+> the laboratory side reuses `lab.queue.work`/`lab.result.release` and the clinic side
+> `order.manage`, both lifted from the exact-version content reads the report sits beside. Release
+> authority is deliberately **not** required to read a released report.
+>
+> **Released clinical content is exact-version immutable; the header is not.** Laboratory, clinic
+> and patient names are read live, so a renamed laboratory reprints an old release under its new
+> name — recorded as a limitation and tested, rather than claimed away. The report is never
+> described as immutable; its released clinical content is.
+>
+> **One defect found, in the only place it could be.** `Billing.module.css` already hid `body *` in
+> print so a patient receipt prints alone — which reached this report too, and it printed blank
+> while every jsdom test passed. No unit test here evaluates a print cascade; Chromium found it.
+> Fixed in two declarations scoped to the report. Any future print surface in this bundle is
+> invisible by default.
+>
+> No PDF download, no signature, no certification, no accreditation, no interpretation, and no
+> specimen fact (D-3's participant half is open). **D-8 stays open** — a report view is a clinical
+> read and is not success-audited. **Human usability is not claimed:** nobody who works in a
+> laboratory or a clinic has looked at this document. See ADR-072.
+
 > **Laboratory service availability, 2026-10-01 (DHEALTH-LAB-OFFERINGS-001, ADR-071):** a
 > laboratory can now see and change which analyses it accepts through Hawva, on
 > `Services et tarifs`, gated on `facility.configure`. **The model it changes is not new** --

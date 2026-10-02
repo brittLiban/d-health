@@ -6,6 +6,72 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-10-02, DHEALTH-LAB-REPORT-001, directly on `master`.** From `acc7345`. **Hawva can render a
+printable laboratory report for an exact released result version, and a later amendment does not
+change the clinical content of an earlier released-version report.** Alembic head is **unchanged at
+`0039_lab_specimens`**, exactly one head: this ticket added **no migration, no capability, no role
+and no new state**. **ADR-072.**
+
+**A report belongs to a release version, and stores nothing.** It is a deterministic rendering of
+one immutable release manifest plus current reference identity — so the honest answer to "do we need
+a report table?" was no, and `PG-RP-7` reads the live database to assert that no table whose name
+contains `report` or `accession` exists. The clinical source is
+`get_manifest_for_version(release_version_id)` and nothing else: not `get_manifest_for_order`
+("latest"), not the amendment inspection (a draft), not the laboratory inspection record's own
+current-effective observations. A structural guard asserts those names are absent from the report
+code itself.
+
+**`released_at` is the stored release instant, not a near miss.** `release()` and
+`release_amendment()` each assign one `released_at` to both the release/amendment row **and** the new
+version's `created_at`, in the same locked transaction — so one report field is truthful for a first
+release and for an amendment with no branch. Asserted against the database on SQLite and against a
+real `timestamptz` with no normalisation on PostgreSQL.
+
+**Two routes, one builder, no new authority.** `lab.queue.work` **or** `lab.result.release` on the
+laboratory side, `order.manage` on the clinic side — both lifted unchanged from the sibling
+exact-version content reads. **Release authority is explicitly not read authority:** a technician who
+may already inspect the exact version may print it. `billing.operate` reads nothing;
+`facility.configure` reads nothing, qualified in a real browser against the exact identity that
+switches an analysis off; platform administration bypasses neither gate. A **real** version id from
+another order is refused rather than substituted with this order's own current release.
+
+**The one honest limitation is stated rather than papered over.** Released clinical content is
+exact-version immutable. Header identity — laboratory name, clinic name, patient name and date of
+birth — is **current reference data, read live**, so a laboratory renamed tomorrow reprints today's
+release under tomorrow's name. A test renames the laboratory and asserts the name moves while the
+clinical content does not. **The report is not described as immutable; its released clinical content
+is.**
+
+**The print surface is a document, not `window.print()` over a page.** It renders through a portal
+outside `#root`, and printing removes the whole application rather than hiding an enumerated list of
+chrome. **A defect was found exactly where it could only be found:** `Billing.module.css` already hid
+`body *` in print so a patient receipt prints alone, which reached the report too — it printed blank
+while every jsdom test passed, because no unit test here evaluates a print cascade. Fixed in two
+declarations scoped to the report, with the billing rules untouched. **Any future print surface in
+this bundle is invisible by default and will have to re-reveal itself.**
+
+**No `@page` rule and no PDF library.** Paper size and margins belong to the print dialog and the
+application does not pretend otherwise. **Hawva offers no PDF download**; the PDFs the qualification
+generates are ephemeral test evidence and are deleted.
+
+**No signature, seal, certification, accreditation or interpretation.** The footer names the
+releasing laboratory, which is a governed fact — not a person, because `ExchangeIdentity` carries no
+display name by design. Reference ranges are printed when the laboratory released them and **nothing
+compares a value to one**; a test puts `9.9` against a released `3.5–5.5` range and asserts the
+document says nothing about it. An older version reads "Version remplacée — résultat actuel :
+version N", never invalid, cancelled or revoked.
+
+**Evidence:** 32 HTTP-edge tests, 6 real-PostgreSQL tests, 34 UI unit tests, 19 real-browser phases
+(print media, two generated PDFs, 1280/768/390 with no horizontal overflow, zero console errors).
+**Eleven questions recorded for a human and none answered** — accession number, specimen type,
+collection time, laboratory address/licence, named releaser, signatory, cryptographic signature,
+whether old versions stay printable, amendment reason, patient download, and read auditing.
+**D-8 stays open:** a report view is a clinical read and is **not** success-audited, exactly as the
+reads it sits beside are not. **Human usability is not claimed** — no laboratory technician and no
+clinician has looked at this document and said it is their compte rendu.
+
+---
+
 **2026-10-01, DHEALTH-LAB-OFFERINGS-001, directly on `master`.** From `7fe77fb`. **A laboratory can
 now see and change which analyses it accepts through Hawva — and the model it changes had existed
 since DH-EX-003.** Alembic head is **unchanged at `0039_lab_specimens`**, exactly one head: this

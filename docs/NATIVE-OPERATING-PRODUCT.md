@@ -265,6 +265,7 @@ Verified by reading code during this ticket. Evidence levels:
 | Platform facility enrollment, readiness, routing, connectors | BUILT, **NOT browser-exercised** | Platform scope, not facility-owned |
 | Lab offerings | **BUILT + RUNTIME-QUALIFIED** | ADR-071. `Analyses réalisées` on `Services et tarifs`, gated on `facility.configure`. A laboratory can see which analyses it accepts and start or stop accepting each one; disabling stops NEW orders and changes nothing historical |
 | Lab result templates | BACKEND ONLY | APIs exist; no facility-facing screen. **Unchanged by ADR-071**, which deliberately did not fold result structure into availability |
+| Released result report | **BUILT + RUNTIME-QUALIFIED** | ADR-072. A printable report for one **exact** released version, reachable from the laboratory's version history (one button per version) and from the clinician's result panel (the version on screen, never "latest"). Prints as a document, not as the application page. No PDF download, no signature, no accession number, no specimen fact |
 | Lab pricing | BACKEND ONLY | `LabPrice` exists; no screen; see §18 |
 | **Organization profile, contact details, hours** | **NOT BUILT** | — |
 | **Facility-owned service/price administration** | **NOT BUILT** | — |
@@ -935,6 +936,7 @@ carry the result.
 | Services and prices | **BUILT** — clinic services and prices (ADR-066); laboratory *offerings* added 2026-10-01 (ADR-071) on the same screen, gated independently | — |
 | Lab result templates | BACKEND ONLY | P1 |
 | Lab offerings | **BUILT** (2026-10-01, ADR-071) | — |
+| Released result report | **BUILT** (2026-10-02, ADR-072) | — |
 | Provider–lab routing (view; edit as policy allows) | BACKEND ONLY, platform-scoped | P1 |
 | Opening hours | NOT BUILT | P2 — only if a workflow needs it |
 | Notification configuration *status* | NOT BUILT | P2 — read-only status, never credentials |
