@@ -634,7 +634,7 @@ accounting/billing · every analyzer integration · nationwide rollout.
 built, and the list is deliberately left standing.]** **`appointment scheduling`** in the list above
 now exists in the product: a clinic can record that a named patient is expected at a named facility
 at a date and time, move it, cancel it, and turn an arrival into the existing clinic Visit. See
-ADR-073 and §C of `STATUS.md`.
+ADR-073 and §A of `STATUS.md`.
 
 **The entry is not removed, and that is the point.** It says MVP 1.0 does not *require* appointment
 scheduling, which remains true — this ticket did not establish that it does. What was built is the

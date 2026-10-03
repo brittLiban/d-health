@@ -525,6 +525,7 @@ concurrency, the 25 specified tests, and the UI itself all remain). 🛑 Human D
 whether Option D is viable — it now is, with live evidence — but whether to proceed to the full
 UI-015 implementation on this revised (module-owned-transaction) mechanism | The "Terminer l'admission" action on the Maternité board / patient workspace. Does not block UI-013 (admission creation) or UI-014 (read-only board), both unaffected |
 | 22 | ✅ **Should the real clinician identity keep `Organizational: Nurse`, or narrow to `Provider` + `Daher Clinician Admission`?** — raised 2026-08-26 (ADR-017F, BLOCKER-9), **DECIDED 2026-08-26: Option A**, narrow to `Provider` + `Daher Clinician Admission`. `Organizational: Nurse` excluded going forward; no broader nurse permissions implemented. Measured: it closed over 302 of 345 privileges (87.5%), including `Delete Patients`, `Delete Users`, `Manage Roles`, `Manage Global Properties`, full `Order` CRUD; all 9 of ADR-017D's approved admission privileges were a strict subset of it; `Provider` itself carries 0 privileges. **Live-proven 2026-08-26** (Bug #24/#25 ticket): fresh-identity first-login OIDC, exactly the 2 intended roles/9 privileges, `currentProvider` non-null, canonical admission contract, `Manage Roles` negative control denied — full detail in ADR-017F's own live-closure-proof section. No committed config file changed (the old mapping was never automated either) | Narrowing the clinician identity was a scope-of-practice decision — now made and recorded (ADR-017F, Option A) | Real SSO activation still needs the roster meeting (#14/#17/#18) and SSO's public domain (#15); Bug #25's separate first-login reliability defect is now fixed and disposable-live-proven; Bug #23 (client-role mapper cross-client leakage) is now also fixed and disposable-live-proven, 2026-08-27 |
+| 24 | **Does clinic appointment scheduling join the MVP 1.0 critical path?** — raised 2026-10-03 (DHEALTH-APPOINTMENTS-001, ADR-073). `docs/MVP-1.0.md` §9 lists *appointment scheduling* among the things MVP 1.0 does **not require**, and this ticket built the narrow connected-workflow half of it: an expectation plus an arrival handoff, with no reminders, no-show, rooms, resources, capacity, recurrence, waitlist, self-booking or Connect/FHIR projection. **The §9 entry was deliberately left standing** and a dated overlay there says why: the sentence says MVP does not *require* scheduling, which this ticket did not change. What needs answering is whether it is now a pilot requirement or stays off the critical path as built-but-optional | A ticket that builds a thing does not get to promote it into the MVP definition on its own authority, and an agent reading §9 later must not infer the scope decision from the code's existence | Nothing technical. It changes what `docs/MVP-1.0.md` §9 and the pilot checklist say |
 
 ### 🗓 Waiting on the birth-centre meeting — as of 2026-08-15
 
@@ -24016,6 +24017,18 @@ any two letters *and* reports a min-content width of one character. Fixed in thr
 that a required test width sits just outside is the wrong breakpoint. The product was wrong here and
 the test was right.
 
+**One assertion about this is written but has not run.** The green 13-phase run proved the fix via
+`toBeVisible()`, which had been failing — but "visible" only means a non-zero box, not a readable
+one. AP-I was therefore strengthened afterwards to assert the name's rendered `boundingBox().width`
+exceeds 80px at each of the three widths, which is the claim that would have caught this defect
+directly instead of incidentally. **That assertion was added after the passing run and has never
+been exercised**; the harness had by then reaped two background runs for system memory pressure and
+its guidance is not to start such work again unprompted. It needs one `reset.sh` plus one
+`qualify-appointments.sh` — about a minute of Playwright — to become evidence. Until then it is
+**written, not demonstrated**, and the CSS fix rests on the `toBeVisible()` transition from failing
+to passing plus the diagnosed cause (`overflow-wrap: anywhere` reporting a one-character
+min-content width).
+
 ### Human Decision Required — one, on scope
 
 **`docs/MVP-1.0.md` §9 lists "appointment scheduling" among the things DHealth MVP 1.0 does not
@@ -24113,6 +24126,13 @@ combined control counts toward the total.
 
 Every control was reverted with `git checkout` of the original bytes and
 `git status --porcelain -- <paths>` proven empty before the next one ran; all 18 reverted clean.
+
+**Which proof proves which thing**, because the two are easy to conflate. The **byte-for-byte revert
+of each control** is established by that per-path `git status --porcelain -- <file>` check, run
+between controls while the tree still had uncommitted work in it — not by the whole-tree proof
+below. The **whole-tree** `git status --porcelain` and `git diff --stat`, both empty, were taken
+*after* committing and prove only that the working tree matches `HEAD` with no stray file left
+behind. Neither substitutes for the other.
 
 ### What changed, by file
 
@@ -24234,7 +24254,7 @@ a courtesy. Each runs from its own fresh `reset.sh` baseline.
 | `12-front-desk` | ✅ **9 passed** — the most exposed sibling: it shares the `Aujourd'hui` page with the new panel |
 | `08-clinic-visit` | ✅ **9 passed** |
 | `01-golden-journey` | ✅ **12 passed** |
-| `13-lab-reception` | ⚠️ **INTERRUPTED at phase 2 of N — does not count either way** |
+| `13-lab-reception` | ⚠️ **INTERRUPTED after phase 2 of 10 — does not count either way** |
 | `14-lab-specimen`, `15-lab-offerings`, `16-lab-report`, `11-lab-blocked`, `07-access-lifecycle`, `10-capabilities`, `05/06-security`, `09-billing` | 🛑 **NOT RUN** |
 
 **Why they stopped, stated plainly.** The run was terminated by the agent harness because the
