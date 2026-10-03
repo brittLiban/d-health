@@ -10793,8 +10793,21 @@ successful-read auditing.
 
 ### 11. Evidence, and the boundary of the claim
 
-46 HTTP-edge tests, 14 real-PostgreSQL tests, 18 UI unit tests (plus the 10 existing arrival tests
-re-run green), and a real-browser suite.
+47 HTTP-edge tests, 14 real-PostgreSQL tests, 18 UI unit tests (plus the 10 existing arrival tests
+re-run green), and a real-browser suite of 13 phases.
+
+The 47th HTTP-edge test exists because a negative control found a hole rather than confirming a
+guard: `NC-AP-12` disabled `_require_mutable`'s arrived check and nothing reddened, because `AP-C`
+covered moving a booking that had not arrived and moving a cancelled one, but never moving one that
+*had* arrived. `test_ap_c3_a_booking_that_already_arrived_cannot_be_moved` closes it, and the control
+now reddens through it.
+
+**Incomplete, and named so rather than rounded up:** of the twelve sibling browser suites, three ran
+green (`12-front-desk`, `08-clinic-visit`, `01-golden-journey` — the three covering the clinic
+surfaces this ticket changed); one was interrupted mid-run and eight were not run, along with a full
+adapter-suite run and the whole 66-file UI unit suite, because the agent harness reaped those
+background runs under critical system memory pressure. An interrupted run is not a pass. See
+`PROJECT_STATE.md` for what remains and how to resume it.
 
 **May now be claimed:** Hawva Clinic can schedule a future patient appointment, reschedule or cancel
 it, and check a scheduled patient into the existing Visit workflow when they arrive. Walk-in patients

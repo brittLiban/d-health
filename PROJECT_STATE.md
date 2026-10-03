@@ -23837,3 +23837,454 @@ D-4 and D-11 are untouched and exactly as open as they were.**
 | Orders left behind | one, released twice. Nothing deletes a lab order by design; `reset.sh` clears it as workflow state |
 | Pushed | **no** |
 | GitHub Actions | **untouched** — `git diff acc7345..HEAD -- .github/` is **0 lines** |
+
+---
+
+## DHEALTH-CI-REPAIR-001 · CI has been red on `master` since before this ticket · P1 · 🛑 OPEN
+
+**Opened 2026-10-03 by the DHEALTH-APPOINTMENTS-001 pass. Deliberately not fixed there** — the
+appointments ticket was instructed to treat the stale CI head and the pre-existing CI failures as a
+separate follow-up and to document rather than repair them, and one of the two repairs requires
+editing `.github/workflows/`, which that ticket was forbidden to touch.
+
+**Human Decision Required: No.** Both failures have one obvious correct repair and neither has
+clinical or scope surface. What is needed is a session allowed to touch `.github/` and to pull a
+real image digest.
+
+### The head CI ran is not the head of this branch
+
+The newest CI run is `37114371682`, for `cf4111d` — the last commit of DHEALTH-LAB-REPORT-001.
+DHEALTH-APPOINTMENTS-001's commits are **local and unpushed**, so no CI run exists for them at all.
+Nothing below was caused by the appointments work: `git log cf4111d..HEAD --name-only` touches
+neither file named here, and both failures reproduce locally on `cf4111d`'s own content.
+
+### Failure A — an image reference is not digest-pinned · touches a non-negotiable
+
+Job `static checks`, step **“Every image is pinned — no :latest, digests required”**.
+
+```
+::error::deploy/native/backup/Dockerfile:15 FROM without a digest: postgres:16-alpine
+```
+
+Reproduced locally by extracting that step's own script from `ci.yml` and running it against the
+working tree — it is the only violation in the repository.
+
+Introduced by `5dcdaa9` (`feat(DHEALTH-NATIVE-RECOVERY-001): qualify destructive native restore`),
+which predates both of this session's tickets.
+
+This one matters more than its red tick suggests: "Pin every image; never fabricate a digest you
+have not pulled" is a standing non-negotiable, so the gate is correct and the tree is wrong. **The
+repair requires pulling the real `postgres:16-alpine` digest** — it must never be written from
+memory or inferred from another file. Everything else in that job is still gated behind this step
+and has not run since, so there may be further findings behind it.
+
+### Failure B — the gate parses a compose override on its own
+
+Job `compose interpolates and parses`, step **“Native demo compose parses (DH-DEMO-001)”**.
+
+```
+service "dhealth-db-hardening" has neither an image nor a build context specified: invalid compose project
+```
+
+`ci.yml:2434` runs:
+
+```
+docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env config -q
+```
+
+`docker-compose.native-demo.yml` is an **override** file — its `dhealth-db-hardening` entry carries
+only an `environment:` block — and the base it overrides is `docker-compose.native.yml`. All four
+scripts that actually run this stack layer both files:
+
+```
+COMPOSE=(docker compose -f docker-compose.native.yml -f docker-compose.native-demo.yml --env-file demo/native/demo.env)
+```
+
+(`scripts/demo/up.sh:16`, `reset.sh:20`, `status.sh:16`, `down.sh:19`.)
+
+Verified locally: the layered form parses clean, the single-file form cannot. So **the compose files
+are right and the CI command is missing `-f docker-compose.native.yml`** — the gate has never
+tested what it claims to test. Introduced by `85cd58e`
+(`feat(DHEALTH-NATIVE-DEPLOY-001): a Native deployment that describes the product`).
+
+### Scope note
+
+Runs older than `37114371682` also failed, several within 3–5 seconds, which is a different shape
+(they died before reaching these steps) and is **not** diagnosed here. The two failures above are
+the current head's, established by local reproduction. Whether the older runs share a cause is part
+of this ticket, not a claim it makes.
+
+---
+
+## DHEALTH-APPOINTMENTS-001 · Clinic appointment scheduling + arrival handoff · ✅ BUILT AND BROWSER-QUALIFIED 2026-10-03
+
+**ADR-073.** Migration `0040_clinic_appointments`, one Alembic head. A clinic can record that a
+named patient is expected at this facility at a date and time, move it, cancel it, and — when the
+patient actually arrives — turn that expectation into the **existing** clinic Visit.
+
+**Human Decision Required: No for the build; yes for one scope question (below), and fifteen
+product questions are recorded in ADR-073 §10 without being answered.**
+
+### The one rule, and what enforces it
+
+**An appointment is not a visit.** `exchange_appointments` has exactly **two** states, `SCHEDULED`
+and `CANCELLED`. Arrival is not a third: it is `visit_id IS NOT NULL` plus the linked visit's own
+status, so attendance has one authoritative home and nothing has to be kept in sync. `NO_SHOW` was
+not invented — ADR-073 §6 records it as an undefined operational judgement (who records it, how late
+is late, whether a telephone call changes it) rather than a state. `ck_exchange_appointments_status`
+says the same thing in the schema, and `test_ap_k1`/`test_ap_k3` assert the visit lifecycle is still
+exactly four states and that `NO_SHOW` appears nowhere in the shipped scheduling domain.
+
+**The link is on the booking, not the visit.** `Appointment.visit_id` (nullable, UNIQUE) — inverted
+from what `docs/NATIVE-OPERATING-PRODUCT.md` §36 proposed, because a walk-in is the *ordinary*
+arrival and an `appointment_id` on `exchange_visits` would be NULL on most rows. `exchange_visits`
+gained only an additive `UNIQUE(id, provider_organization_id)` so the booking's composite foreign
+key can make the **database** refuse a cross-clinic link. §11 of that document is marked INVERTED and
+the stale promise at its §36 note is corrected in place.
+
+**Arrival is one transaction or nothing.** `visits.start()`'s body was extracted into
+`start_in_session(session, …)` — AST-verified statement-identical, no other function touched — so
+check-in creates the appointment link and the visit in a single transaction. A retried arrival
+returns the existing visit rather than making a second one, protected twice over (see the negative
+controls).
+
+**Three separate authorities.** A new capability `appointment.manage` (`Gérer les rendez-vous`,
+group `Visites`) is in **no role template** — a clinician who should book is granted it explicitly.
+Reading the day accepts `appointment.manage` **or** `visit.check_in`, because the desk that records
+arrivals must be able to see who is expected; changing the schedule accepts `appointment.manage`
+alone; recording the arrival is gated on `visit.check_in`. `visit.read` is deliberately not accepted
+anywhere here: a schedule is not a clinical surface.
+
+**Time belongs to the facility.** The server converts a clinic-local date + wall clock to a UTC
+instant using `config.DEPLOYMENT_TIMEZONE` (`Africa/Djibouti`, UTC+3, no DST), and resolves "today"
+itself. A browser in another zone asking the same question gets the same list.
+
+### Evidence
+
+| Layer | Result |
+|---|---|
+| HTTP-edge tests | **47 passed** (`test_dhealthappointments001_appointments.py`), groups AP-A…AP-K |
+| Real PostgreSQL | **14 passed** (`tests/integration/test_dhealthappointments001_postgres_qualification.py`) — races, composite FKs, migration state, three downgrade guards through `alembic` itself, real `timestamptz`, clinic-day boundary |
+| UI unit tests | **18** for `ClinicAppointments`, plus the **10** existing `ClinicArrivals` tests re-run green (the page genuinely makes one more request now) |
+| Real browser | **13 phases** (AP-A…AP-J) from a fresh `reset.sh` baseline against a rebuilt stack |
+| Negative controls | **18 executed, every one reverted byte-for-byte** (table below) |
+| Migration | `0040_clinic_appointments` — upgrade, full constraint set read from PostgreSQL's catalogue, zero-row downgrade round trip, back to head; guards refuse **before any DDL** when real rows exist |
+
+### What the browser run cost, and why it is worth recording
+
+Nine runs. **Eight of the nine failures were this suite's own locators, not the product**, and the
+pattern is worth inheriting: a label that does not exist makes Playwright wait out the full 300s
+test timeout, and the error that surfaces is `browserContext.close` from the `finally`, which names
+neither the locator nor the step. What the product actually does, each found the expensive way:
+
+- An administrator and a billing clerk are offered **no `Aujourd'hui` section at all** — not an
+  empty one. The separation is stronger than the test assumed.
+- The capability sheet's three buttons are `Suivre le rôle`, `Refuser`, `Autoriser`. Withdrawing a
+  direct grant is `Suivre le rôle` (CLEAR); `Refuser` would leave a DENY override recording a
+  prohibition nobody decided.
+- `Ouvrir` is **never rendered on `Aujourd'hui`**: `ClinicArrivals` draws it only when given an
+  `onOpenVisit` callback and `StaffWorkspace` mounts `ClinicHomePage` without one. A visit is opened
+  from `Visites`, where each visit is itself a button carrying the patient's name.
+- The arrivals confirm button is `Accueillir`.
+- This ticket put a **second panel on one screen**, and its rows are `listitem`s carrying the same
+  patient name as the waiting list below. Locators now scope to named landmarks, and
+  `ClinicAppointments` was given `<section aria-labelledby>` the way `ClinicArrivals` already had —
+  two panels sharing words like "Rechercher un patient" need to be distinguishable to a screen
+  reader as much as to a test.
+- A booking time hardcoded as `14:45` and asserted to read `À venir` is only true before 14:45
+  Djibouti time. Booking times are now computed from the facility clock.
+
+Three fixes came out of it that are not test-only: the landmark above, `actionTimeout: 30_000` in
+the config so a missing element fails in 30s **naming itself** instead of hanging, and the CSS
+defect below.
+
+**An earlier attribution in this session was wrong and is retracted.** The first AP-A failure was
+blamed on the Docker daemon bounce, on the strength of `psycopg.errors.AdminShutdown` lines in the
+adapter log. `docker logs` spans a container's whole lifetime, so those lines proved a bounce had
+happened at some point, not that it caused the failure in front of us. The Playwright page snapshot
+had the real answer. **The spec also changed between attempts**, so run 9's result must not be read
+as a verdict on run 1's code.
+
+### One real product defect, found by the 768px phase
+
+At 768px the booking row kept its four-column grid, the action buttons kept their width, and
+`.rowIdentity` — `min-width: 0` with `overflow-wrap: anywhere` — collapsed to a single character:
+"Patient Démo Alpha" rendered as a **vertical stack of letters**. `anywhere` permits a break between
+any two letters *and* reports a min-content width of one character. Fixed in three places:
+`overflow-wrap: break-word` (min-content becomes the longest word), the grid column became
+`minmax(min-content, 1fr)`, and the stacking breakpoint moved from 760px to **900px** — a breakpoint
+that a required test width sits just outside is the wrong breakpoint. The product was wrong here and
+the test was right.
+
+### Human Decision Required — one, on scope
+
+**`docs/MVP-1.0.md` §9 lists "appointment scheduling" among the things DHealth MVP 1.0 does not
+require, and this ticket built it.** The entry has **not** been removed and the list still stands:
+the sentence says MVP does not *require* scheduling, which remains true — this ticket did not
+establish that it does. What exists is the narrow connected-workflow half (an expectation and an
+arrival handoff); no reminders, no no-show, no rooms or resources, no capacity or double-booking
+rules, no recurrence, no waitlist, no patient self-booking, no Connect/FHIR projection — so the
+marketplace-shaped thing that list excludes is still excluded.
+
+**Whether this moves onto the MVP critical path is Liban's call and has not been made.** A ticket
+that builds a thing does not get to promote it into the MVP definition on its own authority, and an
+agent reading that list later must not infer from the code's existence that the scope decision was
+taken. A dated overlay at §9 says exactly this.
+
+### Unresolved product questions — recorded, not answered
+
+ADR-073 §10 lists fifteen. Three are worth naming here because this pass touched them:
+
+- **Previous scheduled times are not preserved** (§9/§10 item 12). `exchange_security_audit_events`
+  has no value column and this ticket **did not add a scheduling-history table**:
+  `appointment_rescheduled` records *that* a booking moved, by whom and when, never what it moved
+  from. A dedicated history table would answer it; it stays a question rather than a guess that a
+  clinic needs it.
+- **No-show** (items 4 and 5) — what constitutes one and who may record it.
+- **Cross-panel staleness, newly observed.** The schedule reports the linked visit's status as a
+  live projection read on each fetch. It does **not** refetch when a sibling panel on the same
+  screen changes that visit: after `Commencer la consultation` in the waiting list, the schedule row
+  above still shows `Arrivé` until the page is fetched again. Nothing claimed otherwise and the
+  browser phase proves the projection with a reload, the same durability move AP-B and AP-C make —
+  but whether one panel should refresh because another acted is an open product question, not a
+  settled design.
+
+`D-2a`, `D-3`'s participant half, `D-4`, `D-8` and `D-11` are untouched and exactly as open as they
+were. **D-8 stays open:** a schedule view is a read and no read is audited.
+
+### Negative controls — 18 executed, every one reverted byte-for-byte
+
+Each control breaks exactly one invariant by a single-occurrence string replacement, runs the tests
+that claim to guard it, and must **redden**. Two rules were enforced by the driver rather than by
+care:
+
+1. **The anchor must occur exactly once**, asserted before the write. The dry run caught two
+   anchors that were not unique — `Appointment.idempotency_key == idempotency_key` appears twice
+   (the pre-check *and* the SAVEPOINT replay re-read), and `class VisitStatus(str, Enum)` did not
+   exist at all (it is `StrEnum`). Mutating only the first idempotency lookup would have been
+   rescued by the replay and the control would have passed for the wrong reason — the DHEALTH-LAB-
+   REPORT-001 failure mode, caught this time before it could happen.
+2. **Reddening is exit code 1 *and* a reported failure count.** `pytest` exits 5 when `-k` selects
+   nothing and 2 on a collection error; both mean the control never ran. They are reported as
+   DID-NOT-RUN, never as a pass. The PostgreSQL control additionally **calibrates**: its tests must
+   pass unmutated first, because the PG module only *skips* when `DHAP_PG_*` are unset — with them
+   set and the container stopped, every test errors and pytest exits 1 with failures, which a naive
+   driver would score as a success. That container was stopped by a daemon bounce twice during this
+   pass, so the hazard was real rather than theoretical.
+
+| Control | Invariant broken | Which assertion flips | Result |
+|---|---|---|---|
+| NC-AP-1 | cancellation deletes the booking instead of recording it | AP-D: the row survives with `CANCELLED` | REDDENED (2) |
+| NC-AP-2 | a cancelled booking may still be checked in | AP-D/AP-E: arrival refused, no visit made | REDDENED |
+| NC-AP-3 | arrival ignores the visit it already produced (**solo**) | — | **stayed green, by design** |
+| NC-AP-4 | arrival derives a fresh idempotency key per attempt (**solo**) | — | **stayed green, by design** |
+| NC-AP-5 | **both** arrival idempotency layers removed at once | AP-E: a retry creates no second visit | REDDENED |
+| NC-AP-6 | booking stores a mangled idempotency key | AP-A: the same key returns the same booking | REDDENED |
+| NC-AP-7 | reading the schedule is accepted as authority to change it | AP-G1/G3: a read-only holder is refused | REDDENED |
+| NC-AP-8 | another clinic's booking is reachable via your own URL | AP-H2: a foreign id is refused exactly like a guessed one | REDDENED (2) |
+| NC-AP-9 | the clinic-local day is computed in UTC | AP-B: a booking falls on the day it was made for | REDDENED |
+| NC-AP-10 | a clinic-local time is stored as a UTC instant | AP-A/AP-B: the stored instant matches the wall clock | REDDENED |
+| NC-AP-11 | a cancelled booking may be rescheduled back to life | AP-C/AP-D: rescheduling a cancelled booking refused | REDDENED |
+| NC-AP-12 | a booking that already produced a visit may still be moved | AP-C: rescheduling after arrival refused | REDDENED **(via a test this control forced into existence)** |
+| NC-AP-13 | the schedule response stops declaring `no-store` | AP-I: a schedule is never cached | REDDENED |
+| NC-AP-14 | `appointment.manage` folded into the `CLINICIAN` template | AP-G4: no role template carries it | REDDENED |
+| NC-AP-15 | the visit lifecycle gains `NO_SHOW` | AP-K1/K3: four states, and `NO_SHOW` appears nowhere | REDDENED |
+| NC-AP-16 | arrival records itself under the wrong audit event type | AP-J: an arrival writes `appointment_checked_in` | REDDENED |
+| NC-AP-17 | the appointment table duplicates patient identity | AP-K4: no copied name, DOB or contact | REDDENED |
+| NC-AP-18 | the PostgreSQL half of NC-AP-10, against a real `timestamptz` | PG-AP-8d/8e: 10:00 Djibouti is 07:00 UTC; the day boundary | REDDENED (2) |
+
+**One control found a hole rather than confirming a guard.** `NC-AP-12` disabled
+`_require_mutable`'s arrived check and **nothing reddened**. The reason was not a bad anchor: `AP-C`
+had two tests — moving a booking that had not arrived, and moving a cancelled one — and **none that
+moved one which had arrived**, so `AppointmentAlreadyArrived` was never asserted on the reschedule
+path. The guard was correct and the suite simply did not look at it.
+`test_ap_c3_a_booking_that_already_arrived_cannot_be_moved` was written, the HTTP-edge count went
+from 46 to 47, and the control now reddens through it. **A control that does not redden is a
+question about the test as much as about the control**, and here the answer was the test.
+
+**Two controls stayed green, and that is the finding.** `NC-AP-3` and `NC-AP-4` each disable *one*
+of the two independent protections on a retried arrival. Neither alone changes the outcome: with
+the `visit_id is not None` early return gone, `visits.start_in_session` still finds the existing
+visit by the same `appointment:{id}` idempotency key; with the key made unique per attempt, the
+early return fires before the key is ever consulted. `NC-AP-5` removes both at once and the retry
+genuinely produces a second encounter. So the two green results are not weak controls — they are
+the evidence that the "belt and braces" the code's own comment claims is real, and only the
+combined control counts toward the total.
+
+Every control was reverted with `git checkout` of the original bytes and
+`git status --porcelain -- <paths>` proven empty before the next one ran; all 18 reverted clean.
+
+### What changed, by file
+
+**Adapter — schema and behaviour**
+
+| File | What |
+|---|---|
+| `adapter/migrations/versions/0040_clinic_appointments.py` | new. Creates `exchange_appointments` + its index, adds `uq_exchange_visits_id_provider` **first** (the composite FK depends on it), widens both audit CHECK constraints. **Three downgrade guards** that raise before any DDL when real rows exist |
+| `adapter/src/daher_adapter/exchange/models.py` | `AppointmentStatus` (two members), `Appointment`, the additive visits UNIQUE, both widened audit CHECKs, a dated supersession overlay on `VisitStatus`'s docstring |
+| `adapter/src/daher_adapter/exchange/appointments.py` | new. `AppointmentRepository` — `create` (idempotent, SAVEPOINT on a lost race), `reschedule`, `cancel` (never deletes, idempotent re-cancel), `check_in` (locks, refuses cancelled, replays to the existing visit, links, audits), `list_for_day`, plus `day_bounds`/`instant_from_local` |
+| `adapter/src/daher_adapter/exchange/visits.py` | `start()`'s body extracted into public `start_in_session(session, …)`. **AST-verified statement-identical**; no other function changed |
+| `adapter/src/daher_adapter/exchange/capabilities.py` | `APPOINTMENT_MANAGE` + its `CapabilityDefinition`. **Added to no role template** |
+| `adapter/src/daher_adapter/exchange/security_audit.py` | four event types, resource type `appointment`, and a comment recording that reschedule does not preserve the previous instant |
+| `adapter/src/daher_adapter/exchange/api.py` | five routes, `_require_appointment_read`/`_require_appointment_manage`, six DTOs, `facility_timezone` router kwarg, `Cache-Control: no-store` on every response |
+| `adapter/src/daher_adapter/config.py` | `DEPLOYMENT_TIMEZONE` named constant, so the enforced literal has one home |
+| `adapter/src/daher_adapter/app.py` | passes `facility_timezone=active_settings.timezone` |
+| `adapter/src/daher_adapter/exchange/demo_seed.py` | `exchange_appointments` in `_WORKFLOW_TABLES` **before** visits; two seeded bookings reconciled additively, never touching one that has arrived |
+
+**UI**
+
+| File | What |
+|---|---|
+| `ui/src/features/visits/ClinicAppointments.tsx` + `.module.css` | new. The schedule panel. Now carries `<section aria-labelledby>`; the CSS defect at 768px is fixed in three places |
+| `ui/src/features/visits/appointmentPresentation.ts` | new. The one function with a decision in it — `Heure passée` deliberately shares the neutral tone of `À venir`, so no colour implies a verdict |
+| `ui/src/features/clinic/pages/ClinicHomePage.tsx` | mounts the panel above `ClinicArrivals`, gated on `appointment.manage` **or** `visit.check_in` |
+| `ui/src/api/exchangeClient.ts`, `exchangeTypes.ts` | five calls, six types, a dated overlay beside the `PLANNED`/`NO_SHOW` comment |
+| `ui/src/features/workspace/workspaceCapabilities.ts` | `APPOINTMENT_MANAGE` |
+| `ui/src/features/visits/ClinicArrivals.test.tsx` | `listAppointments` added to its client stub — the page genuinely makes one more request now |
+
+**Tests and harness**
+
+| File | What |
+|---|---|
+| `adapter/tests/test_dhealthappointments001_appointments.py` | 47 tests, AP-A…AP-K. `ap_c3` exists because a negative control found it missing |
+| `adapter/tests/integration/test_dhealthappointments001_postgres_qualification.py` | 14 tests. Races, composite FKs, migration state, downgrade guards through `alembic` itself, real `timestamptz`, day boundary |
+| `ui/src/features/visits/ClinicAppointments.test.tsx` | 18 tests |
+| `ui/e2e/native/17-clinic-appointments.spec.ts` | 13 browser phases |
+| `ui/e2e/native-appointments.config.ts` | new. `actionTimeout: 30_000`, JSON report into gitignored `ui/test-results/` |
+| `scripts/demo/qualify-appointments.sh` | new, mode `100755` (verified with `git ls-files -s`, not just `chmod`). Refuses to run unless the bundle carries the panel, the adapter carries the repository, **and the running database is at `0040_clinic_appointments`** |
+
+**Documents**
+
+`DECISIONS.md` (ADR-073 + three dated overlays beside the originals), `PROJECT_STATE.md` (this
+entry, the control record, and `DHEALTH-CI-REPAIR-001`), `STATUS.md` (§A swapped, previous demoted),
+`CURRENT_STATE.md` (banner), `docs/MVP-1.0.md` (§9 overlay — the entry left standing),
+`docs/NATIVE-OPERATING-PRODUCT.md` (§10 banner, §11 `appointment_id` row INVERTED, §36's stale
+promise corrected, the P1 list annotated).
+
+### Housekeeping
+
+| Item | State |
+|---|---|
+| Disposable PostgreSQL | container `dhap-qual-pg`, port 55471, migrated to `0040_clinic_appointments`, **destroyed with its volume `dhap-qual-vol`** at the end of the pass. Never a facility database. It was stopped twice mid-pass by this environment's Docker daemon bounces; it was given `--restart unless-stopped` so a bounce could not silently turn a negative control into a false pass |
+| Demo stack | rebuilt (`up -d --build`) and left **running**, in whatever state the **interrupted** `13-lab-reception` run left it (it was two phases in when the harness reaped it for memory) — run `scripts/demo/reset.sh` before the next browser suite |
+| Generated artifacts | Playwright traces, screenshots and the JSON report land in gitignored `ui/test-results/`. The report default was moved there from the repository root, where it had been leaving an untracked file beside the commits |
+| Secrets | none added. Every credential the qualification uses comes from `demo/native/demo.env` via the script's own `:?` guards |
+| GitHub Actions | **untouched** — `git diff cf4111d..HEAD -- .github/` is **0 lines** |
+| Pushed | **no** |
+
+### The boundary of the claim
+
+**May be claimed, and is demonstrated:** a Hawva clinic can record that a named patient is expected
+at this facility at a clinic-local date and time; move that booking; cancel it; and, when the patient
+arrives, turn the booking into exactly one `CHECKED_IN` visit in the **existing** clinic Visit
+workflow, which then appears in the existing waiting list and can be started by a clinician. A
+retried arrival creates no second visit. A cancelled booking cannot be arrived. A walk-in with no
+booking is checked in exactly as before. Scheduling authority is a direct grant that changes no job
+title, takes effect on the next request with no new token, and can be withdrawn the same way.
+Unauthorized and rival-tenant callers are refused, and a foreign booking id is refused
+indistinguishably from a guessed one.
+
+**May not be claimed.** None of the following exists, and absence is the design, not a gap awaiting
+a later commit in this ticket:
+
+- **No reminder of any kind.** No SMS, WhatsApp, email, voice or in-app notification is triggered by
+  booking, moving or cancelling. The notification machinery DH-NOTIFY-001 built is not wired to
+  appointments at all.
+- **No no-show.** Not a state, not a column, not a derived flag, not a report.
+- **No rooms, resources, equipment or staff assignment.** A booking names no clinician.
+- **No capacity, slot or double-booking rule.** Two bookings at the same minute are accepted,
+  because no rule about what a clinic can absorb has been decided.
+- **No duration.** A booking is an instant, not an interval.
+- **No recurrence, no waitlist, no patient self-booking, no patient-visible schedule.**
+- **No Connect/FHIR projection.** An appointment is not exposed to any connector, and
+  `exchange_appointments` has no counterpart in the OpenMRS/OpenELIS reference track.
+- **No clinical content.** A booking carries no reason, note, diagnosis, triage level or priority.
+  Nothing in it is interpreted.
+- **No previous-time history.** A rescheduled booking's earlier instant is preserved nowhere;
+  `appointment_rescheduled` records that it moved, by whom and when. Adding a history table was
+  explicitly declined in favour of recording the question.
+- **No cross-panel refresh.** The schedule reads the linked visit's status live **on fetch**. It does
+  not refetch because a sibling panel changed that visit, so after a clinician starts a consultation
+  from the waiting list the schedule row above still reads `Arrivé` until the page fetches again.
+
+**Evidence levels, named precisely.** The adapter and database claims are *tested* and
+*real-PostgreSQL-qualified*. The UI claims are *tested* (vitest) and *browser-qualified* against a
+real Chromium, real Keycloak authentication, the real adapter and real PostgreSQL with synthetic
+data — no test-only authentication bypass exists in any of it. **Nothing here is clinically live, and
+no real-patient pilot exists on either track.** Pilot-readiness is not claimed for this ticket and
+would not be this ticket's to declare.
+
+**One decision deliberately left unmade, and one attribution retracted.** `docs/MVP-1.0.md` §9 still
+lists "appointment scheduling" among the things MVP 1.0 does not require; the entry was left
+standing and whether this work joins the MVP critical path is Liban's call, recorded and unanswered.
+And the first browser failure of this pass was wrongly attributed to a Docker daemon bounce on the
+strength of `AdminShutdown` lines in a container log that spans the container's whole lifetime; the
+cause was a locator in the test, the retraction is in the record, and **the spec changed between
+attempts**, so the final run's result must not be read as a verdict on the first run's code.
+
+### Sibling regression suites — 3 of 12 complete, and the rest are NOT done
+
+This ticket touches shared surfaces — it mounts a second panel on the clinic's `Aujourd'hui` page,
+adds a capability to the catalogue every Team screen renders, widens two audit CHECK constraints,
+and adds a UNIQUE to `exchange_visits` — so the sibling browser suites are part of its evidence, not
+a courtesy. Each runs from its own fresh `reset.sh` baseline.
+
+| Suite | Result |
+|---|---|
+| `12-front-desk` | ✅ **9 passed** — the most exposed sibling: it shares the `Aujourd'hui` page with the new panel |
+| `08-clinic-visit` | ✅ **9 passed** |
+| `01-golden-journey` | ✅ **12 passed** |
+| `13-lab-reception` | ⚠️ **INTERRUPTED at phase 2 of N — does not count either way** |
+| `14-lab-specimen`, `15-lab-offerings`, `16-lab-report`, `11-lab-blocked`, `07-access-lifecycle`, `10-capabilities`, `05/06-security`, `09-billing` | 🛑 **NOT RUN** |
+
+**Why they stopped, stated plainly.** The run was terminated by the agent harness because the
+machine was critically low on memory — not by a test failure, not by the Docker daemon, and not by
+anything in the suites. The same sweep killed an in-progress full adapter-suite run. Neither
+produced a summary line, so **neither is counted as evidence**: an interrupted run is not a pass and
+not a failure. The harness's own guidance is not to restart such work unprompted while memory may
+still be short, so it was left for a human to resume.
+
+**What the three completed suites do and do not establish.** They are the three that exercise the
+clinic surfaces this ticket actually changed — the waiting list beside the new schedule panel, the
+visit workflow the arrival hands off to, and the end-to-end journey — and all three are green with
+the new panel mounted. That is genuine coverage of the highest-risk interaction, and it is also the
+reason the shadowing problem was worth fixing: `12-front-desk` scopes its row locators to the
+arrivals region, which is why mounting a second list of the same patient above it did not break it.
+
+**What is still unverified.** The laboratory suites, the access/capability/security suites and
+billing have **not** been re-run against this ticket's code. The capability catalogue gained
+`appointment.manage`, which every Team/authorizations screen renders, so `07-access-lifecycle` and
+`10-capabilities` are the ones most worth running next — a new row in that catalogue is exactly the
+kind of change their assertions are shaped around. Until they run, this ticket's effect on them is
+**written and reasoned, not demonstrated.**
+
+**To resume:** `scripts/demo/reset.sh` then `scripts/demo/qualify-<suite>.sh` per suite, serially,
+one reset per suite. The driver used here is kept at
+`scratchpad/run-siblings.sh`; the remaining list is
+`lab-reception specimen offerings report blocked access capabilities security billing`.
+
+### The full UI unit suite — NOT reconciled, and deliberately not attempted after the memory reap
+
+The 18 `ClinicAppointments` tests and the 10 `ClinicArrivals` tests were run together and passed
+(28 reported from 2 files, reconciled against 2 files handed in). **The whole 66-file UI suite was
+not run.**
+
+That matters more here than it usually would, because of a known property of this suite:
+`designTokens.test.ts` scans **every** file for `var(--x)` references, so a token used but never
+defined passes every test of the component that uses it and reddens only on a full run. This ticket
+added a CSS module and then changed it again, so a full reconciled run is the only thing that closes
+that specific hole. The tokens used are all pre-existing (`--color-text`, `--color-surface`,
+`--color-border`, `--radius-md`, `--space-2`, `--space-3`, `--font-family-mono`,
+`--font-weight-semibold`) and no new token was introduced, which is a reason to expect it to pass —
+**not evidence that it does.**
+
+**Why it was not run:** the harness reaped two background runs for critical system memory pressure
+and its guidance is not to start such work again unprompted while memory may still be short. A
+vitest run over 66 files is precisely the shape of work that pressure applies to — the earlier
+whole-suite attempt in this session was killed the same way, which is why the batching driver exists
+at all.
+
+**To run it:** `scratchpad/ui-batches.sh <outdir>` — batches of 7, serial, and it reconciles each
+batch's reported file count against the number of files handed to it, because this suite has
+silently dropped whole files before (41 of 59, with no error line). A batch whose counts disagree is
+reported UNRECONCILED and must not be read as a pass.

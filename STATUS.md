@@ -6,6 +6,71 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-10-03, DHEALTH-APPOINTMENTS-001, directly on `master`.** From `cf4111d`. **A Hawva clinic can
+now say that a named patient is expected here at a date and time, move it, cancel it, and turn an
+arrival into the existing clinic Visit — and a walk-in still needs no appointment at all.** Alembic
+head moves to **`0040_clinic_appointments`**, exactly one head. **ADR-073.**
+
+**An appointment is not a visit, and the schema says so.** `exchange_appointments` carries exactly
+**two** states, `SCHEDULED` and `CANCELLED`. Arrival is **not** a third state: it is
+`visit_id IS NOT NULL` plus the linked visit's own status, so attendance has one authoritative home
+and nothing is kept in sync. `NO_SHOW` was **not invented** — ADR-073 §6 records it as an undefined
+operational judgement (who records it, how late is late, whether a phone call changes it) rather
+than a column. `test_ap_k1`/`test_ap_k3` assert the visit lifecycle is still exactly four states and
+that `NO_SHOW` appears nowhere in the shipped scheduling domain.
+
+**The link lives on the booking.** `Appointment.visit_id`, nullable and UNIQUE — inverted from what
+`docs/NATIVE-OPERATING-PRODUCT.md` §36 proposed, because a walk-in is the *ordinary* arrival and an
+`appointment_id` on `exchange_visits` would have been NULL on most rows. `exchange_visits` gained
+only an additive `UNIQUE(id, provider_organization_id)`, which lets the booking's **composite
+foreign key** make the database refuse a cross-clinic link with every service guard bypassed
+(`PG-AP-7`, `PG-AP-7b`).
+
+**Arrival is one transaction or nothing.** `visits.start()`'s body was extracted into
+`start_in_session(session, …)`, AST-verified statement-identical with no other function touched, so
+a check-in writes the visit and the link together. A retried arrival returns the **existing** visit:
+protected both by an early return on `visit_id` and by the `appointment:{id}` idempotency key, and
+negative controls prove each layer independently insufficient to break it and the pair sufficient.
+
+**Three authorities, one of them granted by hand.** `appointment.manage` ("Gérer les rendez-vous")
+is in **no role template** — ADR-073 §5 keeps the specification's "own schedule" honest by requiring
+a direct grant rather than widening a shipped role, and `test_ap_g4` asserts a `CLINICIAN` cannot
+book by default. Reading the day takes `appointment.manage` **or** `visit.check_in`; changing the
+schedule takes `appointment.manage` alone; recording an arrival takes `visit.check_in`. `visit.read`
+is accepted nowhere here: a schedule is not a clinical surface.
+
+**Time belongs to the facility, not the browser.** The server turns a clinic-local date and wall
+clock into a UTC instant via `config.DEPLOYMENT_TIMEZONE` (`Africa/Djibouti`, UTC+3, no DST) and
+resolves "today" itself, asserted against a real `timestamptz` with no normalisation and at the
+clinic-day boundary (`PG-AP-8d`, `PG-AP-8e`).
+
+**Evidence:** 47 HTTP-edge tests, 14 real-PostgreSQL tests, 18 UI unit tests (plus the 10 existing
+arrival tests re-run green), a 13-phase real-browser suite from a fresh `reset.sh` baseline against
+a rebuilt stack, and 18 negative controls each reverted byte-for-byte. Two controls stayed green **by
+design** and one found a missing test rather than confirming a guard — see `PROJECT_STATE.md`.
+
+**Two pieces of this ticket's evidence are incomplete and must not be read as green.** Of the twelve
+sibling browser suites, **three ran and passed** — `12-front-desk` (9), `08-clinic-visit` (9),
+`01-golden-journey` (12), which are the three that exercise the clinic surfaces this ticket changed.
+`13-lab-reception` was **interrupted mid-run** and the other eight **were not run**, as was a full
+adapter-suite run and the whole 66-file UI unit suite: the agent harness reaped the background runs
+because the machine was critically low on memory, which is neither a test failure nor a product
+finding. An interrupted run is not a pass. The laboratory, access/capability/security and billing
+suites' behaviour against this ticket's code is therefore **written and reasoned, not demonstrated**,
+and `07-access-lifecycle`/`10-capabilities` are the ones most worth running first because the
+capability catalogue every Team screen renders gained a row.
+
+**What may be claimed:** Hawva Clinic can schedule, reschedule and cancel a future appointment, and
+check a scheduled patient into the existing Visit workflow on arrival, with walk-ins unaffected.
+**What may not:** there is no reminder of any kind, no no-show concept, no rooms, resources,
+capacity or double-booking rule, no recurrence, no waitlist, no patient self-booking, and no
+Connect/FHIR projection of an appointment. A rescheduled booking's **previous** time is not
+preserved anywhere. **No real-patient pilot exists on either track**, and `docs/MVP-1.0.md` §9 still
+lists "appointment scheduling" as something MVP 1.0 does not require — whether this work moves onto
+the MVP critical path is an open decision for Liban, recorded and not taken.
+
+### Previous as-of — 2026-10-02, DHEALTH-LAB-REPORT-001
+
 **2026-10-02, DHEALTH-LAB-REPORT-001, directly on `master`.** From `acc7345`. **Hawva can render a
 printable laboratory report for an exact released result version, and a later amendment does not
 change the clinical content of an earlier released-version report.** Alembic head is **unchanged at

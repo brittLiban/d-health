@@ -630,6 +630,28 @@ AI clinical interpretation · clinical decision support · bed management as an 
 requirement · maternity workflows as an Exchange MVP requirement · appointment scheduling · full
 accounting/billing · every analyzer integration · nationwide rollout.
 
+**[2026-10-03 DHEALTH-APPOINTMENTS-001 / ADR-073 dated update — a listed item above has now been
+built, and the list is deliberately left standing.]** **`appointment scheduling`** in the list above
+now exists in the product: a clinic can record that a named patient is expected at a named facility
+at a date and time, move it, cancel it, and turn an arrival into the existing clinic Visit. See
+ADR-073 and §C of `STATUS.md`.
+
+**The entry is not removed, and that is the point.** It says MVP 1.0 does not *require* appointment
+scheduling, which remains true — this ticket did not establish that it does. What was built is the
+narrow, connected-workflow half named in ADR-073 §2: an expectation and an arrival handoff. There is
+no reminder transport, no no-show state, no room or resource model, no capacity or double-booking
+rule, no recurrence, no waitlist, no patient self-booking, and no Connect/FHIR projection — so the
+marketplace-shaped "appointment scheduling" this list excludes is still excluded, and §9's sentence
+below about existing work not being deleted for being off the critical path is the sentence that
+applies.
+
+**Whether this moves onto the MVP critical path is Liban's call and has not been made.** It is
+recorded as a Human Decision in `PROJECT_STATE.md` under DHEALTH-APPOINTMENTS-001 rather than
+settled here: a ticket that builds a thing does not get to promote it into the MVP definition on its
+own authority, and an agent reading this list later must not infer from the code's existence that
+the scope decision was taken.
+
+
 **Existing work in any of these areas is not deleted merely because it is off the new MVP critical
 path.** The maternity/OpenMRS/OpenELIS stack, bed management (ADR-007), the partograph (ADR-006),
 and the provisioning/multi-facility system all remain in the repository as preserved, reusable

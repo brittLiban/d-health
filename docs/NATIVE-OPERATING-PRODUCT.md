@@ -51,6 +51,15 @@ Each is tied to a concrete operating failure, not to what comparable products co
 part is P0 and the LIMS-shaped part is not), reports (P2), offline/PWA (P2), historical clinical
 migration (P3 — keep the legacy system read-only).
 
+> **[2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073.]** The P1 **appointments/calendar** item above is
+> now **built**, as P1 work and not promoted to P0 — see §10's banner for the shape, which is
+> narrower than this line's "calendar" implies: an expectation and an arrival handoff, with no
+> reminders, rooms, resources, capacity or recurrence. "This market is walk-in-first" is the reason
+> walk-ins stayed first-class rather than being made to look like appointments, and `AP-G` proves a
+> walk-in still needs none. **Reports (P2) were also built** earlier, by DHEALTH-LAB-REPORT-001
+> (ADR-072); this priority list was not rewritten for either, because what shipped does not
+> establish what the plan should have ranked.
+
 ### The single hardest constraint, and it is not a feature
 
 **Three of the four human roles in the working hypothesis have no backend authority, and cannot be
@@ -1976,8 +1985,16 @@ edit alone.
 
 **2. `appointment_id` omitted.** §36 lists it as "nullable, unused until ticket 7". No appointment
 table exists for it to reference, nothing would read it, and an unreferenced speculative column is
-surface of exactly the kind DHEALTH-NATIVE-SEC-001's P1 was made of — a primitive with no caller. It
-is added by the appointments ticket, together with the table that gives it meaning.
+surface of exactly the kind DHEALTH-NATIVE-SEC-001's P1 was made of — a primitive with no caller.
+~~It is added by the appointments ticket, together with the table that gives it meaning.~~
+
+> **[CORRECTED 2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073 §3.]** The appointments ticket did
+> **not** add `appointment_id` to `exchange_visits`, and no such column exists. The link was
+> inverted: it lives on the booking as `Appointment.visit_id` (nullable, UNIQUE), because a walk-in
+> is the ordinary arrival and would have left the column NULL on most visit rows. `exchange_visits`
+> gained only an additive `UNIQUE(id, provider_organization_id)` so the booking's composite foreign
+> key can make the database refuse a cross-clinic link. The reasoning above — that a speculative
+> unreferenced column is surface — is why it was never added; see §11's `appointment_id` row.
 
 **3. `visit_id` is on the intent as well as the order.** §36 says "add a nullable `visit_id` to
 `LabOrder`". That alone would have been unsafe: the UI orders through `LabOrderIntent`, and capturing

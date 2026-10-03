@@ -1,5 +1,48 @@
 # Current State — Daher Health
 
+> **Clinic appointments and the arrival handoff, 2026-10-03 (DHEALTH-APPOINTMENTS-001, ADR-073):** a
+> clinic can record that a named patient is expected here at a date and time, move it, cancel it,
+> and — when the patient actually arrives — turn that expectation into the **existing** clinic
+> Visit. A walk-in still needs no appointment at all, and none is invented for one.
+>
+> **An appointment is not a visit.** `exchange_appointments` has exactly **two** states, `SCHEDULED`
+> and `CANCELLED`. Arrival is not a third: it is `visit_id IS NOT NULL` plus the linked visit's own
+> status, so attendance has one authoritative home. `NO_SHOW` was **not invented** — who records
+> one, how late is late, and whether a telephone call changes it are undefined, so it is a recorded
+> question rather than a column. Migration `0040_clinic_appointments`, one head.
+>
+> **The link is on the booking, not the visit** (`Appointment.visit_id`, nullable + UNIQUE),
+> inverted from what `docs/NATIVE-OPERATING-PRODUCT.md` §36 proposed, because a walk-in is the
+> ordinary arrival and that column would have been NULL on most visit rows. `exchange_visits` gained
+> only an additive `UNIQUE(id, provider_organization_id)`, which lets a composite foreign key make
+> the **database** refuse a cross-clinic link with every service guard bypassed.
+>
+> **`appointment.manage` is in no role template.** A clinician who should book is granted it by
+> hand; `test_ap_g4` asserts a `CLINICIAN` cannot book by default. Reading the day also accepts
+> `visit.check_in`, because the desk that records arrivals must see who is expected. `visit.read` is
+> accepted nowhere here: a schedule is not a clinical surface.
+>
+> **One real defect, found by the 768px browser phase.** The booking row's name column collapsed to
+> a single character — "Patient Démo Alpha" rendered as a vertical stack of letters — because
+> `overflow-wrap: anywhere` reports a min-content width of one character and the stacking breakpoint
+> sat at 760px, just below the width the ticket requires be checked. Fixed. No unit test could have
+> caught it; Chromium at a specific width did.
+>
+> **Eight of nine browser-run failures were the suite's own locators, not the product.** What the
+> product actually does is recorded in `PROJECT_STATE.md`, including that an administrator is
+> offered no "Aujourd'hui" section at all rather than an empty one. An earlier attribution of the
+> first failure to a Docker daemon bounce **was wrong and is retracted**: `docker logs` spans a
+> container's whole lifetime, so those lines proved a bounce happened, not that it caused anything.
+>
+> **Not built, and not claimed:** no reminders of any kind, no no-show concept, no rooms, resources,
+> capacity or double-booking rules, no recurrence, no waitlist, no patient self-booking, no
+> Connect/FHIR projection. A rescheduled booking's **previous** time is preserved nowhere. The
+> schedule does not refetch when a sibling panel on the same screen changes a visit's state — a
+> reload shows the live status, and whether it should refresh on its own is an open question.
+> `docs/MVP-1.0.md` §9 still lists "appointment scheduling" as not required by MVP 1.0; that entry
+> was deliberately left standing and the promotion question is Liban's, unanswered.
+
+
 > **Printable released laboratory report, 2026-10-02 (DHEALTH-LAB-REPORT-001, ADR-072):** an
 > authorized laboratory technician or ordering clinician can open and print a laboratory report for
 > **one exact released result version**, and a later amendment does not change the clinical content
