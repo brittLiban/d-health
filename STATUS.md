@@ -64,9 +64,18 @@ list of every capability value; adding `appointment.manage` to the enum reddened
 green. Fixed; the two affected files re-run green. **Two gaps remain, named rather than rounded up:**
 a clean full UI re-run after that fix was reaped by the agent harness under critical system memory
 pressure before any batch finished, so the fix is verified on its own files but not yet inside a
-whole-suite pass; and **a full adapter-suite run has not been completed** — the 47 appointment tests
-and 14 PostgreSQL tests pass, but the other ~900 adapter tests have not been re-run against this
-ticket's code. Neither is a failure; both are unobserved.
+whole-suite pass; and **a full adapter-suite run has not been completed**. The second gap is
+narrower than it sounds: besides this ticket's 47 HTTP-edge and 14 PostgreSQL tests,
+`test_dhealthaccesscap001_no_role_hardcoding.py` — the one pre-existing adapter file whose
+assertions are shaped around the capability catalogue this ticket changed — was run alone and
+**7 passed**, including the catalogue mirror and the French-description guard. The remaining adapter
+files are unobserved against this code. Neither gap is a failure; both are unobserved.
+
+**The UI production build did run**, as the thing it already is: `ui/Dockerfile:15` is
+`RUN npm run build` and `up.sh` builds with `--build`, so the rebuild after the CSS fix compiled it.
+The served bundle carries the Vite-hashed `_rowIdentity_11iem` class — a different hash from the one
+in the broken 768px screenshot — and AP-I passes against that bundle, so the processed CSS demonstrably
+shipped.
 
 **What may be claimed:** Hawva Clinic can schedule, reschedule and cancel a future appointment, and
 check a scheduled patient into the existing Visit workflow on arrival, with walk-ins unaffected.

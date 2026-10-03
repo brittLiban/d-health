@@ -24188,7 +24188,9 @@ promise corrected, the P1 list annotated).
 | Disposable PostgreSQL | container `dhap-qual-pg`, port 55471, migrated to `0040_clinic_appointments`, **destroyed with its volume `dhap-qual-vol`** at the end of the pass. Never a facility database. It was stopped twice mid-pass by this environment's Docker daemon bounces; it was given `--restart unless-stopped` so a bounce could not silently turn a negative control into a false pass |
 | Demo stack | rebuilt (`up -d --build`) and left **running**, in whatever state `09-billing` (the last sibling suite) left it — run `scripts/demo/reset.sh` before the next browser suite. The Docker daemon restarted the whole stack once during this pass; the single-suite runner waits for all five containers to report healthy before resetting, so no suite started from a half-booted stack |
 | `native-report-results.json` | **a tracked file that `qualify-report.sh` writes to the repository root**, so running the report suite dirties it. Committed by this session's earlier DHEALTH-LAB-REPORT-001 pass (`cf4111d`). Restored to `HEAD` here rather than committed again. **Follow-up, not fixed in this ticket:** it should go to gitignored `ui/test-results/` the way `qualify-appointments.sh` now does, and arguably be untracked — but that is another ticket's suite |
-| Static gates | `.env` untracked, no secret-shaped assignments, this ticket's own files carry no credential, every tracked shell script parses, all tracked JSON parses, the qualification script is `100755` **in the index**, and `.github/` is 0 lines changed — all pass. `npm run build` was **not** run (see the gaps above). Image pinning still fails on `deploy/native/backup/Dockerfile:15`, pre-existing and tracked as DHEALTH-CI-REPAIR-001 |
+| Static gates | `.env` untracked, no secret-shaped assignments, this ticket's own files carry no credential, every tracked shell script parses, all tracked JSON parses, the qualification script is `100755` **in the index**, and `.github/` is 0 lines changed — all pass. Image pinning still fails on `deploy/native/backup/Dockerfile:15`, pre-existing and tracked as DHEALTH-CI-REPAIR-001 |
+| The UI build | **run, and evidenced** — not as a separate host command but as the thing it already is: `ui/Dockerfile:15` is `RUN npm run build`, and `up.sh` builds with `--build`, so the rebuild after the CSS fix ran the production build. Two independent confirmations that the *processed* output shipped: the served bundle contains the Vite-hashed class `_rowIdentity_11iem` (a different hash from the `_rowIdentity_1aki2_111` in the broken 768px screenshot, which is the CSS change itself), and AP-I's 768px phase passes against that bundle. `npm run typecheck` (`tsc -b --noEmit`, the same project graph the build compiles) also passes |
+| Exec bit, precisely | the file was **never committed executable**: `3e60b12` recorded `100644`. The index had been set to `100755` with `git update-index --chmod=+x`, but a later `git add` of the edited file took the Windows filesystem mode, which carries no exec bit, and that is what the commit recorded. `3d4ab55` fixed it and a static gate now asserts the **indexed** mode rather than trusting `chmod` |
 | Generated artifacts | Playwright traces, screenshots and the JSON report land in gitignored `ui/test-results/`. The report default was moved there from the repository root, where it had been leaving an untracked file beside the commits |
 | Secrets | none added. Every credential the qualification uses comes from `demo/native/demo.env` via the script's own `:?` guards |
 | GitHub Actions | **untouched** — `git diff cf4111d..HEAD -- .github/` is **0 lines** |
@@ -24329,3 +24331,23 @@ isolation, not yet inside a whole-suite pass. What may be claimed precisely: *ev
 files ran and was accounted for, 1067 tests executed, and the single failure is fixed and verified
 on its own files.* What may not: *that a full 66-file run has been observed all-green end to end.*
 One batched run, about ten minutes, closes that gap.
+
+### The adapter suite — one targeted file run, the remainder unobserved
+
+A **full** adapter-suite run has not been completed: an attempt was reaped under system memory
+pressure with no summary line, and an interrupted run is not evidence. This ticket's own
+**47 HTTP-edge tests and 14 real-PostgreSQL tests pass**, and so does the one pre-existing adapter
+file whose assertions are shaped around the thing this ticket changed:
+
+**`tests/test_dhealthaccesscap001_no_role_hardcoding.py` — 7 passed.** That file is the adapter-side
+analogue of running `07-access-lifecycle` and `10-capabilities` first. It contains
+`test_the_frontend_catalog_matches_the_backend_catalog` (which extracts the capability list from
+`workspaceCapabilities.ts` and compares it to the backend enum — so it proves the two catalogues
+agree, though **not** that the hardcoded list inside `workspaceCapabilities.test.ts` is current,
+which is precisely why the full UI suite was needed) and
+`test_every_capability_is_described_in_french_for_facility_staff`, which asserts the new
+`appointment.manage` entry says something in French that a facility administrator can act on.
+
+So the adapter gap is narrower than "~900 tests unobserved" suggests, but it is still a gap: the
+remaining files have not been re-run against this code. `PYTHONPATH=src python -m pytest -q` in
+`adapter/`, run alone, closes it.
