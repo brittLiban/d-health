@@ -28,6 +28,26 @@ import threading
 import uuid
 
 import pytest
+
+# DHEALTH-CI-REPAIR-001: the organizations here are built with the shared helpers rather than
+# `organizations.create`, which is what they used until 2026-10-04.
+#
+# DH-MVP-ONBOARD-001 made production routing readiness-gated -- a facility must be enrolled and
+# must actually hold the roles needed to do the work -- and migration 0026 backfills an enrollment
+# for every organization, so a bare organization is a state that cannot occur in production. That
+# ticket taught `make_lab`/`make_provider` to enrol and staff, fixing ~20 tests, but this suite
+# creates its organizations directly and was missed. It then failed with `LabNotOperationallyReady`
+# on PG1 and PG2.
+#
+# Nobody saw it because this step had already stopped running: the adapter job's EXPECTED_HEAD was
+# pinned at `0026_facility_enrollment`, so the migration guard before it began failing the moment
+# 0027 landed, and every step after it -- including this one -- was skipped from then on. Repairing
+# the guard is what surfaced this.
+#
+# The fixture is now *more* realistic, not laxer: an unenrolled, unstaffed laboratory cannot exist
+# in production, so the previous state was the unrealistic one. Nothing about what PG1 and PG2
+# assert has changed.
+from exchange_support import make_lab, make_offering, make_provider
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -102,7 +122,7 @@ def _accepting(directory: LabDirectoryProfileRepository, lab_id) -> None:
 
 
 def _seed_order(prefix: str, organizations, catalog, directory, patients, practitioners, orders):
-    provider = organizations.create(org_type="PROVIDER", name=f"{prefix}-provider")
+    provider = make_provider(organizations, name=f"{prefix}-provider")
     entry, _ = catalog.create_entry(code=f"{prefix}-TEST", display_name=f"{prefix} test")
     patient = patients.get_or_create(
         source_organization_id=provider.id,
@@ -136,9 +156,9 @@ def test_pg1_concurrent_same_lab_assignment_converges_to_one_selection(
     provider, order, entry = _seed_order(
         prefix, organizations, catalog, directory, patients, practitioners, orders
     )
-    lab = organizations.create(org_type="LAB", name=f"{prefix}-lab")
+    lab = make_lab(organizations, name=f"{prefix}-lab")
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     routes.upsert(provider_organization_id=provider.id, lab_organization_id=lab.id, active=True)
 
     results: list = []
@@ -194,11 +214,11 @@ def test_pg2_concurrent_different_lab_assignment_has_exactly_one_winner(
     provider, order, entry = _seed_order(
         prefix, organizations, catalog, directory, patients, practitioners, orders
     )
-    lab_a = organizations.create(org_type="LAB", name=f"{prefix}-lab-a")
-    lab_b = organizations.create(org_type="LAB", name=f"{prefix}-lab-b")
+    lab_a = make_lab(organizations, name=f"{prefix}-lab-a")
+    lab_b = make_lab(organizations, name=f"{prefix}-lab-b")
     for lab in (lab_a, lab_b):
         _accepting(directory, lab.id)
-        catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+        make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
         routes.upsert(provider_organization_id=provider.id, lab_organization_id=lab.id, active=True)
 
     results: list = []
@@ -263,9 +283,9 @@ def test_pg5_route_deactivation_racing_assignment_resolves_truthfully(
     provider, order, entry = _seed_order(
         prefix, organizations, catalog, directory, patients, practitioners, orders
     )
-    lab = organizations.create(org_type="LAB", name=f"{prefix}-lab")
+    lab = make_lab(organizations, name=f"{prefix}-lab")
     _accepting(directory, lab.id)
-    catalog.create_offering(lab_organization_id=lab.id, catalog_entry_id=entry.id)
+    make_offering(catalog, lab_organization_id=lab.id, catalog_entry_id=entry.id)
     routes.upsert(provider_organization_id=provider.id, lab_organization_id=lab.id, active=True)
 
     outcome: dict[str, object] = {}

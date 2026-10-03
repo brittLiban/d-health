@@ -112,13 +112,24 @@ jobs:
         # currently known to require -- bump it deliberately whenever a new
         # migration is added, the same way the seed/form-safety count floors
         # elsewhere in this file are maintained by hand.
+        #
+        # It must NOT be derived from `alembic heads`: that is the very value it
+        # exists to cross-check, and deriving it would reintroduce exactly the
+        # blind spot described above (a deleted migration file makes `current`,
+        # `heads` and any value computed from them agree on the wrong answer).
+        #
+        # Bumped 2026-10-04 (DHEALTH-CI-REPAIR-001) from 0026_facility_enrollment
+        # to 0040_clinic_appointments. It had been left behind by fourteen
+        # migrations: the chain 0027..0040 applied cleanly in CI and this literal
+        # was the only thing failing, which is the guard working as designed --
+        # it noticed that nobody had re-asserted the required terminal revision.
         env:
           ADAPTER_DB_HOST: localhost
           ADAPTER_DB_PORT: 5432
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0026_facility_enrollment
+          EXPECTED_HEAD: 0040_clinic_appointments
         working-directory: adapter
         run: |
           alembic upgrade head
@@ -2386,10 +2397,16 @@ jobs:
       - uses: actions/checkout@v5
       - name: Generate a throwaway env file
         run: |
-          # The compose file guards 18 variables with ${VAR:?} so a missing value
+          # The compose file guards 19 variables with ${VAR:?} so a missing value
           # fails loudly at `up` instead of quietly selecting a published default
           # (bug 14). That guard is exactly why CI cannot use .env.example, which
           # correctly ships those values EMPTY.
+          #
+          # The count said 18 until 2026-10-04: DH-NOTIFY-001 added the nineteenth
+          # (DHEALTH_PATIENT_PUBLIC_BASE_URL) and the value below was added with it,
+          # but this number was not. Facility provisioning had the same omission and
+          # was not so lucky -- it rendered no value at all, so a provisioned facility
+          # would have failed at `docker compose up` (DHEALTH-CI-REPAIR-001).
           #
           # These are not secrets and are never used against a real service — they
           # exist so `${VAR:?}` has something to interpolate. `config` does not
@@ -2431,7 +2448,22 @@ jobs:
       - name: Demo compose parses
         run: docker compose -f provisioning/demo/docker-compose.demo.yml config -q
       - name: Native demo compose parses (DH-DEMO-001)
-        run: docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env config -q
+        # `docker-compose.native-demo.yml` is an OVERLAY, not a topology: since
+        # DHEALTH-NATIVE-DEPLOY-001 it adds demo users, demo credentials, the demo database
+        # name and the seed authority *on top of* the canonical Native file, and defines no
+        # database, Keycloak or edge of its own. The canonical Native topology must therefore
+        # be supplied first, exactly as `scripts/demo/{up,down,reset,status}.sh` all do.
+        #
+        # This step used to pass the overlay alone and had been failing with
+        # `service "dhealth-db" has neither an image nor a build context specified` --
+        # which was the overlay correctly refusing to pretend it is standalone, not a defect
+        # in either compose file (DHEALTH-CI-REPAIR-001).
+        run: |
+          docker compose \
+            -f docker-compose.native.yml \
+            -f docker-compose.native-demo.yml \
+            --env-file demo/native/demo.env \
+            config -q
       - name: A real .env must never have appeared in the checkout
         run: |
           test ! -f .env || { echo "::error::a .env exists in the checkout"; exit 1; }
@@ -2445,9 +2477,25 @@ jobs:
     # `docker compose ... up` against real images, proving DH-DEMO-001's own central claim --
     # a native-only DHealth Clinic -> Exchange -> DHealth Lab environment reaches a genuinely
     # healthy, browser-reachable state without ever starting `openmrs-*`/`openelis-*` at all.
-    # `docker-compose.native-demo.yml` never appears as a step here for anyone but `scripts/
-    # demo/*.sh` -- this job exercises the exact same developer-facing commands, not a shortcut
-    # around them, so a regression in those scripts is caught here too.
+    # Boot, status, reset and teardown go through `scripts/demo/*.sh` -- the exact same
+    # developer-facing commands, not a shortcut around them, so a regression in those scripts
+    # is caught here too.
+    #
+    # The three steps below that assert directly against the running database do name Compose
+    # themselves, because `docker compose exec` is the only way to reach the adapter container,
+    # and each must supply **both** files:
+    #
+    #     -f docker-compose.native.yml -f docker-compose.native-demo.yml
+    #
+    # `docker-compose.native-demo.yml` is an OVERLAY, not a topology. Since
+    # DHEALTH-NATIVE-DEPLOY-001 it adds demo users, demo credentials, the demo database name
+    # and the seed authority on top of the canonical Native file, and defines no database,
+    # Keycloak or edge of its own -- which is why the overlay alone fails with
+    # `service "dhealth-db-hardening" has neither an image nor a build context specified`.
+    # Those three steps previously passed the overlay alone and had been failing for that
+    # reason, silently skipping the reset-repeatability and reset-safety steps after them
+    # (DHEALTH-CI-REPAIR-001). `scripts/demo/*.sh` and
+    # `adapter/tests/test_native_deployment_topology.py` both encode the same two-file rule.
     steps:
       - uses: actions/checkout@v5
 
@@ -2482,7 +2530,21 @@ jobs:
           # set of DEMO_KEYCLOAK_ADMIN_* vars, which is never intentional). Reusing the adapter's
           # own already-qualified Settings/build_engine rather than wrangling a separate psql
           # password/connection here.
-          docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env \
+          # Both compose files, base first -- see this job's own comment above for why the
+          # overlay alone cannot work.
+          #
+          # The membership count is 7, not the 3 this step asserted until 2026-10-04. It was
+          # never weakened; it was simply left behind as later tickets added demo identities,
+          # and `demo_seed.py` is the authority for what it should be. Today it grants, through
+          # seven `_grant_membership` calls:
+          #   provider (clinic): demo-clinician, demo-admin, demo-clerk
+          #   lab:               demo-lab-tech, demo-releaser, demo-lab-admin, demo-lab-clerk
+          # Still an exact equality rather than a floor -- a deterministic seed that grants a
+          # different number of memberships than it is supposed to is a defect either way.
+          docker compose \
+            -f docker-compose.native.yml \
+            -f docker-compose.native-demo.yml \
+            --env-file demo/native/demo.env \
             exec -T adapter python -c "
           from sqlalchemy import text
           from daher_adapter.config import Settings
@@ -2492,7 +2554,7 @@ jobs:
               orgs = conn.execute(text('SELECT count(*) FROM exchange_organizations')).scalar_one()
               mems = conn.execute(text('SELECT count(*) FROM exchange_organization_memberships')).scalar_one()
               assert orgs == 2, f'expected 2 organizations (clinic + lab), got {orgs}'
-              assert mems == 3, f'expected 3 memberships (clinician/lab-tech/releaser), got {mems}'
+              assert mems == 7, f'expected 7 memberships (3 clinic + 4 lab), got {mems}'
               print(f'OK: {orgs} organizations, {mems} memberships')
           "
 
@@ -2503,7 +2565,13 @@ jobs:
 
       - name: Reset preserved baseline (organizations + memberships still exist)
         run: |
-          docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env \
+          # Both compose files, base first. Same 7-membership baseline as the step above:
+          # `reset.sh` reconciles the baseline and clears workflow state, so the identity
+          # roster must come back identical rather than merely non-empty.
+          docker compose \
+            -f docker-compose.native.yml \
+            -f docker-compose.native-demo.yml \
+            --env-file demo/native/demo.env \
             exec -T adapter python -c "
           from sqlalchemy import text
           from daher_adapter.config import Settings
@@ -2513,13 +2581,16 @@ jobs:
               orgs = conn.execute(text('SELECT count(*) FROM exchange_organizations')).scalar_one()
               mems = conn.execute(text('SELECT count(*) FROM exchange_organization_memberships')).scalar_one()
               assert orgs == 2, f'expected 2 organizations after reset, got {orgs}'
-              assert mems == 3, f'expected 3 memberships after reset, got {mems}'
+              assert mems == 7, f'expected 7 memberships after reset, got {mems}'
               print(f'OK: {orgs} organizations, {mems} memberships')
           "
 
       - name: Reset safety refuses a non-demo target (D4, mandatory negative control)
         run: |
-          COMPOSE="docker compose -f docker-compose.native-demo.yml --env-file demo/native/demo.env"
+          # Both compose files, base first -- the overlay alone cannot resolve
+          # `dhealth-db-hardening`, which is what made this whole step unreachable before
+          # DHEALTH-CI-REPAIR-001. A negative control that never runs protects nothing.
+          COMPOSE="docker compose -f docker-compose.native.yml -f docker-compose.native-demo.yml --env-file demo/native/demo.env"
 
           # Fact 1 (database name): `_require_demo_environment` checks `settings.db_name` --  a
           # pure string compare -- before it ever opens a connection, so this exercises exactly

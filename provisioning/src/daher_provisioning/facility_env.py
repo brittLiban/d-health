@@ -174,6 +174,24 @@ def render_env(
     values: dict[str, str] = {
         "FACILITY_ID": facility.facility_id,
         "BASE_DOMAIN": base_domain,
+        # Derived from the facility's own domain, which is why it is here and not in
+        # STACK_DEFAULTS: every other entry there is the same for every facility.
+        #
+        # `https://app.<BASE_DOMAIN>` is not a choice made here -- it is the repository's
+        # existing contract, stated in two places that already agree:
+        # `docker-compose.native.yml` defaults the variable to
+        # `${DHEALTH_PATIENT_PUBLIC_BASE_URL:-https://app.${BASE_DOMAIN}}`, and
+        # `deploy/native/native.env.example` documents that default as the correct value for
+        # a normal deployment. The clinical `docker-compose.yml` instead hard-requires it
+        # (`${...:?}`) with no default, so a provisioned facility has to be told, and until
+        # now it was not: `docker compose up` would have refused to render after the facility
+        # was already provisioned (DHEALTH-CI-REPAIR-001).
+        #
+        # `https://`, never `http://`: this URL carries a patient's live bearer credential in
+        # its fragment, and `Settings.from_env` rejects a non-https value outright
+        # (ADR-058 / docs/PATIENT-NOTIFICATION.md). CI's own `https://localhost` is correct
+        # only because CI's BASE_DOMAIN is `localhost`; it is not a value to copy here.
+        "DHEALTH_PATIENT_PUBLIC_BASE_URL": f"https://app.{base_domain}",
         **STACK_DEFAULTS,
         **secrets.values,
         # Backup is wired only when it can actually succeed. Otherwise the scheduler is

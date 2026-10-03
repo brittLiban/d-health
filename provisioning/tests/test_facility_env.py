@@ -91,6 +91,33 @@ class TestRendering:
         with pytest.raises(FacilityEnvError, match="refusing to write mismatched credentials"):
             render_env(facility, secrets, base_domain="example.org")
 
+    def test_patient_public_base_url_follows_the_facility_domain(self):
+        """DHEALTH-CI-REPAIR-001. The clinical stack hard-requires this variable with no
+        default, so a facility that is not told it fails at `docker compose up` *after*
+        provisioning has already finished -- which is what happened.
+
+        The value is the repository's existing contract, not a choice made by this test:
+        `docker-compose.native.yml` defaults the same variable to
+        `https://app.${BASE_DOMAIN}` and `deploy/native/native.env.example` documents that
+        default. Asserted against the facility's own domain so a hardcoded host, or CI's
+        `https://localhost`, cannot pass."""
+        assert "DHEALTH_PATIENT_PUBLIC_BASE_URL=https://app.example.org" in rendered()
+
+    def test_patient_public_base_url_is_https_because_it_carries_a_credential(self):
+        """A patient link carries a live bearer credential in its fragment, and
+        `Settings.from_env` refuses a non-https value (ADR-058). A renderer that emitted
+        `http://` would produce a facility whose adapter refuses to start."""
+        line = next(
+            row
+            for row in rendered().splitlines()
+            if row.startswith("DHEALTH_PATIENT_PUBLIC_BASE_URL=")
+        )
+        value = line.split("=", 1)[1]
+        assert value.startswith("https://"), value
+        assert "localhost" not in value, (
+            f"{value!r} looks like CI's demo value; a provisioned facility must use its own domain"
+        )
+
     def test_requires_a_base_domain(self):
         facility = a_facility()
         with pytest.raises(FacilityEnvError, match="base_domain is required"):

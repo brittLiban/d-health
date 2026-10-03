@@ -225,3 +225,70 @@ def test_the_historical_deployment_is_untouched_and_still_complete() -> None:
     historical = _service_names(HISTORICAL)
     for name in ("openmrs-backend", "openelis-webapp", "openmrs-db", "openelis-db"):
         assert name in historical, f"the preserved reference deployment lost {name}"
+
+
+def _logical_lines(text: str) -> list[str]:
+    """Join shell/YAML backslash continuations so one command is one string to inspect.
+
+    Both `ci.yml` and `scripts/demo/*.sh` write long Compose invocations across several lines
+    ending in `\\`; an invocation checked line by line would look as though it named only one
+    compose file.
+    """
+    joined = re.sub(r"\\\n\s*", " ", text)
+    return joined.splitlines()
+
+
+#: Everything that may invoke Compose against the Native demo. `scripts/demo/*.sh` are the
+#: supported developer commands; `ci.yml` is the workflow that must not drift from them.
+DEMO_INVOKERS = [REPO / ".github" / "workflows" / "ci.yml"] + sorted(
+    (REPO / "scripts" / "demo").glob("*.sh")
+)
+
+
+def test_every_native_demo_compose_invocation_supplies_the_canonical_base() -> None:
+    """DHEALTH-CI-REPAIR-001. The overlay is not a topology, so naming it alone is always wrong.
+
+    `test_the_demo_is_an_overlay_rather_than_a_second_topology` above asserts the overlay does
+    not redefine production services. This asserts the other half of the same rule, which is the
+    half that actually broke: every *caller* must supply the canonical Native file first. CI had
+    four invocations passing the overlay alone; they failed with `service "dhealth-db" has
+    neither an image nor a build context specified`, and because two of them sat early in the
+    native-demo-boot job the reset-repeatability and reset-safety steps after them never ran.
+
+    Checked as text across the workflow and the demo scripts together, because the rule belongs
+    to whoever calls Compose rather than to either compose file.
+    """
+    offenders: list[str] = []
+    for path in DEMO_INVOKERS:
+        if not path.is_file():
+            continue
+        for number, line in enumerate(_logical_lines(path.read_text(encoding="utf-8")), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or NATIVE_DEMO.name not in stripped:
+                continue
+            if "docker compose" not in stripped and "COMPOSE=" not in stripped:
+                continue  # prose in a comment block, not an invocation
+            if NATIVE.name not in stripped:
+                offenders.append(f"{path.relative_to(REPO)}:{number}: {stripped[:120]}")
+
+    assert not offenders, (
+        "these Native-demo Compose invocations do not supply the canonical base topology "
+        "(`-f docker-compose.native.yml`) before the demo overlay, so they cannot resolve the "
+        "services the overlay only adds to:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_demo_scripts_all_agree_on_the_two_file_composition() -> None:
+    """The scripts are the reference for what CI should be doing, so they are asserted
+    positively rather than only for the absence of the mistake."""
+    for script in sorted((REPO / "scripts" / "demo").glob("*.sh")):
+        text = script.read_text(encoding="utf-8")
+        if NATIVE_DEMO.name not in text:
+            continue
+        for line in _logical_lines(text):
+            if "docker compose" in line and NATIVE_DEMO.name in line:
+                assert NATIVE.name in line, f"{script.name} invokes the overlay without the base"
+                assert line.index(NATIVE.name) < line.index(NATIVE_DEMO.name), (
+                    f"{script.name} names the overlay before the base; Compose merges in order, "
+                    "so the canonical topology has to come first"
+                )
