@@ -8845,7 +8845,17 @@ are **deliberately not built**, because both are reachable only through a calend
 "a booked appointment that has not arrived" and `NO_SHOW` exists, in §12's own words, "for `PLANNED`
 to be honest". No appointment table exists, so nothing in the schema could put a visit into either,
 and §12's own rejected-states list names "a state reachable by nothing" as decoration. They arrive
-with the appointments ticket, together with the table that makes them reachable, or not at all. The
+with the appointments ticket, together with the table that makes them reachable, or not at all.
+
+**[Dated overlay, 2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073 — "or not at all" is the branch
+that was taken.** The appointments ticket shipped, `exchange_appointments` exists, and it added
+**neither** state. A booking is an expectation and a visit is an encounter: a `PLANNED` visit would
+have put a visit row in the clinical history of every patient who booked and never attended.
+`NO_SHOW` went with it, since this paragraph's own justification for it was "for `PLANNED` to be
+honest", and because no no-show policy exists to record. The four-state CHECK constraint is
+therefore **permanent** rather than a first instalment. See ADR-073 §1.]**
+
+The
 CHECK constraint enumerates exactly the four a real caller can produce — this package's established
 discipline.
 
@@ -8983,7 +8993,17 @@ not a mutation, and the security audit table is not an access log).
 `appointment_id` — which §36's brief lists on the `Visit` domain — is **omitted**, and that is a
 recorded deviation. No appointment table exists for it to reference, nothing would read it, and a
 speculative nullable column is unreferenced surface of exactly the kind DHEALTH-NATIVE-SEC-001's P1
-was made of (a primitive with no caller). It is added by the appointments ticket, with the table.
+was made of (a primitive with no caller). ~~It is added by the appointments ticket, with the
+table.~~
+
+**[Dated overlay, 2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073 — the deviation is now permanent,
+and inverted rather than closed.** The appointments ticket shipped with the link on the
+**appointment** (`Appointment.visit_id`, nullable + UNIQUE), not on the visit. The reasoning above
+turned out to apply even after the table existed: a walk-in is the common arrival, so
+`Visit.appointment_id` would still have been a column that is NULL for most rows forever.
+`exchange_visits` gained only an additive `UNIQUE(id, provider_organization_id)` — unable to reject
+any row its primary key already accepts — so the booking's composite foreign key lets the
+*database* refuse a cross-clinic link. See ADR-073 §3.]**
 
 ### 8. Consequences
 
@@ -9729,6 +9749,12 @@ arrival time, oldest first.
 **No `PLANNED`, no `NO_SHOW`, no appointment table.** Still four states. The future calendar ticket
 feeds the *same* check-in operation; nothing about walk-in arrival is structurally dependent on there
 being no appointment.
+
+**[Dated overlay, 2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073 — this paragraph aged well.** The
+appointment table now exists, there is still **no `PLANNED` and no `NO_SHOW`**, and the calendar
+ticket does feed the same check-in operation: `AppointmentRepository.check_in` calls
+`VisitRepository.start_in_session`, which is `start()`'s own body extracted unchanged, so arrival
+and linking commit together. Walk-in arrival was not modified in any way.]**
 
 ### 5. The arrival projection is a privacy boundary, not a convenience
 
@@ -10531,3 +10557,253 @@ human usability; staff-ready; switch-ready; production-ready; pilot-ready; or cl
 **Human usability is not claimed** — no laboratory technician and no clinician has looked at this
 document and said it is their compte rendu, nothing was timed, and product law 3 ("faster than what
 it replaces") remains a validated target rather than a current claim.
+
+---
+
+## ADR-073 — ACCEPTED / IMPLEMENTED (2026-10-03, DHEALTH-APPOINTMENTS-001): an appointment is an
+## expectation, a visit is an encounter — and §12's `PLANNED`/`NO_SHOW` are retired, not deferred
+
+**Date:** 2026-10-03 · **Status:** ACCEPTED, IMPLEMENTED (`exchange_appointments`, five routes, one
+new capability, the `Rendez-vous` panel on `Aujourd'hui`) · **Decided by:** Liban
+(DHEALTH-APPOINTMENTS-001 ticket, two decisions taken explicitly in session — see §3 and §4) ·
+**Migration:** `0040_clinic_appointments` · **Supersedes:** `docs/NATIVE-OPERATING-PRODUCT.md` §12's
+`PLANNED` and `NO_SHOW` visit states, §10's appointment state list, and §11's `Visit.appointment_id`
+· **Builds on:** ADR-069 (arrival as `visit.check_in`), ADR-067 (capabilities), ADR-051 (patient
+directory)
+
+### 1. Why this ADR exists, and why it is a supersession rather than an implementation
+
+Three recorded decisions assigned this work to this ticket **and specified a different design**:
+
+| Source | What it said |
+|---|---|
+| §12 | Visit lifecycle is five states plus `CANCELLED`, including `PLANNED` and `NO_SHOW`; `CANCELLED` reachable "From `PLANNED` or `CHECKED_IN`" |
+| §10 | appointment states `BOOKED → ARRIVED (creates/links the visit) · CANCELLED · NO_SHOW` |
+| §11 | `appointment_id` on **`Visit`**, "Yes, nullable", with `visit_type` derived from it |
+| §7 matrix | Rendez-vous: Front Desk "FULL — book, cancel, no-show"; clinician "LTD — own schedule" |
+| ADR for DHEALTH-CLINIC-VISIT-001 | `PLANNED`/`NO_SHOW` "arrive **with the appointments ticket**, together with the table that makes them reachable, **or not at all**" |
+| same ADR | `Visit.appointment_id`'s omission is "a **recorded deviation** … It is added by the appointments ticket, with the table" |
+| ADR-069 | "No `PLANNED`, no `NO_SHOW`, no appointment table. … **The future calendar ticket feeds the *same* check-in operation**" |
+
+`AGENTS.md` is explicit that recorded decisions govern and that an agent must never quietly diverge
+from one — *"if you believe an ADR is wrong, write a superseding ADR with reasoning and flag it"*.
+That is what this is. The conflict was surfaced before any code was written and the decision was
+taken by Liban in session, not inferred.
+
+**Why the earlier design is not followed.** §12's own reasoning for `PLANNED` was *"a booked
+appointment that has not arrived"* — a visit row standing in for a booking. The consequence, which
+§12 does not discuss, is that a patient who books and never attends acquires a **visit** in their
+clinical history. "A visit happened" would stop meaning "somebody was in the building", and every
+consumer of the visit table — the waiting list, the one-active-visit invariant, the patient chart,
+billing's reference to a visit — would need to learn to ignore rows for people who were never there.
+
+A booking is an **expectation**. A visit is an **encounter**. Keeping them as separate rows costs one
+table and keeps both meanings intact.
+
+**And ADR-069 already pointed this way.** Its own words — *"the future calendar ticket feeds the
+same check-in operation"* — describe exactly what is built: arrival goes through
+`VisitRepository.start_in_session`, and nothing about walk-in arrival changed.
+
+**What is retired, explicitly:** `PLANNED` and `NO_SHOW` as `VisitStatus` members, `ARRIVED` and
+`NO_SHOW` as appointment states, and §12's "`CANCELLED` from `PLANNED`". `VisitStatus` stays at four
+states, `ck_exchange_visits_status` still enumerates exactly those four, and
+`test_ap_k1_the_visit_lifecycle_is_still_four_states` plus `PG-AP-8` assert it in the code and in the
+database. A future reader comparing §12 against the schema will find them absent **by decision**.
+
+### 2. The model
+
+`exchange_appointments`: `id`, `idempotency_key`, `provider_organization_id`, `patient_id`,
+`scheduled_at` (UTC `timestamptz`), `status`, `visit_id`, `created_at`, `created_by_identity_id`,
+`cancelled_at`, `cancelled_by_identity_id`. Two states, `SCHEDULED` and `CANCELLED`.
+
+**Arrival is not a state.** "Has this patient arrived?" is `visit_id IS NOT NULL`, and what happened
+at the encounter is the linked visit's own status. An `ARRIVED` column would be a second copy of
+attendance, free to disagree with the visit — which is why §12 itself rejects `ARRIVED` as
+decoration on the visit side.
+
+**`NO_SHOW` is absent because it is a policy nobody has written.** How late is late; who may record
+it; whether a telephone call from the patient changes it; whether a reschedule supersedes it. The
+system says what it can prove — *"this booking's time has passed and no visit is linked"* — and the
+UI renders that as a neutral `Heure passée` with the **same tone** as `À venir`, so nothing is
+communicated by colour and no judgement is implied. **Nothing anywhere converts that observation into
+a stored state, and no scheduled job touches a booking after its time** (Human Decision 4).
+
+**No `RESCHEDULED` either.** Moving a booking moves `scheduled_at` on the same row; a terminal state
+plus a replacement row would make one booking look like two in every day view.
+
+### 3. The link direction — decided against §11
+
+**Decision taken in session: `Appointment.visit_id`, nullable and `UNIQUE`.** §11 proposed
+`Visit.appointment_id`. The inversion is because a **walk-in is the common arrival in this market**:
+with the link on the visit, `exchange_visits` carries a column that is `NULL` for most of its rows
+forever, and "did this booking produce an encounter?" becomes a property of the thing that does not
+have the question.
+
+`exchange_visits` does gain one thing, and this too was decided explicitly:
+**`UNIQUE(id, provider_organization_id)`**, purely additive and unable to reject any row the primary
+key already accepted. It exists so `fk_exchange_appointments_visit_same_provider` can reference the
+*pair* — which is how the **database**, not merely the service, refuses a booking that links another
+clinic's visit (`PG-AP-7` proves it with the service bypassed entirely). Same shape and reasoning as
+ADR-066's `uq_exchange_invoices_id_org` and DHEALTH-LAB-BLOCKED-001's
+`uq_exchange_lab_selections_order_lab`.
+
+### 4. Authority — one new capability, and no role template gains it
+
+**`appointment.manage`.** No existing capability expresses "create and change future bookings":
+`visit.check_in` is authority to record *actual arrival*, `patient.directory.read` is a read, and
+`facility.configure` covers what a facility *offers* (catalogue, prices, templates) rather than a
+concrete booking for a named patient.
+
+Three authorities, kept apart and each proved separately:
+
+| Operation | Gate |
+|---|---|
+| read the day | `appointment.manage` **or** `visit.check_in` |
+| create / reschedule / cancel | `appointment.manage` |
+| arrive (create + link the visit) | `visit.check_in` |
+
+Reading the day accepts `visit.check_in` because the desk that records arrivals must see who is
+expected or the surface is useless to the person who most needs it — and a `visit.check_in` holder
+can already see who is in the building, so the day list tells them nothing newer in kind.
+`visit.read` is **not** accepted: that is the clinical read, and a schedule is not a clinical
+surface — the same reasoning ADR-069 applied to `list_waiting`.
+
+**Decision taken in session: no role template carries `appointment.manage`.** §7 gives clinicians
+only "LTD — own schedule", so adding it to `CLINICIAN` would widen a shipped role past the
+specification. A reception desk receives it as a **direct grant**, exactly as ADR-069 proved for
+`visit.check_in` (`ORG_ADMIN` + a grant, no role change). The cost is stated plainly: a clinician
+cannot book until granted. The capability is declared `PROVIDER`-only, so it cannot be granted at a
+laboratory at all — `test_ap_a6` asserts that refusal, which is stronger than the route check the
+test originally looked for.
+
+### 5. Arrival is one transaction
+
+`VisitRepository.start()`'s body was extracted into `start_in_session()` with **nothing inside it
+changed** (AST-verified statement-identical; no other function touched), so check-in composes:
+
+```
+lock the booking FOR UPDATE
+  → refuse a cancelled booking
+  → if already linked, return the EXISTING visit (visit_created=false)
+  → visits.start_in_session(...)        ← every arrival rule, enforced once
+  → set visit_id
+  → audit appointment_checked_in
+commit
+```
+
+There is no window in which the visit exists and the booking still reads unarrived. `PG-AP-3` proves
+two concurrent arrivals produce one visit; `PG-AP-4` proves cancel-racing-check-in never yields a
+cancelled booking holding a visit, and `PG-AP-4b` proves the **schema** refuses that state with every
+service guard bypassed. The visit's idempotency key is derived from the booking id, so a retry
+replays through both the row lock and `uq_exchange_visits_provider_idempotency_key`.
+
+**`reason_for_visit` is not passed.** A front-desk scheduling note must not silently become clinical
+documentation — and this booking carries no reason to pass anyway (§6).
+
+**Walk-ins are untouched.** No appointment is ever required for a visit (`AP-F1`, `PG-AP-6`), and the
+walk-in path sits immediately below the schedule on the same screen rather than behind it.
+
+### 6. What is deliberately not modelled
+
+| Omitted | Why |
+|---|---|
+| duration | No workflow needs it, and without one no capacity claim is possible. Human Decision 2 |
+| clinician | §7 gives clinicians "LTD — own schedule"; per-clinician schedules are a separate product step. Human Decision 1 |
+| free-text reason / note | "Who may read it, and is it operational or clinical?" has no governed answer, and front-desk notes must not become clinical documentation. Human Decision 7 |
+| capacity / slots | Without a duration or a resource model, "10:00 is full" would be a lie. **Two patients may share an instant and no constraint prevents it** (`AP-A4`, and `PG-AP-8` asserts no such index exists) |
+| rooms, resources, recurring bookings, reminders | Out of scope by instruction; the notification subsystem stays separate |
+| patient identity copied onto the booking | A reference, never a snapshot — see §7 |
+
+### 7. Snapshot versus live, stated rather than blurred
+
+**The schedule is not a frozen document.** `patient_display_name` and `date_of_birth` are read
+through `patient_id` at query time, so a name corrected today reads corrected on a booking made last
+month (`AP-I3` asserts exactly that). This is the **opposite** of a released laboratory report
+(ADR-072), which genuinely is immutable — and the difference is deliberate: a report is a record of
+what was said at a moment, a schedule is a statement about who is expected.
+
+What *is* durable: the booked instant, the booking's state, the identity that created it, the
+cancellation actor and time, and the link to the visit.
+
+### 8. Time
+
+**One deployment timezone, and it already existed.** `config.py` has enforced `TZ == Africa/Djibouti`
+since before this ticket, raising `ConfigurationError` otherwise; this ticket gave the literal a name
+(`DEPLOYMENT_TIMEZONE`) so a second component could use it without a second copy. `Organization`
+carries **no** timezone column, and per-facility timezones are Human Decision 9.
+
+**The server owns the clock.** The request carries a clinic-local `scheduled_date` and
+`scheduled_time`; `instant_from_local` combines them with `ZoneInfo` and stores UTC. A
+`new Date(date + 'T' + time)` in the browser would interpret the receptionist's "10:00" in the
+*viewer's* zone — three hours out on a laptop set to UTC — so the same booking would land on a
+different instant depending on who made it. The day view is the same story: `day` omitted means the
+**facility's** today, resolved server-side, and `day_bounds` is a half-open
+`[local midnight, next local midnight)` range so a booking at exactly midnight belongs to one day.
+
+`PG-AP-8d` asserts 10:00 Djibouti stores as 07:00 UTC against a real `timestamptz`; `PG-AP-8e`
+asserts a 00:00 local booking (21:00 UTC the previous day) files under the clinic's day and not the
+one before. **Africa/Djibouti is UTC+3 with no DST observance, so no transition is exercised — the
+arithmetic goes through `ZoneInfo` rather than a fixed offset, but DST handling is untested rather
+than proven.**
+
+Display is French-first with the month spelled out (`6 octobre 2026`), never `10/11/26` — the
+ambiguity the ticket names.
+
+### 9. Audit, and one limitation worth stating
+
+Four events: `appointment_created`, `appointment_rescheduled`, `appointment_cancelled`,
+`appointment_checked_in`. All name the **booking** (`resource_type='appointment'`), never the patient
+— naming the patient would make the security table a record of who was expected when, the same
+refusal the `'visit'` resource type already makes.
+
+Arrival writes `appointment_checked_in` **and** `visit_created`, in the same transaction, because the
+encounter and the scheduling fact are different questions.
+
+**The limitation:** `exchange_security_audit_events` has no value or metadata column and this ADR
+does not add one (DHEALTH-BILLING-001 made the same choice about amounts). So
+`appointment_rescheduled` records *that* a booking moved, by whom and when — **not what it moved
+from**. Once the row is overwritten the previous instant is not preserved anywhere. A dedicated
+reschedule-history table would answer that; it is recorded as a question rather than built on a guess
+that a clinic needs it.
+
+**D-8 is untouched.** No read is audited. A schedule view is a read, and this ticket adds no
+successful-read auditing.
+
+### 10. Human Decisions Required — recorded, not answered
+
+1. Should a booking belong to a specific **clinician**?
+2. Does the clinic need appointment **duration**?
+3. Should **slot/capacity** rules exist?
+4. **What exactly constitutes a no-show**, and
+5. **who may record one**?
+6. Are **cancellation reasons** required?
+7. Should a **scheduling reason** be stored, and is it operational or clinical?
+8. Should patients receive **reminders**?
+9. Should an `Organization` carry its **own timezone**? (Today: one enforced deployment timezone.)
+10. May a clinic **book in the past**? (Today: accepted, because backfilling a booking taken by
+    telephone yesterday is legitimate and no refusal was invented.)
+11. When a booked patient has **already walked in** and holds an active visit, should check-in adopt
+    that visit instead of refusing? (Today: a controlled 409, booking left unlinked — adopting it
+    would claim the booking produced an encounter it did not.)
+12. Should **previous scheduled times** be preserved (see §9)?
+13. Should arrived and cancelled bookings stay on the daily view, and for how long?
+14. Should appointment history be visible to clinicians or only operational staff?
+
+**D-2a, D-3's participant half, D-4, D-8 and D-11 are untouched and exactly as open as they were.**
+
+### 11. Evidence, and the boundary of the claim
+
+46 HTTP-edge tests, 14 real-PostgreSQL tests, 18 UI unit tests (plus the 10 existing arrival tests
+re-run green), and a real-browser suite.
+
+**May now be claimed:** Hawva Clinic can schedule a future patient appointment, reschedule or cancel
+it, and check a scheduled patient into the existing Visit workflow when they arrive. Walk-in patients
+remain supported. Appointment check-in creates or links exactly one `CHECKED_IN` visit and is
+retry-safe.
+
+**May not be claimed:** complete medical scheduling; provider calendar management; capacity
+optimisation; no-show management; automated reminders; patient self-booking; wait-time prediction;
+appointment interoperability; human usability; staff-ready; switch-ready; production-ready;
+pilot-ready; or clinically live. **Human usability is not claimed** — nobody who works at a clinic
+reception desk has used this screen, nothing was timed, and product law 3 ("faster than what it
+replaces") remains a validated target rather than a current claim.

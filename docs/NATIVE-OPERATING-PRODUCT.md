@@ -515,6 +515,15 @@ case, and a desk worker confirming identity needs a second attribute. This follo
 
 ## 10. Rendez-vous (calendar) — P1, and small
 
+> **[BUILT 2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073 — and the state list below is superseded.]**
+> `exchange_appointments` exists with **two** states, `SCHEDULED` and `CANCELLED`, not the four
+> proposed here. `ARRIVED` is not a state: arrival is `visit_id IS NOT NULL` plus the linked visit's
+> own status, so attendance has one authoritative home. `NO_SHOW` is not a state either — it is an
+> operational judgement nobody has defined (who records it, how late is late, whether a telephone
+> call changes it), and ADR-073 records it as an open Human Decision rather than inventing the
+> policy. The field list is also narrower than proposed: **no clinician and no note**, both recorded
+> as open questions. Everything in "Defer to later, explicitly" below remains deferred and unbuilt.
+
 **Not P0.** A walk-in-first clinic can operate without it: bookings can live in a paper diary while
 *clinical* data lives in DHealth, which does not violate Law 2 because no clinical information is
 entered twice. That makes it materially incomplete, not blocking.
@@ -548,7 +557,7 @@ Scrutinised field by field against law 7.
 | `clinical_note` | **Yes** | Free text, clinician-entered, append-only revisions. §12. |
 | `started_at` / `completed_at` | **Yes** | Server clock. Derives duration and TAT — law 8. |
 | `visit_type` (walk-in / scheduled) | **Derive** | From whether an appointment is linked. Law 8. |
-| `appointment_id` | **Yes, nullable** | Only when booked. |
+| `appointment_id` | ~~**Yes, nullable**~~ **INVERTED 2026-10-03 (ADR-073 §3)** | The link lives on the *appointment* (`Appointment.visit_id`, nullable + UNIQUE), not here. A walk-in is the common arrival and needs no column at all, so `exchange_visits` keeps no field that is NULL for most of its rows. `exchange_visits` gained only an additive `UNIQUE(id, provider_organization_id)`, so the booking's composite foreign key can make the database refuse a cross-clinic link. |
 | `follow_up` | **No — derive** | `DoctorReview` already carries the disposition. Law 8. |
 | occupation, religion, ethnicity, marital status, next of kin, intake questionnaire, structured history | **No** | No workflow in this specification needs them. Law 7. |
 | vitals / measurements | **No — not in the first ticket** | Real clinical content requiring clinical-lead sign-off. §12. |
@@ -597,6 +606,20 @@ Five states plus `CANCELLED`. Each earns its place:
 **Rejected as decoration:** `ARRIVED` separate from `CHECKED_IN`; `READY_FOR_CLINICIAN`; `TRIAGED`
 (no triage in scope, §29); `BILLED` (billing is its own state, §18); `CLOSED` distinct from
 `COMPLETED`.
+
+> **[SUPERSEDED IN PART 2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073.** The table above lists five
+> states plus `CANCELLED`; the shipped lifecycle is **four** — `CHECKED_IN`, `IN_PROGRESS`,
+> `COMPLETED`, `CANCELLED` — and that is now permanent rather than a first instalment.
+>
+> `PLANNED` is retired because a booked appointment is **not an encounter**. It lives in
+> `exchange_appointments`, and representing it as a visit status would give every patient who booked
+> and never attended a visit row in their clinical history — after which "a visit happened" stops
+> meaning "somebody was in the building" for the waiting list, the one-active-visit invariant, the
+> patient chart and billing alike. `NO_SHOW` is retired with it, since this table's own justification
+> for it was "for `PLANNED` to be honest", and because no no-show policy exists to record.
+>
+> `CANCELLED` is therefore reachable from `CHECKED_IN` only. Cancelling a *booking* is a different
+> act on a different row and creates, cancels and touches no visit. See ADR-073 §1.]**
 
 **Until D-1 resolves, the clinician performs every transition.** The model does not change when a
 Front Desk role arrives — only who may call each transition.

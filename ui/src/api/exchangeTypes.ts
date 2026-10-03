@@ -1502,7 +1502,12 @@ export interface ConnectorRegistrationRequest {
  * The four states a visit can actually be in.
  *
  * `PLANNED` and `NO_SHOW` are deliberately absent: both need a calendar to be reachable, no
- * appointment surface exists, and a state nothing can enter is decoration
+ * appointment surface exists, and a state nothing can enter is decoration.
+ *
+ * **[Dated note, 2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073: a calendar now exists and these four
+ * are still the whole set.** Appointments are their own type (`Appointment`, below) rather than a
+ * visit status, and arrival is read from `Appointment.visit_id`. ADR-073 retires `PLANNED` and
+ * `NO_SHOW` instead of deferring them again.]**
  * (`docs/NATIVE-OPERATING-PRODUCT.md` §12). The backend's CHECK constraint enumerates the same
  * four, so this is the whole set rather than the subset this build happens to render.
  */
@@ -1840,4 +1845,87 @@ export interface ReleasedReport {
   ordering_organization: ReleasedReportOrganization
   patient: LabWorkflowPatientIdentity
   results: ReleasedReportItem[]
+}
+
+// -- DHEALTH-APPOINTMENTS-001/ADR-073: the clinic schedule ------------------------------------
+
+/**
+ * The patient identity a schedule shows.
+ *
+ * Name and date of birth: enough to call the right person forward and tell two similar names
+ * apart. Deliberately not the wider directory entry — a day list is not a place to expose a
+ * telephone number — and no clinical field at all.
+ *
+ * **Current directory truth, not a scheduling snapshot** (ADR-073 §7): a name corrected today
+ * reads corrected on a booking made last month. The schedule is not a frozen document, unlike a
+ * released laboratory report.
+ */
+export interface AppointmentPatient {
+  patient_id: string
+  display_name: string | null
+  date_of_birth: string | null
+}
+
+/**
+ * One booking.
+ *
+ * `scheduled_at` is a UTC instant and the day response carries the `facility_timezone` it means
+ * something in. **The browser formats; it never interprets.** Building a local time from a date and
+ * a time string here would put the same booking on a different instant depending on where the
+ * viewer's machine thinks it is — which is why the create request sends a clinic-local date and
+ * wall clock and lets the server do the arithmetic.
+ *
+ * `visit_id` non-null is the whole of "this booking produced an encounter"; `visit_status` is the
+ * linked visit's own state. There is **no `arrived` flag and no `ARRIVED` status** — attendance has
+ * exactly one authoritative home, which is the visit.
+ *
+ * Deliberately absent (ADR-073 §6): duration, clinician, reason or note, reminder state, no-show,
+ * queue position, waiting time.
+ */
+export interface Appointment {
+  id: string
+  scheduled_at: string
+  status: 'SCHEDULED' | 'CANCELLED'
+  patient: AppointmentPatient
+  visit_id: string | null
+  visit_status: VisitStatus | null
+  created_at: string
+}
+
+/**
+ * One clinic-local day's bookings, earliest first.
+ *
+ * `day` is echoed back because the caller may have omitted it, in which case the **server** decided
+ * what "today" means from the facility timezone. Cancelled bookings are included: they are history,
+ * and hiding them would make "was this cancelled, or never booked?" unanswerable from the day view.
+ */
+export interface AppointmentDay {
+  provider_organization_id: string
+  day: string
+  facility_timezone: string
+  appointments: Appointment[]
+}
+
+/** A clinic-local calendar date and wall clock — never an instant. The server combines them. */
+export interface AppointmentCreateRequest {
+  patient_id: string
+  scheduled_date: string
+  scheduled_time: string
+}
+
+export interface AppointmentRescheduleRequest {
+  scheduled_date: string
+  scheduled_time: string
+}
+
+/**
+ * The booking, now linked, and the visit it produced.
+ *
+ * `visit_created` is `false` on a replay — a double click, a retry, a second receptionist. The
+ * existing visit is returned rather than a second one created.
+ */
+export interface AppointmentCheckInOutcome {
+  appointment: Appointment
+  visit: Visit
+  visit_created: boolean
 }

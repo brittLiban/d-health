@@ -82,6 +82,11 @@ import type {
   ProviderReleaseVersionContent,
   ProviderReleaseVersionHistory,
   ProviderResultReviewQueueResponse,
+  Appointment,
+  AppointmentCheckInOutcome,
+  AppointmentCreateRequest,
+  AppointmentDay,
+  AppointmentRescheduleRequest,
   ReleasedReport,
   ReleaseQueue,
   ResultEntryPlan,
@@ -2282,6 +2287,113 @@ export class ExchangeClient {
     return this.request<WaitingArrival[]>(
       `/organizations/${encodeURIComponent(providerId)}/visits/waiting${query}`,
       { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * GET /exchange/v1/organizations/{provider_id}/appointments
+   *
+   * DHEALTH-APPOINTMENTS-001. One clinic-local day's bookings. **`day` is omitted deliberately when
+   * the caller wants today**: the server resolves the facility's today from its own timezone, so a
+   * browser in another zone asking the same question gets the same list. Computing `new Date()`
+   * here and sending its date would hand that decision to the viewer's machine.
+   */
+  async listAppointments(
+    providerId: string,
+    options: { day?: string; token?: string; signal?: AbortSignal } = {},
+  ): Promise<AppointmentDay> {
+    const query = options.day === undefined ? '' : `?day=${encodeURIComponent(options.day)}`
+    return this.request<AppointmentDay>(
+      `/organizations/${encodeURIComponent(providerId)}/appointments${query}`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST /exchange/v1/organizations/{provider_id}/appointments
+   *
+   * The body carries a clinic-local `scheduled_date` and `scheduled_time`, never an instant — the
+   * server interprets them in the facility timezone. One `Idempotency-Key` per *intended* booking,
+   * so a double click or a retry after an uncertain response produces one appointment.
+   */
+  async createAppointment(
+    providerId: string,
+    idempotencyKey: string,
+    body: AppointmentCreateRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Appointment> {
+    return this.request<Appointment>(
+      `/organizations/${encodeURIComponent(providerId)}/appointments`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../appointments/{appointment_id}/reschedule
+   *
+   * Moves a booking that has not arrived. A 409 means it already produced a visit, which is not an
+   * error to apologise for — arrival is history and scheduling does not rewrite it.
+   */
+  async rescheduleAppointment(
+    providerId: string,
+    appointmentId: string,
+    body: AppointmentRescheduleRequest,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Appointment> {
+    return this.request<Appointment>(
+      `/organizations/${encodeURIComponent(providerId)}/appointments/${encodeURIComponent(appointmentId)}/reschedule`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../appointments/{appointment_id}/cancel
+   *
+   * The patient is no longer expected. Creates, cancels and touches **no visit** — before arrival
+   * there is none, and after arrival this is refused with a 409.
+   */
+  async cancelAppointment(
+    providerId: string,
+    appointmentId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<Appointment> {
+    return this.request<Appointment>(
+      `/organizations/${encodeURIComponent(providerId)}/appointments/${encodeURIComponent(appointmentId)}/cancel`,
+      { method: 'POST', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * POST .../appointments/{appointment_id}/check-in
+   *
+   * The expected patient arrived. One server transaction creates the visit and links the booking,
+   * or neither happens. `visit_created: false` is a replay, not a failure.
+   *
+   * Gated on `visit.check_in`, not `appointment.manage`: this records an actual arrival.
+   */
+  async checkInAppointment(
+    providerId: string,
+    appointmentId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<AppointmentCheckInOutcome> {
+    return this.request<AppointmentCheckInOutcome>(
+      `/organizations/${encodeURIComponent(providerId)}/appointments/${encodeURIComponent(appointmentId)}/check-in`,
+      { method: 'POST', signal: options.signal },
       options.token,
     )
   }

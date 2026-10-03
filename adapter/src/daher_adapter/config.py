@@ -236,9 +236,9 @@ def _notification_settings(environment: Mapping[str, str]) -> dict[str, object]:
 #: imports this, and `exchange/api.py`'s router default is this constant rather than a second copy
 #: of the string.
 #:
-#: **This is a deployment fact, not a facility setting.** Whether an `Organization` should carry its
-#: own timezone is an open product question (ADR-073's Human Decision 9); until it is answered, every
-#: facility in a deployment shares this one, and `Africa/Djibouti` is UTC+3 with no DST observance.
+#: **This is a deployment fact, not a facility setting.** Whether an `Organization` should carry
+#: its own timezone is an open product question (ADR-073's Human Decision 9); until it is answered
+#: every facility in a deployment shares this one, and `Africa/Djibouti` is UTC+3 with no DST.
 DEPLOYMENT_TIMEZONE = "Africa/Djibouti"
 
 

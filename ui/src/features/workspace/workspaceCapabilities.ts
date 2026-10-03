@@ -53,6 +53,7 @@ export const Capability = {
   VISIT_DOCUMENT: 'visit.document',
   ORDER_MANAGE: 'order.manage',
   RESULT_REVIEW: 'result.review',
+  APPOINTMENT_MANAGE: 'appointment.manage',
   LAB_QUEUE_WORK: 'lab.queue.work',
   LAB_RESULT_RELEASE: 'lab.result.release',
   STAFF_ACCESS_MANAGE: 'staff.access.manage',

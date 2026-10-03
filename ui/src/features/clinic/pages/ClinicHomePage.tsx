@@ -10,6 +10,7 @@ import {
 } from '../../../design-system'
 import { useClinic } from '../ClinicContext'
 import type { StaffSectionId } from '../../staff/staffSections'
+import { ClinicAppointments } from '../../visits/ClinicAppointments'
 import { ClinicArrivals } from '../../visits/ClinicArrivals'
 import { Capability, can, capabilitiesFor } from '../../workspace/workspaceCapabilities'
 
@@ -33,6 +34,18 @@ export function ClinicHomePage({ onNavigate, onOpenVisit }: ClinicHomePageProps)
   const mayManageOrders = can(capabilities, Capability.ORDER_MANAGE)
   const mayWorkArrivals =
     can(capabilities, Capability.VISIT_CHECK_IN) || can(capabilities, Capability.VISIT_DOCUMENT)
+  /**
+   * DHEALTH-APPOINTMENTS-001/ADR-073. `appointment.manage` **or** `visit.check_in`: a scheduler must
+   * see what they maintain, and the desk that records arrivals must see who is expected or the
+   * schedule is useless to the one person who most needs it.
+   *
+   * `visit.document` is deliberately absent. A clinician who should also run the diary is granted
+   * `appointment.manage` explicitly -- no role template carries it, because §7 gives clinicians only
+   * "LTD -- own schedule" and widening a shipped role past the specification is the decision ADR-073
+   * declined to make quietly.
+   */
+  const maySeeSchedule =
+    can(capabilities, Capability.APPOINTMENT_MANAGE) || can(capabilities, Capability.VISIT_CHECK_IN)
   const [ordersState, setOrdersState] = useState<{
     orders: LabOrderSummary[]
     loading: boolean
@@ -164,6 +177,22 @@ export function ClinicHomePage({ onNavigate, onOpenVisit }: ClinicHomePageProps)
         who is waiting for them. Somebody with neither -- an administrator, a cashier -- sees nothing
         here, which is the honest rendering of having no part in the arrival workflow.
       */}
+      {/*
+        DHEALTH-APPOINTMENTS-001: the schedule sits **above** the arrivals list, because a clinic day
+        is planned before it is attended -- a receptionist opening the morning looks at who is
+        expected first. Walk-ins stay immediately below and are never buried behind it, which is the
+        ticket's own requirement: in this market arriving without a booking is the common case, not
+        the exception.
+
+        Its own capability pair, so an appointment-only scheduler sees the diary and no waiting list,
+        and a `visit.document`-only clinician sees the waiting list and no diary. Neither is shown a
+        surface their membership cannot act on.
+      */}
+      {maySeeSchedule ? (
+        <div style={{ marginBottom: 'var(--space-6)' }}>
+          <ClinicAppointments />
+        </div>
+      ) : null}
       {mayWorkArrivals ? (
         <div style={{ marginBottom: 'var(--space-6)' }}>
           <ClinicArrivals

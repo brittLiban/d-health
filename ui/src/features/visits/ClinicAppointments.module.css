@@ -1,0 +1,138 @@
+/* DHEALTH-APPOINTMENTS-001/ADR-073 — the clinic schedule panel on `Aujourd'hui`.
+ *
+ * Every colour, size and radius comes from the token layer in `src/index.css`; `designTokens.test.ts`
+ * scans this file and fails on a `var()` that resolves to nothing.
+ *
+ * **Nothing here encodes a judgement in colour.** A booking whose time has passed is shown with the
+ * same neutral treatment as one still to come, distinguished only by its words -- the component's
+ * own docstring explains why, and `StatusBadge`'s text carries the whole of the state so a
+ * monochrome screen and a colour-blind reader lose nothing. */
+
+.panel {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.heading {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+}
+
+/* ── Day navigation ───────────────────────────────────────────────────────── */
+
+.dayNav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.dayHeading {
+  margin: 0;
+  flex: 1 1 12rem;
+  min-width: 0;
+  text-align: center;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+  /* The month is spelled out, so this can be long. It wraps rather than truncating: a date a
+     receptionist cannot read in full is worse than one that takes two lines. */
+  overflow-wrap: anywhere;
+}
+
+.notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  line-height: 1.5;
+}
+
+/* ── Booking / rescheduling form ──────────────────────────────────────────── */
+
+.form {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ── The day's list ───────────────────────────────────────────────────────── */
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.row {
+  display: grid;
+  /* time | patient | state | actions. `minmax(0, 1fr)` on the identity column is what stops a long
+     name pushing the actions off the right edge. */
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.rowTime {
+  font-family: var(--font-family-mono);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.rowIdentity {
+  min-width: 0;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ── Narrow screens ───────────────────────────────────────────────────────── */
+
+/* At 390px a four-column row cannot hold a time, a name, a badge and two buttons. The row becomes a
+   stack, which keeps every value readable instead of scrolling the schedule sideways -- the same
+   decision `staffSections`' navigation rail made for the same width. */
+@media screen and (max-width: 760px) {
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+  }
+
+  .dayHeading {
+    flex-basis: 100%;
+    order: -1;
+  }
+}

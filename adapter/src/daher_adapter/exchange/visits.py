@@ -19,6 +19,13 @@ same specification's first-ticket brief (§36) omits both until a calendar exist
 table exists in this codebase, so nothing could put a visit into either. A state reachable by
 nothing is decoration -- §12's own words about the states it rejected.
 
+**[Dated note, 2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073.** A calendar now exists
+(``exchange_appointments``) and these four states are still the whole set -- ADR-073 retires
+``PLANNED``/``NO_SHOW`` rather than deferring them again, because a booking is a separate fact from
+an encounter. One thing in this module did change: ``start()``'s body is now
+``start_in_session()``, so appointment arrival can create the visit and link the booking in **one**
+transaction without reimplementing any rule here. Nothing inside the extracted body was altered.]**
+
 ── Who may act, and the one thing that is refused for a different reason ──
 
 **[Superseded in part, 2026-09-30, DHEALTH-FRONT-DESK-001/ADR-069.** Authority is now

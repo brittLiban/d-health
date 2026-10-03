@@ -109,6 +109,17 @@ function makeClient(overrides: Partial<ExchangeClient> = {}): ExchangeClient {
   return {
     getMe: vi.fn().mockResolvedValue(me(RECEPTION_CAPABILITIES)),
     listWaitingArrivals: vi.fn().mockResolvedValue([]),
+    // DHEALTH-APPOINTMENTS-001: `Aujourd'hui` now also renders the schedule panel, which a
+    // `visit.check_in` holder legitimately sees (ADR-073 §5) -- so this page makes one more request
+    // than it did when this file was written. Stubbed here rather than made optional in the
+    // component: the real client always has this method, and a component that tolerated its absence
+    // would hide a genuine wiring mistake.
+    listAppointments: vi.fn().mockResolvedValue({
+      provider_organization_id: 'provider-a',
+      day: '2026-10-06',
+      facility_timezone: 'Africa/Djibouti',
+      appointments: [],
+    }),
     searchPatients: vi.fn().mockResolvedValue([PATIENT]),
     listPatients: vi.fn().mockResolvedValue([PATIENT]),
     startVisitWithOutcome: vi.fn().mockResolvedValue({ visit: {}, created: true }),

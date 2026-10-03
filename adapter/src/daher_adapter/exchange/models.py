@@ -2849,8 +2849,18 @@ class VisitStatus(StrEnum):
     calendar: ``PLANNED`` means "a booked appointment that has not arrived", and ``NO_SHOW`` exists
     (§12's words) "for ``PLANNED`` to be honest". No appointment table exists in this codebase, so
     nothing could ever put a visit into either -- and §12's own rejected-states list names "a state
-    reachable by nothing" as decoration. They are added by the appointments ticket, together with
-    the table that makes them reachable, or not at all.
+    reachable by nothing" as decoration. ~~They are added by the appointments ticket, together with
+    the table that makes them reachable, or not at all.~~
+
+    **[Resolved 2026-10-03, DHEALTH-APPOINTMENTS-001/ADR-073: the appointments ticket shipped and
+    added neither. "Or not at all" is the branch that was taken, deliberately and with reasons.**
+    ``exchange_appointments`` exists and is a **separate table**, not a visit status: a booking is
+    an *expectation* and a visit is an *encounter*. Representing the first as a ``PLANNED`` visit
+    would have put a visit row in the clinical history of every patient who booked and never came.
+    Arrival is answered by ``Appointment.visit_id``, and "the time passed and nobody arrived" is
+    reported as an observation rather than stored as a state, because no no-show policy exists to
+    record (ADR-073 §2, Human Decisions 4 and 5). These four states are therefore the permanent
+    set rather than a first instalment, and ADR-073 supersedes §12 on this point.]**
 
     **There is no ``IN_PROGRESS`` -> ``CANCELLED`` transition.** §12 is explicit: CANCELLED is
     reachable "From ``PLANNED`` or ``CHECKED_IN``. Never from ``IN_PROGRESS`` -- that is a
@@ -3123,7 +3133,8 @@ class Appointment(Base):
 
     ``docs/NATIVE-OPERATING-PRODUCT.md`` §12 and two earlier ADRs expected the opposite -- that this
     ticket would add ``PLANNED`` and ``NO_SHOW`` to ``VisitStatus``. **ADR-073 supersedes that**
-    deliberately and in writing rather than by silence; see it for the full argument. ``VisitStatus``
+    deliberately and in writing rather than by silence; see it for the full argument.
+    ``VisitStatus``
     is unchanged at four states, and a structural test asserts it.
 
     ── What a walk-in looks like ──
