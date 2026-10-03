@@ -24186,7 +24186,7 @@ promise corrected, the P1 list annotated).
 | Item | State |
 |---|---|
 | Disposable PostgreSQL | container `dhap-qual-pg`, port 55471, migrated to `0040_clinic_appointments`, **destroyed with its volume `dhap-qual-vol`** at the end of the pass. Never a facility database. It was stopped twice mid-pass by this environment's Docker daemon bounces; it was given `--restart unless-stopped` so a bounce could not silently turn a negative control into a false pass |
-| Demo stack | rebuilt (`up -d --build`) and left **running**, in whatever state `09-billing` (the last sibling suite) left it — run `scripts/demo/reset.sh` before the next browser suite. The Docker daemon restarted the whole stack once during this pass; the single-suite runner waits for all five containers to report healthy before resetting, so no suite started from a half-booted stack |
+| Demo stack | rebuilt (`up -d --build`), then **stopped** on 2026-10-04 (`docker stop`, deliberately not `down`) to free memory for the outstanding unit-suite runs — all eight containers and every volume survive, so `scripts/demo/up.sh` brings it back with the demo database intact. It was last left in whatever state `09-billing` (the final sibling suite) produced, so run `scripts/demo/reset.sh` before the next browser suite. The Docker daemon restarted the whole stack once during the sibling pass; the single-suite runner waits for all five containers to report healthy before resetting, so no suite started from a half-booted stack |
 | `native-report-results.json` | **a tracked file that `qualify-report.sh` writes to the repository root**, so running the report suite dirties it. Committed by this session's earlier DHEALTH-LAB-REPORT-001 pass (`cf4111d`). Restored to `HEAD` here rather than committed again. **Follow-up, not fixed in this ticket:** it should go to gitignored `ui/test-results/` the way `qualify-appointments.sh` now does, and arguably be untracked — but that is another ticket's suite |
 | Static gates | `.env` untracked, no secret-shaped assignments, this ticket's own files carry no credential, every tracked shell script parses, all tracked JSON parses, the qualification script is `100755` **in the index**, and `.github/` is 0 lines changed — all pass. Image pinning still fails on `deploy/native/backup/Dockerfile:15`, pre-existing and tracked as DHEALTH-CI-REPAIR-001 |
 | The UI build | **run, and evidenced** — not as a separate host command but as the thing it already is: `ui/Dockerfile:15` is `RUN npm run build`, and `up.sh` builds with `--build`, so the rebuild after the CSS fix ran the production build. Two independent confirmations that the *processed* output shipped: the served bundle contains the Vite-hashed class `_rowIdentity_11iem` (a different hash from the `_rowIdentity_1aki2_111` in the broken 768px screenshot, which is the CSS change itself), and AP-I's 768px phase passes against that bundle. `npm run typecheck` (`tsc -b --noEmit`, the same project graph the build compiles) also passes |
@@ -24330,7 +24330,27 @@ single batch completed**, so it contributes nothing and is not counted. The fix 
 isolation, not yet inside a whole-suite pass. What may be claimed precisely: *every one of the 66
 files ran and was accounted for, 1067 tests executed, and the single failure is fixed and verified
 on its own files.* What may not: *that a full 66-file run has been observed all-green end to end.*
-One batched run, about ten minutes, closes that gap.
+
+**Third attempt, 2026-10-04 — reaped again, and the gap stands.** A clean full run against the final
+commit (`670246a`, which contains the `workspaceCapabilities.test.ts` fix) was attempted with the
+demo stack deliberately **stopped** first — `docker stop`, not `down`, so the containers and the demo
+database survive — which freed roughly 800MB, mostly Keycloak, and raised available memory to about
+6.8GB. It was still reaped by the agent harness under critical system memory pressure, part way
+through batch 5 of 10.
+
+What that attempt did produce, and it is consistent with the earlier complete run: **batches 1–4
+each reconciled 7 of 7 files and passed — 28 files, 501 tests, zero failures**, including the batch
+holding the fixed file. Batch 5 has no summary line and is not counted. This is partial evidence,
+not the exact 66-of-66 reconciliation the ticket asks for, and it is recorded as partial.
+
+**No code was changed to accommodate the environment, and the run was not restarted.** Three
+reapings of this suite on this machine is an environment fact rather than a product finding: the
+suite is 66 files of jsdom, the machine has 7.4GB total, and the pressure arrives while the session
+is idle rather than from the run itself. Closing this honestly needs either a machine with more
+memory, `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1` set when starting Claude Code, or the run
+driven from a terminal outside the agent harness: `scratchpad/ui-batches.sh <outdir>`, then
+`scratchpad/reconcile_ui.py`, which requires reported files to equal files handed in and exits
+non-zero otherwise.
 
 ### The adapter suite — one targeted file run, the remainder unobserved
 
