@@ -10802,12 +10802,21 @@ covered moving a booking that had not arrived and moving a cancelled one, but ne
 *had* arrived. `test_ap_c3_a_booking_that_already_arrived_cannot_be_moved` closes it, and the control
 now reddens through it.
 
-**Incomplete, and named so rather than rounded up:** of the twelve sibling browser suites, three ran
-green (`12-front-desk`, `08-clinic-visit`, `01-golden-journey` — the three covering the clinic
-surfaces this ticket changed); one was interrupted mid-run and eight were not run, along with a full
-adapter-suite run and the whole 66-file UI unit suite, because the agent harness reaped those
-background runs under critical system memory pressure. An interrupted run is not a pass. See
-`PROJECT_STATE.md` for what remains and how to resume it.
+**All twelve sibling browser suites pass** — 158 phases, each suite run alone from its own fresh
+baseline, `07-access-lifecycle` and `10-capabilities` first because the capability catalogue gained a
+row. With this ticket's 13 that is 171 browser phases.
+
+**The full UI unit suite reconciled exactly** (66 files discovered, 66 reported, 1067 tests) and
+caught the one defect the targeted runs could not: `workspaceCapabilities.test.ts` carries a
+hardcoded list of every capability value, so adding `appointment.manage` to the enum reddened that
+file alone. Adding a capability here means editing three places, and the adapter's own catalogue
+mirror test cannot see it because it reads the list out of the TypeScript source. Fixed.
+
+**Two gaps, named rather than rounded up:** a clean full UI re-run after that fix was reaped under
+system memory pressure before any batch completed, so the fix is verified on its own files but not
+inside a whole-suite pass; and a **full adapter-suite run has not been completed**, so the ~900
+adapter tests beyond this ticket's 47 + 14 are unobserved against this code. Neither is a failure.
+See `PROJECT_STATE.md` for how to close both.
 
 **May now be claimed:** Hawva Clinic can schedule a future patient appointment, reschedule or cancel
 it, and check a scheduled patient into the existing Visit workflow when they arrive. Walk-in patients

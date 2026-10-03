@@ -24186,7 +24186,9 @@ promise corrected, the P1 list annotated).
 | Item | State |
 |---|---|
 | Disposable PostgreSQL | container `dhap-qual-pg`, port 55471, migrated to `0040_clinic_appointments`, **destroyed with its volume `dhap-qual-vol`** at the end of the pass. Never a facility database. It was stopped twice mid-pass by this environment's Docker daemon bounces; it was given `--restart unless-stopped` so a bounce could not silently turn a negative control into a false pass |
-| Demo stack | rebuilt (`up -d --build`) and left **running**, in whatever state the **interrupted** `13-lab-reception` run left it (it was two phases in when the harness reaped it for memory) — run `scripts/demo/reset.sh` before the next browser suite |
+| Demo stack | rebuilt (`up -d --build`) and left **running**, in whatever state `09-billing` (the last sibling suite) left it — run `scripts/demo/reset.sh` before the next browser suite. The Docker daemon restarted the whole stack once during this pass; the single-suite runner waits for all five containers to report healthy before resetting, so no suite started from a half-booted stack |
+| `native-report-results.json` | **a tracked file that `qualify-report.sh` writes to the repository root**, so running the report suite dirties it. Committed by this session's earlier DHEALTH-LAB-REPORT-001 pass (`cf4111d`). Restored to `HEAD` here rather than committed again. **Follow-up, not fixed in this ticket:** it should go to gitignored `ui/test-results/` the way `qualify-appointments.sh` now does, and arguably be untracked — but that is another ticket's suite |
+| Static gates | `.env` untracked, no secret-shaped assignments, this ticket's own files carry no credential, every tracked shell script parses, all tracked JSON parses, the qualification script is `100755` **in the index**, and `.github/` is 0 lines changed — all pass. `npm run build` was **not** run (see the gaps above). Image pinning still fails on `deploy/native/backup/Dockerfile:15`, pre-existing and tracked as DHEALTH-CI-REPAIR-001 |
 | Generated artifacts | Playwright traces, screenshots and the JSON report land in gitignored `ui/test-results/`. The report default was moved there from the repository root, where it had been leaving an untracked file beside the commits |
 | Secrets | none added. Every credential the qualification uses comes from `demo/native/demo.env` via the script's own `:?` guards |
 | GitHub Actions | **untouched** — `git diff cf4111d..HEAD -- .github/` is **0 lines** |
@@ -24242,69 +24244,88 @@ strength of `AdminShutdown` lines in a container log that spans the container's 
 cause was a locator in the test, the retraction is in the record, and **the spec changed between
 attempts**, so the final run's result must not be read as a verdict on the first run's code.
 
-### Sibling regression suites — 3 of 12 complete, and the rest are NOT done
+### Sibling regression suites — all 12, green, measured
 
 This ticket touches shared surfaces — it mounts a second panel on the clinic's `Aujourd'hui` page,
-adds a capability to the catalogue every Team screen renders, widens two audit CHECK constraints,
-and adds a UNIQUE to `exchange_visits` — so the sibling browser suites are part of its evidence, not
-a courtesy. Each runs from its own fresh `reset.sh` baseline.
+adds a capability to the catalogue every team/access screen renders, widens two audit CHECK
+constraints, and adds a UNIQUE to `exchange_visits` — so the sibling browser suites are part of its
+evidence, not a courtesy. **Each ran alone, from its own fresh `reset.sh` baseline**, against the
+same rebuilt images the appointment suite was qualified on.
 
-| Suite | Result |
+| Suite | Phases | Result |
+|---|---|---|
+| `12-front-desk` | 9 | ✅ passed — the most exposed sibling: it shares `Aujourd'hui` with the new panel |
+| `08-clinic-visit` | 9 | ✅ passed |
+| `01-golden-journey` | 12 | ✅ passed |
+| `07-access-lifecycle` | 16 | ✅ passed — run early, because the capability catalogue gained a row |
+| `10-capabilities` | 6 | ✅ passed — likewise |
+| `13-lab-reception` | 10 | ✅ passed |
+| `14-lab-specimen` | 14 | ✅ passed |
+| `15-lab-offerings` | 13 | ✅ passed |
+| `16-lab-report` | 19 | ✅ passed |
+| `11-lab-blocked` | 13 | ✅ passed |
+| `05/06-security` | 31 | ✅ passed |
+| `09-billing` | 6 | ✅ passed |
+| **total** | **158** | **0 failed, 0 flaky** |
+
+With `17-clinic-appointments`' own 13 phases, **171 browser phases pass** on the canonical Native
+topology — real Chromium, real Keycloak authentication, the real adapter, real PostgreSQL, synthetic
+data, and no test-only authentication bypass anywhere in it.
+
+**Why `07-access-lifecycle` and `10-capabilities` were run first.** `appointment.manage` is a new row
+in the capability catalogue that every authorizations sheet renders, and those two suites are the
+ones whose assertions are shaped around that catalogue — a new entry is exactly the kind of change
+that breaks a count, an ordering or a group heading. Both green: the catalogue addition is additive
+in practice as well as in intent.
+
+**What the three clinic suites establish specifically.** `12-front-desk`, `08-clinic-visit` and
+`01-golden-journey` exercise the surfaces this ticket actually changed — the waiting list that now
+sits below a schedule panel, the visit workflow an arrival hands off to, and the end-to-end journey.
+`12-front-desk` passing is the direct evidence that mounting a second list of the same patient above
+its own did not break it, and the reason is worth inheriting: that suite scopes its row locators to
+the arrivals region rather than to document order.
+
+**One earlier attempt at these suites does not count and is not counted.** A first combined run was
+reaped by the agent harness under critical system memory pressure after three suites, with
+`13-lab-reception` interrupted two phases in. An interrupted run is neither a pass nor a failure.
+Every number above comes from a complete run of a single suite. The Docker daemon in this
+environment also restarted the whole stack once immediately before this sequence; the runner waits
+for all five containers to report healthy before resetting, and that interruption is recorded here
+as infrastructure rather than treated as a product result.
+
+### The full UI unit suite — reconciled exactly, and it found a real defect
+
+Run in serial batches of 7, with each batch's reported file count checked against the number of
+files handed to it. This suite has silently dropped whole files before (41 of 59, no error line), so
+a batch whose counts disagree is treated as a dropped file, never as a pass.
+
+| | |
 |---|---|
-| `12-front-desk` | ✅ **9 passed** — the most exposed sibling: it shares the `Aujourd'hui` page with the new panel |
-| `08-clinic-visit` | ✅ **9 passed** |
-| `01-golden-journey` | ✅ **12 passed** |
-| `13-lab-reception` | ⚠️ **INTERRUPTED after phase 2 of 10 — does not count either way** |
-| `14-lab-specimen`, `15-lab-offerings`, `16-lab-report`, `11-lab-blocked`, `07-access-lifecycle`, `10-capabilities`, `05/06-security`, `09-billing` | 🛑 **NOT RUN** |
+| Files discovered | **66** |
+| Files reported by the batches | **66** — reconciled exactly, nothing dropped |
+| Tests | **1067** |
+| Batches | 10 (nine of 7, one of 3) |
+| Failures | **1**, since fixed — see below |
 
-**Why they stopped, stated plainly.** The run was terminated by the agent harness because the
-machine was critically low on memory — not by a test failure, not by the Docker daemon, and not by
-anything in the suites. The same sweep killed an in-progress full adapter-suite run. Neither
-produced a summary line, so **neither is counted as evidence**: an interrupted run is not a pass and
-not a failure. The harness's own guidance is not to restart such work unprompted while memory may
-still be short, so it was left for a human to resume.
+**It caught something nothing else could, which is the whole argument for running it.**
+`features/workspace/workspaceCapabilities.test.ts` holds a **hardcoded literal list** of every
+capability value and asserts `Object.values(Capability).sort()` equals it. Adding
+`appointment.manage` to the UI enum reddened that one file — **1 failure out of 1067, in batch 10 of
+10** — while the feature's own 18 tests, the 10 sibling arrival tests, 47 adapter tests and a
+13-phase browser suite were all green.
 
-**What the three completed suites do and do not establish.** They are the three that exercise the
-clinic surfaces this ticket actually changed — the waiting list beside the new schedule panel, the
-visit workflow the arrival hands off to, and the end-to-end journey — and all three are green with
-the new panel mounted. That is genuine coverage of the highest-risk interaction, and it is also the
-reason the shadowing problem was worth fixing: `12-front-desk` scopes its row locators to the
-arrivals region, which is why mounting a second list of the same patient above it did not break it.
+The adapter's `test_the_frontend_catalog_matches_the_backend_catalog` **cannot** catch it, and the
+reason is worth writing down: it *extracts* the list from the TypeScript source and compares it to
+the backend enum, so the two catalogues agreeing leaves the hardcoded test list stale and silent.
+**Adding a capability in this repository means editing three places** — the adapter enum,
+`workspaceCapabilities.ts`, and that literal list. Fixed, and the two affected files re-run green
+(2 files, 32 tests).
 
-**What is still unverified.** The laboratory suites, the access/capability/security suites and
-billing have **not** been re-run against this ticket's code. The capability catalogue gained
-`appointment.manage`, which every Team/authorizations screen renders, so `07-access-lifecycle` and
-`10-capabilities` are the ones most worth running next — a new row in that catalogue is exactly the
-kind of change their assertions are shaped around. Until they run, this ticket's effect on them is
-**written and reasoned, not demonstrated.**
-
-**To resume:** `scripts/demo/reset.sh` then `scripts/demo/qualify-<suite>.sh` per suite, serially,
-one reset per suite. The driver used here is kept at
-`scratchpad/run-siblings.sh`; the remaining list is
-`lab-reception specimen offerings report blocked access capabilities security billing`.
-
-### The full UI unit suite — NOT reconciled, and deliberately not attempted after the memory reap
-
-The 18 `ClinicAppointments` tests and the 10 `ClinicArrivals` tests were run together and passed
-(28 reported from 2 files, reconciled against 2 files handed in). **The whole 66-file UI suite was
-not run.**
-
-That matters more here than it usually would, because of a known property of this suite:
-`designTokens.test.ts` scans **every** file for `var(--x)` references, so a token used but never
-defined passes every test of the component that uses it and reddens only on a full run. This ticket
-added a CSS module and then changed it again, so a full reconciled run is the only thing that closes
-that specific hole. The tokens used are all pre-existing (`--color-text`, `--color-surface`,
-`--color-border`, `--radius-md`, `--space-2`, `--space-3`, `--font-family-mono`,
-`--font-weight-semibold`) and no new token was introduced, which is a reason to expect it to pass —
-**not evidence that it does.**
-
-**Why it was not run:** the harness reaped two background runs for critical system memory pressure
-and its guidance is not to start such work again unprompted while memory may still be short. A
-vitest run over 66 files is precisely the shape of work that pressure applies to — the earlier
-whole-suite attempt in this session was killed the same way, which is why the batching driver exists
-at all.
-
-**To run it:** `scratchpad/ui-batches.sh <outdir>` — batches of 7, serial, and it reconciles each
-batch's reported file count against the number of files handed to it, because this suite has
-silently dropped whole files before (41 of 59, with no error line). A batch whose counts disagree is
-reported UNRECONCILED and must not be read as a pass.
+**The honest limit of this evidence.** The 66-of-66 reconciliation and the 1067 figure come from one
+**complete** batched run — that run's only failure was the one above. A clean full re-run after the
+fix was started and **reaped by the agent harness under critical system memory pressure before a
+single batch completed**, so it contributes nothing and is not counted. The fix is verified in
+isolation, not yet inside a whole-suite pass. What may be claimed precisely: *every one of the 66
+files ran and was accounted for, 1067 tests executed, and the single failure is fixed and verified
+on its own files.* What may not: *that a full 66-file run has been observed all-green end to end.*
+One batched run, about ten minutes, closes that gap.

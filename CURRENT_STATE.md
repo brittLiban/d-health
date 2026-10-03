@@ -34,6 +34,16 @@
 > first failure to a Docker daemon bounce **was wrong and is retracted**: `docker logs` spans a
 > container's whole lifetime, so those lines proved a bounce happened, not that it caused anything.
 >
+> **Qualified, measured:** 47 HTTP-edge tests, 14 real-PostgreSQL tests, 18 UI unit tests plus the
+> 10 existing arrival tests, 13 browser phases, and 18 negative controls each reverted
+> byte-for-byte. **All twelve sibling browser suites pass** (158 phases; 171 with this ticket's own),
+> each run alone from a fresh `reset.sh` baseline. The **full UI unit suite reconciled exactly** —
+> 66 files discovered, 66 reported, 1067 tests — and caught the one defect the targeted runs could
+> not: `workspaceCapabilities.test.ts` holds a hardcoded list of every capability value, so adding
+> `appointment.manage` reddened that single file. Fixed. **Two things are unobserved rather than
+> green:** a clean full UI re-run after that fix (reaped under system memory pressure before any
+> batch completed), and a full adapter-suite run beyond this ticket's 47 + 14.
+>
 > **Not built, and not claimed:** no reminders of any kind, no no-show concept, no rooms, resources,
 > capacity or double-booking rules, no recurrence, no waitlist, no patient self-booking, no
 > Connect/FHIR projection. A rescheduled booking's **previous** time is preserved nowhere. The

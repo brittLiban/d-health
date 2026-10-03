@@ -49,16 +49,24 @@ arrival tests re-run green), a 13-phase real-browser suite from a fresh `reset.s
 a rebuilt stack, and 18 negative controls each reverted byte-for-byte. Two controls stayed green **by
 design** and one found a missing test rather than confirming a guard — see `PROJECT_STATE.md`.
 
-**Two pieces of this ticket's evidence are incomplete and must not be read as green.** Of the twelve
-sibling browser suites, **three ran and passed** — `12-front-desk` (9), `08-clinic-visit` (9),
-`01-golden-journey` (12), which are the three that exercise the clinic surfaces this ticket changed.
-`13-lab-reception` was **interrupted mid-run** and the other eight **were not run**, as was a full
-adapter-suite run and the whole 66-file UI unit suite: the agent harness reaped the background runs
-because the machine was critically low on memory, which is neither a test failure nor a product
-finding. An interrupted run is not a pass. The laboratory, access/capability/security and billing
-suites' behaviour against this ticket's code is therefore **written and reasoned, not demonstrated**,
-and `07-access-lifecycle`/`10-capabilities` are the ones most worth running first because the
-capability catalogue every Team screen renders gained a row.
+**All twelve sibling browser suites pass**, each run alone from its own fresh `reset.sh` baseline
+against these same images: `12-front-desk` 9, `08-clinic-visit` 9, `01-golden-journey` 12,
+`07-access-lifecycle` 16, `10-capabilities` 6, `13-lab-reception` 10, `14-lab-specimen` 14,
+`15-lab-offerings` 13, `16-lab-report` 19, `11-lab-blocked` 13, `05/06-security` 31, `09-billing` 6
+— **158 phases, 0 failed**, and with this ticket's own 13 that is **171 browser phases**. The two
+capability suites were run first deliberately, because `appointment.manage` is a new row in the
+catalogue every authorizations sheet renders.
+
+**The full UI unit suite reconciled exactly — 66 files discovered, 66 reported, 1067 tests — and it
+found the one defect nothing else could.** `workspaceCapabilities.test.ts` holds a hardcoded literal
+list of every capability value; adding `appointment.manage` to the enum reddened that single file
+(1 failure of 1067) while the feature's own tests, the browser suite and the adapter suite were all
+green. Fixed; the two affected files re-run green. **Two gaps remain, named rather than rounded up:**
+a clean full UI re-run after that fix was reaped by the agent harness under critical system memory
+pressure before any batch finished, so the fix is verified on its own files but not yet inside a
+whole-suite pass; and **a full adapter-suite run has not been completed** — the 47 appointment tests
+and 14 PostgreSQL tests pass, but the other ~900 adapter tests have not been re-run against this
+ticket's code. Neither is a failure; both are unobserved.
 
 **What may be claimed:** Hawva Clinic can schedule, reschedule and cancel a future appointment, and
 check a scheduled patient into the existing Visit workflow on arrival, with walk-ins unaffected.
