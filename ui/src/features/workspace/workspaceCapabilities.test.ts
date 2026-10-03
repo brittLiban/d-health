@@ -206,6 +206,9 @@ describe('the catalog mirrors the server', () => {
     // `test_the_frontend_catalog_matches_the_backend_catalog` asserts the other direction.
     expect(Object.values(Capability).sort()).toEqual(
       [
+        // DHEALTH-APPOINTMENTS-001/ADR-073. In no role template: a clinician who should book is
+        // granted it explicitly, so this entry existing is not authority anybody holds by default.
+        'appointment.manage',
         'billing.configure_prices',
         'billing.operate',
         'facility.configure',
