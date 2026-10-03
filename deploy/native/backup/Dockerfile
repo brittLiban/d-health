@@ -15,14 +15,28 @@
 # Tag plus immutable digest, the convention used for every other external image here: the tag
 # says what a human should read, the digest says what actually gets built.
 #
-# Provenance of this digest (DHEALTH-CI-REPAIR-001, 2026-10-04) -- it was resolved and pulled,
-# not copied from anywhere:
-#   1. `docker manifest inspect postgres:16-alpine` resolved the tag to this digest;
-#   2. `docker pull postgres:16-alpine@sha256:1a66d744...` succeeded, so the digest is real and
-#      retrievable rather than merely well-formed -- AGENTS.md forbids recording one that has
-#      not been pulled, and this one has been;
-#   3. the pulled image was then verified to be what the comment below claims: PostgreSQL 16.15
-#      on Alpine 3.24.2, with `pg_dump`/`pg_restore` 16.15 and **no** `openssl` binary.
+# This is the multi-arch **index** digest, not one platform's manifest. The difference is not
+# cosmetic: a platform digest builds only on that architecture, so pinning linux/amd64 here would
+# work on a GitHub runner and fail on an arm64 developer machine. The first attempt at this pin got
+# that wrong -- `docker manifest inspect --verbose` reports one `Ref` per platform and the amd64
+# entry is first, so `sha256:1a66d744...` (the amd64 manifest inside this very index) looked like
+# the answer. `docker manifest inspect <ref>@<digest>` is what distinguishes them: it verifies
+# against an index and answers "manifest verification failed" for a platform manifest.
+#
+# Provenance of this digest (DHEALTH-CI-REPAIR-001, 2026-10-04) -- resolved and pulled, not copied:
+#   1. the registry's own `Docker-Content-Digest` for `postgres:16-alpine`, requested with the
+#      index media types in `Accept`, is this value; the index lists eight platforms;
+#   2. `docker pull postgres:16-alpine@sha256:721873c3...` succeeded, so it is retrievable rather
+#      than merely well-formed -- AGENTS.md forbids recording a digest that has not been pulled;
+#   3. `docker manifest inspect` on it returns `application/vnd.oci.image.index.v1+json`, which is
+#      the check that it really is the index;
+#   4. the pulled image was verified to be what the comment below claims: PostgreSQL 16.15 on
+#      Alpine 3.24.2, with `pg_dump`/`pg_restore` 16.15 and **no** `openssl` binary.
+#
+# A digest already present on this machine was rejected on the way here: `docker image inspect`
+# reported a local `RepoDigest` of `sha256:530a5243...`, which the registry would not verify at
+# all -- consistent with the image having been side-loaded. Pinning it would have produced a
+# reference CI could not pull.
 #
 # The earlier TODO here said this could not be pinned from a machine unable to reach Docker
 # Hub's blob CDN. That constraint no longer applied; the pull above is the evidence.
@@ -33,7 +47,7 @@
 # Recorded as a follow-up instead. Note the consequence while both exist: this tool image is
 # pinned to 16.15 and the server tracks whatever `16-alpine` currently is, so the
 # "never a different major version" guarantee below holds, but the minor versions can drift.
-FROM postgres:16-alpine@sha256:1a66d744c1b459e13b05a8fca341da84cb63383e99ce262210efee5a319d4551
+FROM postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
 
 RUN apk add --no-cache openssl
 
