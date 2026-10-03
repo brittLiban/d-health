@@ -75,6 +75,10 @@ def create_app(
         patient_public_base_url=active_settings.patient_public_base_url,
         notification_default_region=active_settings.notification_default_region,
         notification_receipts_configured=active_settings.notification_receipts_configured,
+        # DHEALTH-APPOINTMENTS-001. Passed explicitly from the validated settings rather than left
+        # to the router's default: `Settings.from_env` is the component that enforces `TZ`, so the
+        # running application takes the value from the place that checked it.
+        facility_timezone=active_settings.timezone,
     )
     # DH-CONNECT-AGENT-001 §8/§10: a **second validator with a second audience**, for connector
     # agents only. Same issuer, same signing keys, different `aud` -- so a clinician's token is not

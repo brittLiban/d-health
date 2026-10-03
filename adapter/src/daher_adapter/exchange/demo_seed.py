@@ -33,14 +33,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from daher_adapter.config import Settings
+from daher_adapter.config import DEPLOYMENT_TIMEZONE, Settings
 from daher_adapter.database import build_engine, build_session_factory
+from daher_adapter.exchange.appointments import instant_from_local
 from daher_adapter.exchange.catalog import CatalogRepository
 from daher_adapter.exchange.directory import LabDirectoryProfileRepository
 from daher_adapter.exchange.lab_result_templates import (
@@ -53,6 +55,8 @@ from daher_adapter.exchange.membership import (
     OrganizationRoleAssignmentRepository,
 )
 from daher_adapter.exchange.models import (
+    Appointment,
+    AppointmentStatus,
     ClinicService,
     ClinicServicePrice,
     FacilityEnrollment,
@@ -96,6 +100,22 @@ CLINIC_SERVICES = (
 #: the same terms. Without it the laboratory till correctly offers the performed test and correctly
 #: refuses to charge for it -- which is right behaviour against a wrong baseline.
 LAB_PRICE_AMOUNT = "3500.00"
+#: DHEALTH-APPOINTMENTS-001: the two demo bookings, as clinic-local wall clocks.
+#:
+#: One **today** so an operator (and the browser qualification) can record an arrival immediately
+#: without first inventing a booking, and one **tomorrow** so the schedule demonstrably holds a
+#: future expectation that is not an encounter. Deliberately only two: a dozen fake patients would
+#: make the day view look busy and teach nothing, and no cancelled booking is seeded because the
+#: qualification creates and cancels its own, which is a truer demonstration than a pre-cancelled
+#: row.
+#:
+#: **Deterministic in shape, not in absolute instant.** The dates are computed from the facility's
+#: own current date whenever the seed runs, because a fixed instant would be in the past by the
+#: second day and "today's appointments" would be permanently empty.
+DEMO_APPOINTMENT_TODAY_TIME = time(10, 0)
+DEMO_APPOINTMENT_TOMORROW_TIME = time(9, 0)
+DEMO_APPOINTMENT_TODAY_KEY = "dhealth-native-demo-appointment-today"
+DEMO_APPOINTMENT_TOMORROW_KEY = "dhealth-native-demo-appointment-tomorrow"
 SEED_IDENTITY_ISSUER = "dhealth-native-demo-seed"
 SEED_IDENTITY_SUBJECT = "demo-seed-script"
 
@@ -183,6 +203,16 @@ _WORKFLOW_TABLES = (
     # foreign key to `exchange_visits`, and notes before visits for the same reason. TRUNCATE's own
     # CASCADE would sort this out, but the explicit order is what makes a missing table fail loudly,
     # which is this list's whole reason for existing.
+    # DHEALTH-APPOINTMENTS-001. Bookings are cleared and re-seeded, which makes them *baseline*
+    # in effect even though a demo also produces them: `seed_baseline` re-creates the two demo
+    # bookings at today's and tomorrow's clinic time after every reset, so a reset leaves a demo
+    # that can be driven immediately rather than an empty schedule.
+    #
+    # Ordered **before** `exchange_visits`: `exchange_appointments.visit_id` carries a `RESTRICT`
+    # composite foreign key to it. TRUNCATE's own CASCADE would sort the ordering out regardless;
+    # the explicit position is what makes a missing entry fail loudly, which is this list's whole
+    # reason for existing.
+    "exchange_appointments",
     "exchange_visit_notes",
     "exchange_visits",
     # DHEALTH-BILLING-001. Financial artefacts a demo *produces*, cleared for the same reason
@@ -480,6 +510,10 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
         created_by_identity_id=seed_identity_id,
     )
     _ensure_patient_date_of_birth(session_factory, provider.id)
+    # DHEALTH-APPOINTMENTS-001: two synthetic bookings so a reset leaves a demo that can be
+    # driven immediately -- one today to arrive, one tomorrow to show an expectation that is
+    # not an encounter. Needs the patient, which the call above has just reconciled.
+    _ensure_demo_appointments(session_factory, provider.id, seed_identity_id)
 
     keycloak_base_url = os.environ.get("DEMO_KEYCLOAK_ADMIN_URL", "").strip()
     admin_user = os.environ.get("DEMO_KEYCLOAK_ADMIN_USER", "").strip()
@@ -648,6 +682,71 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
             "in isolation, never when run via scripts/demo/up.sh or reset.sh)",
             file=sys.stderr,
         )
+
+
+def _ensure_demo_appointments(session_factory, provider_organization_id, actor_id) -> None:
+    """Two synthetic bookings for the demo patient: one today, one tomorrow. Idempotent.
+
+    Reconciles `scheduled_at` rather than only inserting, so a stack started on Monday and still
+    running on Tuesday shows a booking for *Tuesday* instead of a stale one nobody can arrive for.
+    That is a baseline-reconciliation write, the same shape `_ensure_lab_price` and
+    `_ensure_patient_date_of_birth` already use -- deliberately **not** the audited
+    `AppointmentRepository.reschedule` path, because nobody rescheduled anything: the seed is
+    re-establishing a baseline, and writing an `appointment_rescheduled` audit row with the seed
+    identity as the actor would put a fiction in the security audit table.
+
+    The wall clocks are interpreted in the deployment timezone by the same `instant_from_local` the
+    product uses, so the seeded bookings land where the clinic's own day view looks for them.
+    """
+    timezone_name = DEPLOYMENT_TIMEZONE
+    today = datetime.now(ZoneInfo(timezone_name)).date()
+    wanted = (
+        (DEMO_APPOINTMENT_TODAY_KEY, today, DEMO_APPOINTMENT_TODAY_TIME),
+        (
+            DEMO_APPOINTMENT_TOMORROW_KEY,
+            today + timedelta(days=1),
+            DEMO_APPOINTMENT_TOMORROW_TIME,
+        ),
+    )
+    with session_factory() as session:
+        # Resolved here by display name rather than threaded in, exactly as
+        # `_ensure_patient_date_of_birth` does: `PatientRepository.create` above returns
+        # nothing the caller keeps, and a second lookup is cheaper than reshaping the
+        # baseline function's signature.
+        patient = session.scalar(
+            select(Patient).where(
+                Patient.provider_organization_id == provider_organization_id,
+                Patient.display_name == PATIENT_DISPLAY_NAME,
+            )
+        )
+        if patient is None:  # pragma: no cover - the caller has just reconciled it
+            return
+        for key, day, at in wanted:
+            scheduled_at = instant_from_local(day, at, timezone_name)
+            existing = session.scalar(
+                select(Appointment).where(
+                    Appointment.provider_organization_id == provider_organization_id,
+                    Appointment.idempotency_key == key,
+                )
+            )
+            if existing is None:
+                session.add(
+                    Appointment(
+                        idempotency_key=key,
+                        provider_organization_id=provider_organization_id,
+                        patient_id=patient.id,
+                        scheduled_at=scheduled_at,
+                        status=AppointmentStatus.SCHEDULED.value,
+                        created_by_identity_id=actor_id,
+                    )
+                )
+                continue
+            # An already-arrived booking is left exactly as it is: moving it would rewrite the
+            # scheduling context of a visit that really happened, which is the one thing the
+            # product refuses to do anywhere else.
+            if existing.visit_id is None and existing.scheduled_at != scheduled_at:
+                existing.scheduled_at = scheduled_at
+        session.commit()
 
 
 def _ensure_enrollment(session_factory, organization_id) -> None:

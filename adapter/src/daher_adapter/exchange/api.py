@@ -38,14 +38,16 @@ import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session, sessionmaker
 
+from daher_adapter.config import DEPLOYMENT_TIMEZONE
 from daher_adapter.connect.contract import CONTRACT_VERSION
 from daher_adapter.connect.qualification import (
     QUALIFICATION_SUITE_VERSION,
@@ -61,6 +63,17 @@ from daher_adapter.connect.repository import (
     ServiceClientAlreadyBound,
 )
 from daher_adapter.connect.runtime_health import runtime_health_in_session
+from daher_adapter.exchange.appointments import (
+    ActiveVisitAlreadyExists as AppointmentActiveVisitAlreadyExists,
+)
+from daher_adapter.exchange.appointments import (
+    AppointmentAlreadyArrived,
+    AppointmentCancelled,
+    AppointmentNotFound,
+    AppointmentPatientNotFound,
+    AppointmentRecord,
+    AppointmentRepository,
+)
 from daher_adapter.exchange.audit import ExchangeAuditEvent, ExchangeAuditWriter
 from daher_adapter.exchange.authorization import (
     AuthenticatedPrincipal,
@@ -3368,6 +3381,115 @@ class BillingPatientResponse(BaseModel):
     date_of_birth: date | None
 
 
+class AppointmentPatientResponse(BaseModel):
+    """The patient identity a schedule shows, and nothing more.
+
+    Name and date of birth: enough for a receptionist to call the right person forward and to tell
+    two similar names apart. Deliberately **not** `PatientIdentitySummaryResponse` -- that carries
+    `contact_channel_type`/`contact_value`, and a day list is not a place to expose a telephone
+    number. No clinical field of any kind, and nothing about why they are coming.
+
+    **Current directory truth, not a scheduling snapshot** (ADR-073 §7): a name corrected today
+    reads corrected on last month's bookings too. The schedule is not a frozen document, unlike a
+    released laboratory report (ADR-072), and this docstring is the place that says so.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_id: uuid.UUID
+    display_name: str | None
+    date_of_birth: date | None
+
+
+class AppointmentResponse(BaseModel):
+    """One booking.
+
+    `scheduled_at` is the stored UTC instant and `facility_timezone` is the zone it means something
+    in. Both are returned on the collection response so the browser *formats* rather than
+    *interprets*: a frontend that built its own local time from a date and a time string would put
+    the same booking on a different instant depending on where the viewer's laptop thinks it is.
+
+    `visit_id` non-`null` is the whole of "this booking produced an encounter", and `visit_status`
+    is the linked visit's own current state. There is **no** `arrived` boolean and no `ARRIVED`
+    status: attendance has exactly one authoritative home, which is the visit.
+
+    **Deliberately absent, and each is a recorded decision rather than an oversight** (ADR-073 §6):
+    duration, clinician, free-text reason or note, reminder state, no-show, any queue position and
+    any waiting time. A front-desk scheduling note must not become clinical documentation by
+    accident, and a waiting duration is an operational signal `AGENTS.md` forbids this product from
+    producing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    scheduled_at: datetime
+    status: str
+    patient: AppointmentPatientResponse
+    visit_id: uuid.UUID | None
+    visit_status: str | None
+    created_at: datetime
+
+
+class AppointmentDayResponse(BaseModel):
+    """One clinic-local day's bookings, earliest first.
+
+    `day` is the calendar date that was actually resolved -- echoed back because the caller may have
+    omitted it, in which case the **server** decided what "today" means from the facility timezone.
+    That is the whole point: a browser in another zone asking the same question gets the same day.
+
+    Cancelled bookings are included. They are history, and a read that hid them would make "was
+    this cancelled, or never booked at all?" unanswerable from the day view. The UI marks them and
+    offers them no arrival action."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_organization_id: uuid.UUID
+    day: date
+    facility_timezone: str
+    appointments: list[AppointmentResponse]
+
+
+class AppointmentCreateRequest(BaseModel):
+    """A clinic-local calendar date and wall clock -- never an instant.
+
+    The server combines them in the facility timezone (`exchange/appointments.py`'s
+    `instant_from_local`). Accepting a UTC instant from the browser instead would hand the decision
+    "what time is this appointment" to whatever zone the receptionist's machine is set to, which is
+    the defect `NC-AP-14` exists to catch.
+
+    No `reason`, no `duration`, no `clinician_id`: see `AppointmentResponse`. No organization id
+    either -- it comes from the authenticated path, never from the body (`NC-AP-13`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_id: uuid.UUID
+    scheduled_date: date
+    scheduled_time: time
+
+
+class AppointmentRescheduleRequest(BaseModel):
+    """The new clinic-local date and time. Same shape, same server-side interpretation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scheduled_date: date
+    scheduled_time: time
+
+
+class AppointmentCheckInResponse(BaseModel):
+    """The booking, now linked, and the visit it produced.
+
+    `visit_created` is `false` on a replay -- a double click, a retry, a second receptionist. The
+    booking was already linked, so the existing visit is returned rather than a second one made."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    appointment: AppointmentResponse
+    visit: VisitResponse
+    visit_created: bool
+
+
 class BillableSourceResponse(BaseModel):
     """One thing this organization could charge this patient for, and has not yet.
 
@@ -3431,6 +3553,12 @@ def build_exchange_router(
     #: operator read so "everything stops at SENT" reads as a known configuration state rather than
     #: as messages mysteriously never reaching DELIVERED.
     notification_receipts_configured: bool = False,
+    #: DHEALTH-APPOINTMENTS-001. The timezone a receptionist's wall clock is interpreted in, and the
+    #: one every appointment day boundary is computed from. Defaults to `config.DEPLOYMENT_TIMEZONE`
+    #: -- the same constant `Settings.from_env` enforces `TZ` against -- rather than to a second
+    #: copy of the literal, so there is exactly one place the deployment timezone is written down.
+    #: `app.py` passes `settings.timezone` explicitly.
+    facility_timezone: str = DEPLOYMENT_TIMEZONE,
 ) -> APIRouter:
     identities = ExchangeIdentityRepository(session_factory)
     organizations = OrganizationRepository(session_factory)
@@ -3452,6 +3580,13 @@ def build_exchange_router(
     # function taking the caller's own session, deliberately not through this instance, so there is
     # no construction-order dependency between the two to get wrong.
     visits = VisitRepository(session_factory, organizations, security_audit)
+    # DHEALTH-APPOINTMENTS-001. Takes `visits` deliberately: appointment arrival goes *through*
+    # the visit repository's own `start_in_session`, inside the scheduling transaction, so every
+    # rule about attendance stays in `exchange/visits.py` and is enforced once. It takes no
+    # results, release or lab repository -- scheduling structurally cannot observe clinical state.
+    appointments = AppointmentRepository(
+        session_factory, organizations, visits, security_audit, facility_timezone
+    )
     # DHEALTH-BILLING-001. Constructed with the same three collaborators as `visits` and
     # nothing else -- in particular no results, release or lab-workflow repository, so this
     # object structurally cannot observe or alter clinical state (ADR-066).
@@ -5858,6 +5993,248 @@ def build_exchange_router(
             _to_waiting_arrival_response(arrival)
             for arrival in visits.list_waiting(provider_id, limit=limit)
         ]
+
+    # -- DHEALTH-APPOINTMENTS-001: the clinic schedule ------------------------------------------
+
+    def _to_appointment_response(record: AppointmentRecord) -> AppointmentResponse:
+        return AppointmentResponse(
+            id=record.id,
+            scheduled_at=record.scheduled_at,
+            status=record.status,
+            patient=AppointmentPatientResponse(
+                patient_id=record.patient_id,
+                display_name=record.patient_display_name,
+                date_of_birth=record.patient_date_of_birth,
+            ),
+            visit_id=record.visit_id,
+            visit_status=record.visit_status,
+            created_at=record.created_at,
+        )
+
+    def _require_appointment_read(
+        principal: AuthenticatedPrincipal, provider_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        """Seeing who is expected: `appointment.manage` **or** `visit.check_in`.
+
+        ADR-073 §5. The desk that records arrivals has to be able to see the day's bookings or the
+        surface is useless to the one person who most needs it -- and a holder of `visit.check_in`
+        can already see who is in the building, so the day list tells them nothing newer in kind.
+        `appointment.manage` is here because a scheduler must be able to read what they maintain.
+
+        `visit.read` is deliberately **not** accepted: that is the clinical read, and a schedule is
+        not a clinical surface -- exactly the reasoning `list_waiting_arrivals` above already
+        applies to the waiting list."""
+        return _require_caps(
+            principal, provider_id, Capability.APPOINTMENT_MANAGE, Capability.VISIT_CHECK_IN
+        )
+
+    def _require_appointment_manage(
+        principal: AuthenticatedPrincipal, provider_id: uuid.UUID
+    ) -> OrganizationAccessContext:
+        """Changing the schedule: `appointment.manage`, and only that.
+
+        Reading the day does not imply booking into it, and recording an arrival does not imply
+        rearranging next week. `patient.directory.read` grants nothing here -- read authority has
+        never implied authority to create a durable commitment about the person read (`NC-AP-3`)."""
+        return _require_caps(principal, provider_id, Capability.APPOINTMENT_MANAGE)
+
+    @router.get(
+        "/organizations/{provider_id}/appointments",
+        response_model=AppointmentDayResponse,
+    )
+    def list_appointments_for_day(
+        provider_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        day: Annotated[date | None, Query()] = None,
+    ) -> AppointmentDayResponse:
+        """Who is expected at this clinic on one **clinic-local** day, earliest first.
+
+        `day` omitted means the facility's today, resolved **on the server** from its timezone. A
+        browser in another zone asking the same question gets the same list, which is the one thing
+        a schedule cannot afford to get wrong."""
+        response.headers["Cache-Control"] = "no-store"
+        _require_appointment_read(principal, provider_id)
+        resolved = day or datetime.now(ZoneInfo(appointments.facility_timezone)).date()
+        records = appointments.list_for_day(provider_id, resolved)
+        return AppointmentDayResponse(
+            provider_organization_id=provider_id,
+            day=resolved,
+            facility_timezone=appointments.facility_timezone,
+            appointments=[_to_appointment_response(record) for record in records],
+        )
+
+    @router.post(
+        "/organizations/{provider_id}/appointments",
+        response_model=AppointmentResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_appointment(
+        provider_id: uuid.UUID,
+        body: AppointmentCreateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+        idempotency_key: Annotated[str, Depends(_require_idempotency_key)],
+    ) -> AppointmentResponse:
+        """Book a patient. `201` for a new booking, `200` for an idempotent replay of the same one.
+
+        The `Idempotency-Key` header is the same retry contract order creation uses -- a canonical
+        lowercase UUIDv4, enforced by the shared dependency. A repeat of the *same* request returns
+        the existing booking rather than a second one; a genuinely different booking for the same
+        patient on another date is ordinary and always allowed."""
+        response.headers["Cache-Control"] = "no-store"
+        _require_appointment_manage(principal, provider_id)
+        key = idempotency_key
+        try:
+            record, created = appointments.create(
+                principal=principal,
+                provider_organization_id=provider_id,
+                patient_id=body.patient_id,
+                scheduled_date=body.scheduled_date,
+                scheduled_time=body.scheduled_time,
+                idempotency_key=key,
+            )
+        except AppointmentPatientNotFound as error:
+            # 404, not 403: a patient id that is not this clinic's is indistinguishable from one
+            # that does not exist, so the error cannot be used to probe another clinic's directory.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="patient not found"
+            ) from error
+        except InvalidOrganizationType as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="appointments exist at provider organizations",
+            ) from error
+        if not created:
+            response.status_code = status.HTTP_200_OK
+        return _to_appointment_response(record)
+
+    @router.post(
+        "/organizations/{provider_id}/appointments/{appointment_id}/reschedule",
+        response_model=AppointmentResponse,
+    )
+    def reschedule_appointment(
+        provider_id: uuid.UUID,
+        appointment_id: uuid.UUID,
+        body: AppointmentRescheduleRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> AppointmentResponse:
+        """Move a booking that has not arrived. Same row, new instant.
+
+        Refused with `409` once the booking has produced a visit: arrival is history, and scheduling
+        must not rewrite it."""
+        response.headers["Cache-Control"] = "no-store"
+        _require_appointment_manage(principal, provider_id)
+        try:
+            record = appointments.reschedule(
+                principal=principal,
+                provider_organization_id=provider_id,
+                appointment_id=appointment_id,
+                scheduled_date=body.scheduled_date,
+                scheduled_time=body.scheduled_time,
+            )
+        except AppointmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="appointment not found"
+            ) from error
+        except AppointmentAlreadyArrived as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="this appointment has already produced a visit",
+            ) from error
+        except AppointmentCancelled as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="this appointment is cancelled"
+            ) from error
+        return _to_appointment_response(record)
+
+    @router.post(
+        "/organizations/{provider_id}/appointments/{appointment_id}/cancel",
+        response_model=AppointmentResponse,
+    )
+    def cancel_appointment(
+        provider_id: uuid.UUID,
+        appointment_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> AppointmentResponse:
+        """The patient is no longer expected. **No visit is created, cancelled or touched.**
+
+        Cancelling a booking is not cancelling a visit, and before arrival there is no visit to
+        cancel. The row is never deleted -- a cancelled booking stays visible as history. Repeating
+        the call on an already-cancelled booking succeeds unchanged; refused with `409` once the
+        booking has produced a visit."""
+        response.headers["Cache-Control"] = "no-store"
+        _require_appointment_manage(principal, provider_id)
+        try:
+            record = appointments.cancel(
+                principal=principal,
+                provider_organization_id=provider_id,
+                appointment_id=appointment_id,
+            )
+        except AppointmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="appointment not found"
+            ) from error
+        except AppointmentAlreadyArrived as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="this appointment has already produced a visit",
+            ) from error
+        return _to_appointment_response(record)
+
+    @router.post(
+        "/organizations/{provider_id}/appointments/{appointment_id}/check-in",
+        response_model=AppointmentCheckInResponse,
+    )
+    def check_in_appointment(
+        provider_id: uuid.UUID,
+        appointment_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> AppointmentCheckInResponse:
+        """The expected patient arrived. **One transaction: the visit is created and the booking is
+        linked, or neither happens.**
+
+        **Gate: `visit.check_in`, not `appointment.manage`.** This records an actual arrival, which
+        is precisely what `visit.check_in` is the authority for -- a scheduler who may rearrange the
+        diary has no standing to assert that somebody walked in, and a receptionist who records
+        arrivals should not need booking authority to do it. The two powers stay separate here and
+        both are proved separately.
+
+        Repeating the call returns the existing visit with `visit_created=false` rather than
+        creating a second encounter. A cancelled booking is refused. A patient who is *already* in
+        an active visit -- they walked in before their appointment and were checked in as a walk-in
+        -- raises `409` from the visit layer and the booking stays unlinked; whether the product
+        should instead adopt that existing visit is ADR-073 Human Decision 11."""
+        response.headers["Cache-Control"] = "no-store"
+        _require_caps(principal, provider_id, Capability.VISIT_CHECK_IN)
+        try:
+            result = appointments.check_in(
+                principal=principal,
+                provider_organization_id=provider_id,
+                appointment_id=appointment_id,
+            )
+        except AppointmentNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="appointment not found"
+            ) from error
+        except AppointmentCancelled as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="this appointment is cancelled and cannot be checked in",
+            ) from error
+        except AppointmentActiveVisitAlreadyExists as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="this patient already has an active visit at this organization",
+            ) from error
+        return AppointmentCheckInResponse(
+            appointment=_to_appointment_response(result.appointment),
+            visit=_to_visit_response(result.visit.visit),
+            visit_created=result.visit_created,
+        )
 
     @router.get(
         "/organizations/{provider_id}/patients/{patient_id}/visits",
