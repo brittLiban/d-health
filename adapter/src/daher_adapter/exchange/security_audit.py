@@ -226,6 +226,25 @@ SecurityEventType = Literal[
     "visit_cancelled",
     "visit_note_appended",
     "visit_reason_amended",
+    # DHEALTH-APPOINTMENTS-001/ADR-073: the four scheduling mutations.
+    #
+    # **`appointment_rescheduled` records that a booking was moved, by whom and when -- not what it
+    # was moved from.** This table has no metadata or value column and ADR-073 does not add one, for
+    # exactly the reason DHEALTH-BILLING-001's block above gives about amounts. The consequence is
+    # stated rather than glossed: the previous scheduled instant is **not preserved anywhere** once
+    # the row is overwritten. The audit answers "who moved this, and when did they move it"; it does
+    # not answer "from what time". A dedicated reschedule-history table would answer the second
+    # question, and ADR-073 records it as an open Human Decision instead of building it on a guess
+    # that a clinic needs it.
+    #
+    # `appointment_checked_in` sits alongside `visit_created`, not in place of it: the check-in
+    # transaction goes through the existing visit path, which writes its own row, and both commit
+    # together. **Absent on purpose:** `appointment_viewed` (reading is not a mutation -- D-8), and
+    # any no-show event, because no no-show policy exists to record (ADR-073 Human Decision 4).
+    "appointment_created",
+    "appointment_rescheduled",
+    "appointment_cancelled",
+    "appointment_checked_in",
     # DHEALTH-BILLING-001/ADR-066: the four financial mutations, and deliberately only four.
     #
     # Money is the one domain where "who did this, to whom, for how much, when" is the whole
@@ -290,6 +309,11 @@ SecurityResourceType = Literal[
     # invoice-centric -- the same convention as every block above.
     "invoice",
     "clinic_service",
+    # DHEALTH-APPOINTMENTS-001. A scheduling event names the booking and nothing else. Deliberately
+    # not the patient (that would make this table a record of who was expected when) and
+    # deliberately not the visit a check-in produced (`visit_created` already names that, and the
+    # booking reaches it through `visit_id`) -- the same convention as every block above.
+    "appointment",
 ]
 
 #: DHEALTH-ACCESS-CAPABILITIES-001/ADR-067: the member-specific capability mutations.

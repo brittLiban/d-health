@@ -428,100 +428,138 @@ class VisitRepository:
           for somebody already in the building. ``ActiveVisitAlreadyExists``, a 409. The pre-read
           below catches the ordinary case and ``uq_exchange_visits_one_active_per_patient`` catches
           the race the pre-read cannot -- two workers submitting at the same instant."""
+        with self._sessions.begin() as session:
+            return self.start_in_session(
+                session,
+                principal=principal,
+                provider_organization_id=provider_organization_id,
+                patient_id=patient_id,
+                reason_for_visit=reason_for_visit,
+                idempotency_key=idempotency_key,
+            )
+
+    def start_in_session(
+        self,
+        session: Session,
+        *,
+        principal: AuthenticatedPrincipal,
+        provider_organization_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        reason_for_visit: str | None,
+        idempotency_key: str,
+    ) -> StartVisitResult:
+        """``start()``'s whole body, as a step a *caller's* transaction can contain.
+
+        DHEALTH-APPOINTMENTS-001 extracted this and changed nothing inside it. Checking a booked
+        patient in has to create the visit and link the appointment to it **atomically** -- the one
+        state the ticket names as unacceptable is a visit that exists while its booking still looks
+        unarrived -- and `start()` owns its own `begin()`, so it could not be composed. The split is
+        the same shape `selection.py`'s `assign_by_provider`/`_assign_by_provider_in_session` and
+        `catalog.set_offering_active(..., session=...)` already use.
+
+        **Appointment check-in calls this rather than reimplementing arrival.** Every rule stays
+        exactly here and is enforced once: the provider-type check, the patient-belongs-to-this-
+        clinic check, idempotent replay on a repeated key, the one-active-visit pre-read, the
+        SAVEPOINT that turns a lost uniqueness race into a 409 instead of a 500, and the
+        `visit_created` audit row. A second copy of any of those in the scheduling module would be
+        a second place for them to drift.
+
+        Public rather than `_`-prefixed, unlike the `selection.py` precedent, because the caller is
+        a *different module* (`exchange/appointments.py`) rather than this class's own `start()`.
+        """
         reason = reason_for_visit.strip() if reason_for_visit is not None else None
         if reason == "":
             raise ValueError("reason_for_visit must not be blank when it is provided")
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
 
-        with self._sessions.begin() as session:
-            # Visits exist at providers. A lab has no outpatient consultation, and this check is
-            # what stops a lab-typed organization from growing a clinic through this endpoint.
-            self._organizations.require_type(provider_organization_id, OrganizationType.PROVIDER)
+        # Visits exist at providers. A lab has no outpatient consultation, and this check is
+        # what stops a lab-typed organization from growing a clinic through this endpoint.
+        self._organizations.require_type(provider_organization_id, OrganizationType.PROVIDER)
 
-            patient = session.get(Patient, patient_id)
-            if patient is None or patient.provider_organization_id != provider_organization_id:
-                raise VisitPatientNotFound("patient not found in this provider organization")
+        patient = session.get(Patient, patient_id)
+        if patient is None or patient.provider_organization_id != provider_organization_id:
+            raise VisitPatientNotFound("patient not found in this provider organization")
 
-            existing = session.scalar(
+        existing = session.scalar(
+            select(Visit).where(
+                Visit.provider_organization_id == provider_organization_id,
+                Visit.idempotency_key == idempotency_key,
+            )
+        )
+        if existing is not None:
+            return self._replay(existing, patient, patient_id, reason, idempotency_key)
+
+        # ADR-069 §18. An optimisation and a better error message, never the guarantee: two
+        # simultaneous check-ins both pass this, which is why the unique index below exists.
+        if self._active_visit_id(session, provider_organization_id, patient_id) is not None:
+            raise ActiveVisitAlreadyExists(
+                "this patient already has an active visit at this organization"
+            )
+
+        visit = Visit(
+            idempotency_key=idempotency_key,
+            provider_organization_id=provider_organization_id,
+            patient_id=patient_id,
+            status=VisitStatus.CHECKED_IN.value,
+            reason_for_visit=reason,
+        )
+        # The insert runs inside a SAVEPOINT so that losing the uniqueness race unwinds to
+        # *here* rather than poisoning the whole transaction. The pre-read above is an
+        # optimisation, not the guarantee: two simultaneous check-ins both pass it, and without
+        # this branch the loser's `IntegrityError` would escape `begin()` and reach the caller
+        # as a 500. A double-clicked arrival on a slow connection is the ordinary case that
+        # produces it, so 500 would be the ordinary outcome. Exactly the pattern
+        # `order_intents._create_in_session` already established for the same race.
+        try:
+            with session.begin_nested():
+                session.add(visit)
+                session.flush()
+        except IntegrityError:
+            # `if visit in session` rather than a bare `expunge`, and the guard is load-bearing:
+            # rolling the SAVEPOINT back restores the session to its state at `begin_nested()`,
+            # which **already** evicts anything added inside it -- so the instance may be gone
+            # and `expunge` then raises `InvalidRequestError`, masking the conflict with an
+            # unrelated 500. The bare call survived DHEALTH-CLINIC-VISIT-001 only because that
+            # ticket's one race was usually short-circuited by the pre-read; ADR-069's second
+            # uniqueness rule reaches this line reliably, and the real-PostgreSQL qualification
+            # (`test_pg_fd_1_*`) is what exposed it.
+            if visit in session:
+                session.expunge(visit)
+            # **Two** uniqueness rules can land here since ADR-069, and they mean opposite
+            # things, so both are re-checked before anything is re-raised. Checking only the
+            # idempotency one -- as this branch did before ADR-069, when it was the only one --
+            # would turn the ordinary two-receptionists race into a 500, because the loser's key
+            # is its own and finds nothing.
+            committed = session.scalar(
                 select(Visit).where(
                     Visit.provider_organization_id == provider_organization_id,
                     Visit.idempotency_key == idempotency_key,
                 )
             )
-            if existing is not None:
-                return self._replay(existing, patient, patient_id, reason, idempotency_key)
-
-            # ADR-069 §18. An optimisation and a better error message, never the guarantee: two
-            # simultaneous check-ins both pass this, which is why the unique index below exists.
+            if committed is not None:
+                # The same arrival, replayed: the pre-read missed it because the other
+                # transaction had not committed yet.
+                return self._replay(committed, patient, patient_id, reason, idempotency_key)
             if self._active_visit_id(session, provider_organization_id, patient_id) is not None:
+                # A different arrival for a patient somebody else just checked in. The index
+                # refused it; the caller is told, not 500'd.
                 raise ActiveVisitAlreadyExists(
                     "this patient already has an active visit at this organization"
-                )
+                ) from None
+            # Neither uniqueness rule explains this. Never swallowed: a composite-foreign-key or
+            # CHECK violation must surface rather than be reported as a conflict that is not
+            # one.
+            raise
 
-            visit = Visit(
-                idempotency_key=idempotency_key,
-                provider_organization_id=provider_organization_id,
-                patient_id=patient_id,
-                status=VisitStatus.CHECKED_IN.value,
-                reason_for_visit=reason,
-            )
-            # The insert runs inside a SAVEPOINT so that losing the uniqueness race unwinds to
-            # *here* rather than poisoning the whole transaction. The pre-read above is an
-            # optimisation, not the guarantee: two simultaneous check-ins both pass it, and without
-            # this branch the loser's `IntegrityError` would escape `begin()` and reach the caller
-            # as a 500. A double-clicked arrival on a slow connection is the ordinary case that
-            # produces it, so 500 would be the ordinary outcome. Exactly the pattern
-            # `order_intents._create_in_session` already established for the same race.
-            try:
-                with session.begin_nested():
-                    session.add(visit)
-                    session.flush()
-            except IntegrityError:
-                # `if visit in session` rather than a bare `expunge`, and the guard is load-bearing:
-                # rolling the SAVEPOINT back restores the session to its state at `begin_nested()`,
-                # which **already** evicts anything added inside it -- so the instance may be gone
-                # and `expunge` then raises `InvalidRequestError`, masking the conflict with an
-                # unrelated 500. The bare call survived DHEALTH-CLINIC-VISIT-001 only because that
-                # ticket's one race was usually short-circuited by the pre-read; ADR-069's second
-                # uniqueness rule reaches this line reliably, and the real-PostgreSQL qualification
-                # (`test_pg_fd_1_*`) is what exposed it.
-                if visit in session:
-                    session.expunge(visit)
-                # **Two** uniqueness rules can land here since ADR-069, and they mean opposite
-                # things, so both are re-checked before anything is re-raised. Checking only the
-                # idempotency one -- as this branch did before ADR-069, when it was the only one --
-                # would turn the ordinary two-receptionists race into a 500, because the loser's key
-                # is its own and finds nothing.
-                committed = session.scalar(
-                    select(Visit).where(
-                        Visit.provider_organization_id == provider_organization_id,
-                        Visit.idempotency_key == idempotency_key,
-                    )
-                )
-                if committed is not None:
-                    # The same arrival, replayed: the pre-read missed it because the other
-                    # transaction had not committed yet.
-                    return self._replay(committed, patient, patient_id, reason, idempotency_key)
-                if self._active_visit_id(session, provider_organization_id, patient_id) is not None:
-                    # A different arrival for a patient somebody else just checked in. The index
-                    # refused it; the caller is told, not 500'd.
-                    raise ActiveVisitAlreadyExists(
-                        "this patient already has an active visit at this organization"
-                    ) from None
-                # Neither uniqueness rule explains this. Never swallowed: a composite-foreign-key or
-                # CHECK violation must surface rather than be reported as a conflict that is not
-                # one.
-                raise
-
-            self._record(
-                session,
-                event_type="visit_created",
-                principal=principal,
-                visit=visit,
-                outcome="created",
-            )
-            return StartVisitResult(visit=_to_record(visit, patient), created=True)
+        self._record(
+            session,
+            event_type="visit_created",
+            principal=principal,
+            visit=visit,
+            outcome="created",
+        )
+        return StartVisitResult(visit=_to_record(visit, patient), created=True)
 
     def _replay(
         self,

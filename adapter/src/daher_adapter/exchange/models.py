@@ -63,6 +63,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from daher_adapter.models import Base, utc_now
 
 __all__ = [
+    "Appointment",
+    "AppointmentStatus",
     "DoctorReview",
     "DoctorReviewStatus",
     "ExchangeIdentity",
@@ -2318,6 +2320,21 @@ class ExchangeSecurityAuditEvent(Base):
             # authorization refusal, recorded by `exchange/audit.py`'s best-effort file writer.
             "'visit_created', 'visit_started', 'visit_completed', 'visit_cancelled', "
             "'visit_note_appended', 'visit_reason_amended', "
+            # DHEALTH-APPOINTMENTS-001/ADR-073: the four scheduling mutations. All four reuse
+            # `resource_type='appointment'` with the booking's own id.
+            #
+            # `appointment_checked_in` is recorded *in addition to* `visit_created`, not instead of
+            # it: the check-in transaction creates a visit through the existing visit path, which
+            # audits its own event, and the scheduling fact ("this booking produced that
+            # encounter") is a separate question a reader of this table asks. Both rows commit
+            # together or neither does.
+            #
+            # No patient id and no patient name on any of them -- the patient is reachable from the
+            # booking, and naming them here would turn this table into a record of who was expected
+            # when, which is the same refusal the `'visit'` resource-type line below already makes.
+            # There is deliberately no `appointment_viewed`: reading is not a mutation (D-8).
+            "'appointment_created', 'appointment_rescheduled', 'appointment_cancelled', "
+            "'appointment_checked_in', "
             # DHEALTH-BILLING-001: the four financial mutations. No amount is recorded here --
             # the authoritative figure lives on the immutable Invoice/Payment row, and a second
             # copy could diverge from it. No void, no reversal (neither policy is decided), and
@@ -2390,7 +2407,11 @@ class ExchangeSecurityAuditEvent(Base):
             "'connector_installation', 'patient_notification', 'visit', "
             # DHEALTH-BILLING-001: payments hang off an invoice, so audit stays
             # invoice-centric -- the same convention as every line above.
-            "'invoice', 'clinic_service')",
+            "'invoice', 'clinic_service', "
+            # DHEALTH-APPOINTMENTS-001: a scheduling event names the booking, never the patient and
+            # never the visit it produced -- both are reachable from it, and the `'visit'` line
+            # above already states why this table does not record who was seen when.
+            "'appointment')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )
@@ -2952,6 +2973,20 @@ class Visit(Base):
             postgresql_where=text("status IN ('CHECKED_IN', 'IN_PROGRESS')"),
             sqlite_where=text("status IN ('CHECKED_IN', 'IN_PROGRESS')"),
         ),
+        # DHEALTH-APPOINTMENTS-001: exists solely so `Appointment` can carry a *composite* foreign
+        # key at `(visit_id, provider_organization_id)` and have the database refuse a booking that
+        # links a visit belonging to any clinic other than the one that owns the booking.
+        #
+        # Structurally redundant on its own -- `id` is already the primary key, so the pair
+        # trivially is unique too -- and that is exactly why adding it is safe: it can never reject
+        # a row the primary key would have accepted. Same shape, and the same reasoning, as
+        # DHEALTH-LAB-BLOCKED-001's `uq_exchange_lab_selections_order_lab` and
+        # DHEALTH-BILLING-001's `uq_exchange_invoices_id_org`.
+        UniqueConstraint(
+            "id",
+            "provider_organization_id",
+            name="uq_exchange_visits_id_provider",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -3038,6 +3073,177 @@ class VisitNote(Base):
     )
 
     visit: Mapped[Visit] = relationship(back_populates="notes")
+
+
+# --- DHEALTH-APPOINTMENTS-001: the clinic appointment (rendez-vous) ------------------------------
+
+
+class AppointmentStatus(StrEnum):
+    """Two states, and the shortest honest argument for why there are not more.
+
+    ``SCHEDULED`` means *the patient is expected*. ``CANCELLED`` means *they are no longer
+    expected*. Everything else a scheduling product usually carries is either derived from the
+    booking's ``visit_id`` or is a policy nobody has written down.
+
+    **Arrival is not a state here.** "Has this patient arrived?" is answered by ``visit_id IS NOT
+    NULL`` and, beyond that, by the linked ``Visit``'s own status -- which is the authoritative
+    record of attendance and clinical work. An ``ARRIVED`` column would be a second copy of that
+    fact, free to disagree with it; ``docs/NATIVE-OPERATING-PRODUCT.md`` §12 already rejects
+    ``ARRIVED`` as decoration for the same reason on the visit side.
+
+    **``NO_SHOW`` is deliberately absent, and this is a decision rather than an omission.** A
+    no-show is an operational judgement, not a timestamp comparison: how late is late, who may
+    record it, whether a telephone call from the patient changes it, whether a reschedule
+    supersedes it. None of that policy exists in this product, and ADR-073 records it as an open
+    Human Decision. What the system *can* say truthfully -- and all it says -- is "this booking's
+    time has passed and no visit is linked". Nothing in this codebase converts that observation
+    into a stored state, and ``test_dhealthappointments001_appointments.py`` has a guard asserting
+    the enum stays at two values.
+
+    **No ``RESCHEDULED`` either.** Rescheduling moves ``scheduled_at`` on the same row and writes an
+    ``appointment_rescheduled`` audit event carrying the old and new instants. A terminal
+    ``RESCHEDULED`` state plus a replacement row would make one booking look like two in every
+    day view, and the audit trail already answers "when was this moved, by whom, from what".
+    """
+
+    SCHEDULED = "SCHEDULED"
+    CANCELLED = "CANCELLED"
+
+
+class Appointment(Base):
+    """One booked clinic encounter: *this patient is expected at this clinic at this instant*.
+
+    ── An appointment is not a visit ──
+
+    This is the load-bearing distinction of DHEALTH-APPOINTMENTS-001 and the reason this table
+    exists at all rather than a ``PLANNED`` visit status. A booking is an **expectation**; a
+    ``Visit`` is an **encounter**. Conflating them would mean a patient who never arrives still has
+    a visit row in their clinical history, and that the waiting list and the one-active-visit
+    invariant both have to learn to ignore rows for people who are not in the building.
+
+    ``docs/NATIVE-OPERATING-PRODUCT.md`` §12 and two earlier ADRs expected the opposite -- that this
+    ticket would add ``PLANNED`` and ``NO_SHOW`` to ``VisitStatus``. **ADR-073 supersedes that**
+    deliberately and in writing rather than by silence; see it for the full argument. ``VisitStatus``
+    is unchanged at four states, and a structural test asserts it.
+
+    ── What a walk-in looks like ──
+
+    Nothing. A walk-in is a ``Visit`` with no ``Appointment`` row pointing at it, which is why the
+    link lives on *this* table and not on ``Visit``: the overwhelmingly common case needs no column
+    at all, and ``exchange_visits`` keeps no nullable field that is empty for most of its rows.
+    §11's field table proposed ``Visit.appointment_id``; ADR-073 §4 records the inversion and why.
+
+    ── Patient identity is a reference, never a snapshot ──
+
+    There is no copied name, date of birth or telephone number. A day view renders the patient's
+    *current* directory truth through ``patient_id``, so a name corrected on Tuesday shows corrected
+    on Wednesday's list. This is not a frozen scheduling document and ADR-073 says so explicitly --
+    unlike a released laboratory report (ADR-072), which genuinely is one.
+
+    ── No duration, no clinician, no reason, no capacity ──
+
+    Each omission is argued in ADR-073 §6 and each is an open Human Decision rather than a gap:
+    duration and clinician because §7 gives clinicians only "LTD -- own schedule" and no workflow
+    here needs either; a free-text reason because "who may read it, and is it operational or
+    clinical" has no governed answer and front-desk scheduling notes must not silently become
+    clinical documentation; capacity because without a duration or a resource model the system
+    cannot truthfully say an instant is full. **Two patients may legitimately share an instant and
+    no constraint here prevents it.**
+    """
+
+    __tablename__ = "exchange_appointments"
+    __table_args__ = (
+        # Create idempotency, scoped per clinic exactly as `LabOrder` and `Visit` scope theirs: a
+        # retry after a lost response replays, and two clinics generating the same key value by
+        # accident never collide. Deliberately NOT unique on `patient_id` -- the same patient
+        # booking a second appointment on another date is ordinary, and a unique patient key would
+        # make the common case impossible while calling it idempotency.
+        UniqueConstraint(
+            "provider_organization_id",
+            "idempotency_key",
+            name="uq_exchange_appointments_provider_idempotency_key",
+        ),
+        # The patient must belong to the clinic that owns the booking, enforced by the database and
+        # not merely by the service. Same composite-foreign-key shape as
+        # `fk_exchange_visits_patient_same_provider`.
+        ForeignKeyConstraint(
+            ["patient_id", "provider_organization_id"],
+            ["exchange_patients.id", "exchange_patients.provider_organization_id"],
+            name="fk_exchange_appointments_patient_same_provider",
+            ondelete="RESTRICT",
+        ),
+        # And the *visit* must belong to that same clinic. This is the half a plain
+        # `FOREIGN KEY (visit_id)` cannot express: it would happily accept another clinic's visit.
+        # The composite reference is what `uq_exchange_visits_id_provider` was added for.
+        ForeignKeyConstraint(
+            ["visit_id", "provider_organization_id"],
+            ["exchange_visits.id", "exchange_visits.provider_organization_id"],
+            name="fk_exchange_appointments_visit_same_provider",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('SCHEDULED', 'CANCELLED')",
+            name="ck_exchange_appointments_status",
+        ),
+        # Cancellation provenance is paired with the state at the database level: a `CANCELLED` row
+        # without a cancellation time, or a `SCHEDULED` row carrying one, cannot exist.
+        CheckConstraint(
+            "(status = 'CANCELLED') = (cancelled_at IS NOT NULL)",
+            name="ck_exchange_appointments_cancelled_at_matches_status",
+        ),
+        CheckConstraint(
+            "(cancelled_at IS NULL) = (cancelled_by_identity_id IS NULL)",
+            name="ck_exchange_appointments_cancellation_actor_pairing",
+        ),
+        # **A cancelled booking never owns a visit.** The service refuses both orderings (cancel
+        # after arrival, arrival after cancel) under a row lock; this is the database's own
+        # statement of the same rule, so no future code path can produce the one state the ticket
+        # names as unacceptable: a cancelled appointment holding a checked-in visit.
+        CheckConstraint(
+            "NOT (status = 'CANCELLED' AND visit_id IS NOT NULL)",
+            name="ck_exchange_appointments_cancelled_has_no_visit",
+        ),
+        # Appointment 0..1 -> Visit. At most one booking may claim a given visit, so a second
+        # check-in cannot link a second booking to the same encounter.
+        UniqueConstraint("visit_id", name="uq_exchange_appointments_visit_id"),
+        # The day query: one clinic's bookings over a half-open instant range, in time order.
+        Index(
+            "ix_exchange_appointments_provider_scheduled_at",
+            "provider_organization_id",
+            "scheduled_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    provider_organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: Part of the composite foreign keys above rather than its own `ForeignKey` column: the pair
+    #: is what carries the same-clinic guarantee.
+    patient_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    #: **The booked instant, stored in UTC like every other instant in this package.** The wall
+    #: clock a receptionist typed is interpreted server-side in the deployment timezone
+    #: (`config.DEPLOYMENT_TIMEZONE`) before it ever reaches this column -- the browser's own zone
+    #: never participates, which is what stops a clinic's schedule shifting with the viewer.
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=AppointmentStatus.SCHEDULED.value
+    )
+    #: Set exactly once, by the check-in transaction, and never cleared. Non-`NULL` is the whole of
+    #: "this booking produced an encounter"; the linked `Visit`'s status is the whole of what
+    #: happened at it.
+    visit_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    created_by_identity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_by_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("exchange_identities.id", ondelete="RESTRICT"), nullable=True
+    )
 
 
 # --- DHEALTH-BILLING-001: facility billing -- services, invoices, payments -----------------------

@@ -227,6 +227,21 @@ def _notification_settings(environment: Mapping[str, str]) -> dict[str, object]:
     }
 
 
+#: The one deployment timezone this product runs in, and the only value `TZ` may hold.
+#:
+#: DHEALTH-APPOINTMENTS-001 gave this literal a name. It was already enforced below -- `from_env`
+#: refuses any other `TZ` -- but appointment scheduling is the first feature that has to *interpret*
+#: a wall-clock time rather than only stamp UTC instants, so a second component now needs the same
+#: value. Naming it once is what keeps "do not hardcode the timezone" true: the scheduling code
+#: imports this, and `exchange/api.py`'s router default is this constant rather than a second copy
+#: of the string.
+#:
+#: **This is a deployment fact, not a facility setting.** Whether an `Organization` should carry its
+#: own timezone is an open product question (ADR-073's Human Decision 9); until it is answered, every
+#: facility in a deployment shares this one, and `Africa/Djibouti` is UTC+3 with no DST observance.
+DEPLOYMENT_TIMEZONE = "Africa/Djibouti"
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     timezone: str
@@ -325,9 +340,9 @@ class Settings:
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
         env = os.environ if environment is None else environment
-        timezone = env.get("TZ", "Africa/Djibouti")
-        if timezone != "Africa/Djibouti":
-            raise ConfigurationError("TZ must be Africa/Djibouti")
+        timezone = env.get("TZ", DEPLOYMENT_TIMEZONE)
+        if timezone != DEPLOYMENT_TIMEZONE:
+            raise ConfigurationError(f"TZ must be {DEPLOYMENT_TIMEZONE}")
 
         db_name = _required(env, "ADAPTER_DB_NAME")
         db_user = _required(env, "ADAPTER_DB_USER")

@@ -118,6 +118,32 @@ class Capability(StrEnum):
     ORDER_MANAGE = "order.manage"
     #: Record a clinician's review disposition against a released result version.
     RESULT_REVIEW = "result.review"
+    #: Book, reschedule and cancel clinic appointments — authority over the *schedule*, not over
+    #: attendance.
+    #:
+    #: **Why `visit.check_in` is not enough.** `visit.check_in` is the authority to record that a
+    #: patient is *actually present* and create a `CHECKED_IN` visit. Booking somebody for next
+    #: Tuesday is a different power: it changes the clinic's future, not its record of who walked
+    #: in. A clinic may reasonably want a person who can run the waiting list without being able to
+    #: rearrange next week, and the reverse — somebody who maintains the diary and never records an
+    #: arrival. Collapsing the two would make both impossible.
+    #:
+    #: **Why `patient.directory.read` is not enough.** That is a read capability, and reading a
+    #: patient's name has never implied authority to create a durable clinic commitment about them
+    #: (ADR-069's own split exists for this reason). **Why not `facility.configure`:** that
+    #: capability covers what the facility *offers* — catalogue, prices, result templates. A
+    #: concrete booking for a named patient on a named day is clinic work, not configuration.
+    #:
+    #: Carries **no clinical read**: a holder sees a booking's time, its patient's display identity
+    #: and whether it produced a visit. Not the visit's note, not its stated reason, not a result.
+    #: Reading the day's list requires this *or* `visit.check_in`, so a reception desk holding only
+    #: the arrival capability can still see who is expected; mutating requires this one.
+    #:
+    #: Granted by **no role template** (ADR-073 §5): `docs/NATIVE-OPERATING-PRODUCT.md` §7 gives
+    #: clinicians only "LTD — own schedule", so adding it to `CLINICIAN` would expand a shipped
+    #: role beyond the specification. A reception desk receives it as a direct grant, exactly as
+    #: ADR-069 proved for `visit.check_in`.
+    APPOINTMENT_MANAGE = "appointment.manage"
 
     # -- clinical: the laboratory side -------------------------------------------------------
     #: The laboratory's own work on assigned orders: accept, reject, record collection, start
@@ -204,6 +230,16 @@ CAPABILITY_CATALOG: tuple[CapabilityDefinition, ...] = (
         key=Capability.VISIT_READ,
         label="Voir les visites",
         description="Consulter la liste des visites et l'historique d'une consultation.",
+        group="Visites",
+        organization_types=_PROVIDER,
+    ),
+    CapabilityDefinition(
+        key=Capability.APPOINTMENT_MANAGE,
+        label="Gérer les rendez-vous",
+        description=(
+            "Planifier, déplacer et annuler les rendez-vous. Ne permet pas d'enregistrer une "
+            "arrivée et ne donne accès à aucune information clinique."
+        ),
         group="Visites",
         organization_types=_PROVIDER,
     ),
