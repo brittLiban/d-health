@@ -23841,7 +23841,14 @@ D-4 and D-11 are untouched and exactly as open as they were.**
 
 ---
 
-## DHEALTH-CI-REPAIR-001 · CI has been red on `master` since before this ticket · P1 · 🛑 OPEN
+## DHEALTH-CI-REPAIR-001 · CI has been red on `master` since before this ticket · P1 · ✅ REPAIRED 2026-10-04
+
+> **This entry is the diagnosis written when the ticket was opened, kept as the record of what was
+> found.** The repair, what it cost, and what it uncovered are in
+> **DHEALTH-CI-REPAIR-001 — the repair** at the end of this file. Two things in the diagnosis below
+> turned out to be incomplete: the two failures named were the two the *static* and *compose* jobs
+> stopped at, and there were five in total; and the image-pin repair's premise — that a digest could
+> not be pulled from this machine — no longer held.
 
 **Opened 2026-10-03 by the DHEALTH-APPOINTMENTS-001 pass. Deliberately not fixed there** — the
 appointments ticket was instructed to treat the stale CI head and the pre-existing CI failures as a
@@ -24371,3 +24378,292 @@ which is precisely why the full UI suite was needed) and
 So the adapter gap is narrower than "~900 tests unobserved" suggests, but it is still a gap: the
 remaining files have not been re-run against this code. `PYTHONPATH=src python -m pytest -q` in
 `adapter/`, run alone, closes it.
+
+---
+
+## DHEALTH-CI-REPAIR-001 — the repair · ✅ DONE 2026-10-04 · not pushed
+
+**CI was red on `master` at a correct repository state.** Five failures, four of which were CI
+describing a repository that no longer existed. Repairing them uncovered two further defects that
+had been invisible *because* the guards in front of them were already failing — which is the real
+cost of leaving a red build red, and the reason this ticket existed.
+
+**Nothing was weakened to achieve this.** Parsing both versions of the workflow: **10 jobs and 87
+steps before and after, with identical step names in every job.** No `continue-on-error`, no
+`|| true`, no `if: false`, no skipped job, no lowered floor. The only assertion whose *value*
+changed is the demo membership count, and it moved from a stale 3 to the true 7 — proven against
+the live database, and still an exact equality rather than a floor.
+
+### The five reported failures
+
+| # | Failure | What it actually was |
+|---|---|---|
+| 1 | `EXPECTED_HEAD: 0026_facility_enrollment` vs real head `0040_clinic_appointments` | **Stale CI assumption.** Fourteen migrations behind |
+| 2 | provisioning never rendered `DHEALTH_PATIENT_PUBLIC_BASE_URL` | **Real deployment defect.** A facility provisioned today would fail at `docker compose up` *after* provisioning finished |
+| 3 | `Native demo compose parses` passed the overlay alone | **Stale CI command.** The overlay is not a topology |
+| 4 | `deploy/native/backup/Dockerfile` unpinned `postgres:16-alpine` | **Real policy violation**, correctly caught; its TODO's premise had expired |
+| 5 | three native-demo-boot steps passed the overlay alone | **Same stale command as 3**, in three more places |
+
+Only #2 and #4 were defects in the repository. #1, #3 and #5 were CI asserting things about a
+repository that had moved on.
+
+### 1 — the expected migration head
+
+`0026_facility_enrollment` → **`0040_clinic_appointments`**, as a **literal**, deliberately not
+derived. The comment already explained why and now says so explicitly: `alembic current` versus
+`alembic heads` cannot detect a deleted migration file, because a fresh database and a `heads`
+computed from the same reduced file set agree on the same wrong answer — control-tested when the
+guard was built. Deriving `EXPECTED_HEAD` from the graph it protects would reintroduce exactly that
+blind spot.
+
+**Qualified against a fresh disposable PostgreSQL**: empty database (0 public tables) → **40
+migrations applied** → `current == heads == EXPECTED_HEAD == 0040_clinic_appointments`, and
+`exchange_appointments` present. The chain really does pass through 0026 and on to 0040.
+
+**Documentation was checked and deliberately not changed.** Every `0026_facility_enrollment` mention
+in `PROJECT_STATE.md`, `STATUS.md`, `CURRENT_STATE.md` and `DECISIONS.md` is a dated historical
+record of the ticket that introduced it, correct when written. None claims it is the *current* head,
+so there was nothing stale to update.
+
+### 2 — the provisioning variable, traced end to end
+
+The only failure here that was a genuine deployment defect. `docker-compose.yml` hard-requires
+`${DHEALTH_PATIENT_PUBLIC_BASE_URL:?}` with **no default**, and facility provisioning rendered
+nothing for it.
+
+**The value was not invented.** Two places in the repository already agreed on it:
+`docker-compose.native.yml` defaults the same variable to
+`${DHEALTH_PATIENT_PUBLIC_BASE_URL:-https://app.${BASE_DOMAIN}}`, and
+`deploy/native/native.env.example` documents that default as correct for a normal deployment. So
+`render_env` now derives **`https://app.<BASE_DOMAIN>`** from the facility's own domain — in the
+`values` dict rather than `STACK_DEFAULTS`, because every other entry there is identical for every
+facility and this one is not.
+
+**Proven on real rendered output, not only in a fixture:**
+
+| Check | Result |
+|---|---|
+| facility domain `clinique.dj` | `DHEALTH_PATIENT_PUBLIC_BASE_URL=https://app.clinique.dj` |
+| a second domain `example.test` | `…=https://app.example.test` — derived, not hardcoded |
+| every `${VAR:?}` in `docker-compose.yml` | **19 required, 0 missing** from the rendered env |
+| secrets in the inspection output | none printed — the renderer returns plaintext credentials by design, so only this one line was read |
+
+Two focused tests added: one pins the derivation to the facility's domain, one refuses a non-`https`
+value or CI's `https://localhost` leaking into a real facility. That second test is not pedantry —
+the URL carries a patient's live bearer credential in its fragment and `Settings.from_env` rejects
+a non-https value outright, so a renderer emitting `http://` would produce a facility whose adapter
+refuses to start. **`${VAR:?}` guards were not touched**, and the sync test that caught this was not
+modified.
+
+### 3 + 5 — the overlay is not a topology
+
+`docker-compose.native-demo.yml` adds demo users, demo credentials, the demo database name and the
+seed authority **on top of** the canonical Native file. It defines no database, no Keycloak and no
+edge, so alone it cannot resolve `dhealth-db` or `dhealth-db-hardening`. **Four** CI commands passed
+it alone — the reported one in `compose`, and three more in `native-demo-boot` that the report did
+not mention. All four now supply the canonical base first, exactly as `scripts/demo/{up,down,reset,
+status}.sh` have always done.
+
+**The whole workflow was audited, not just the failing line:** every `docker-compose.native-demo.yml`
+reference now either sits in a comment or names the base file too.
+
+A structural guard encodes the rule, added to `adapter/tests/test_native_deployment_topology.py`
+rather than a new file — that suite already asserts the *other* half (that the overlay does not
+redefine production services), and this is the half that actually broke: the rule belongs to
+whoever **calls** Compose. It joins shell and YAML line continuations before matching, so a
+multi-line invocation cannot slip through, and it covers the demo scripts as well as the workflow,
+additionally requiring the scripts to name the base *first* because Compose merges in order.
+
+### 4 — the backup image digest, and where the digest came from
+
+`FROM postgres:16-alpine` →
+**`FROM postgres:16-alpine@sha256:1a66d744c1b459e13b05a8fca341da84cb63383e99ce262210efee5a319d4551`**
+
+The file's TODO said this could not be pinned "from a machine that can reach Docker Hub's blob CDN",
+citing AGENTS.md's rule against recording a digest that has not been pulled. **That premise had
+expired**, and the rule was satisfied literally rather than worked around:
+
+1. `docker manifest inspect postgres:16-alpine` resolved the tag to this digest;
+2. `docker pull postgres:16-alpine@sha256:1a66d744…` **succeeded** — so the digest is retrievable,
+   not merely well-formed;
+3. the pulled image was verified to be what the Dockerfile's comments claim: **PostgreSQL 16.15 on
+   Alpine 3.24.2**, `pg_dump`/`pg_restore` 16.15, and **no `openssl` binary** (so the `apk add
+   openssl` below it is still necessary, and that comment is still true).
+
+**A digest found on this machine was rejected.** `docker image inspect postgres:16-alpine` reported a
+local `RepoDigest` of `sha256:530a5243…`, but `docker manifest inspect` on it returned *manifest
+verification failed* — consistent with this machine's images having been side-loaded. Pinning to it
+would have produced a reference CI could not pull. The tag had also moved since that local pull,
+which is precisely the drift a digest exists to prevent.
+
+**The pinned image was then built and qualified** — synthetic only, never a facility database:
+build succeeds; `pg_dump`/`pg_restore` 16.15 present; `openssl 3.5.9` installed by the `apk add`;
+both entry points installed `0755`; a bare `docker run` still refuses rather than starting
+something; and an `openssl enc` encrypt/decrypt round trip on the string
+`synthetic-not-a-backup` returns the same bytes. The probe image was deleted afterwards.
+
+**`docker-compose.native.yml` still names `postgres:16-alpine` unpinned and was deliberately left
+alone.** The image-pin gate does not cover that file, and pinning the database server is a
+deployment decision about when the database moves, not CI maintenance. Recorded as a follow-up, with
+the consequence noted in the Dockerfile: the tool image is now fixed at 16.15 while the server
+tracks the tag, so the "never a different major version" guarantee holds but minor versions can
+drift.
+
+### The stale assertion nobody reported
+
+`native-demo-boot` asserted **3** memberships. `demo_seed.py` grants **7**, through seven
+`_grant_membership` calls, and the live demo database agrees:
+
+| Organization | Memberships |
+|---|---|
+| PROVIDER (clinic) | `demo-clinician`, `demo-admin`, `demo-clerk` |
+| LAB | `demo-lab-tech`, `demo-releaser`, `demo-lab-admin`, `demo-lab-clerk` |
+| **total** | **2 organizations, 7 memberships** |
+
+Corrected to 7, with the roster written into the step's comment so the next person who adds a demo
+identity can see what the number stands for. **Still an exact equality, not `> 0`** — a
+deterministic seed that grants the wrong number of memberships is a defect whichever direction it
+goes. The count was never weakened; it was simply never re-asserted as later tickets added
+identities.
+
+### The defect that was hiding behind the stale head
+
+With `EXPECTED_HEAD` repaired, the adapter job's four real-PostgreSQL steps could run again — and
+`DH-CLINIC-006` failed, in two stages:
+
+1. `LabNotOperationallyReady` — the suite built its organizations with `organizations.create(...)`,
+   producing an unenrolled, unstaffed laboratory.
+2. then `LabCannotFulfillOrder` — and an offering with no active result template.
+
+`DH-MVP-ONBOARD-001` made production routing readiness-gated and taught
+`make_lab`/`make_provider`/`make_offering` to enrol, staff and template, fixing roughly twenty tests.
+This **integration** suite builds its organizations directly and was missed — and nobody noticed,
+because the stale `EXPECTED_HEAD` in front of it had already made the step unreachable. **This is
+the cost of a red build: a real test defect sat behind it, invisible, for fourteen migrations.**
+
+The fixture now uses the same shared helpers. That makes it **more** realistic rather than laxer:
+migration 0026 backfills an enrollment for every organization, so an unenrolled unstaffed laboratory
+is a state production cannot produce. `make_offering`'s own docstring states the principle this
+follows — "the fixture satisfies it rather than the gate being weakened to accommodate fixtures".
+Nothing those two tests assert was changed.
+
+### Local qualification
+
+Every job's steps were run locally, including the ones that had been unreachable.
+
+| Job / step | Result |
+|---|---|
+| **adapter** — ruff lint, ruff format | pass (267 files formatted) |
+| **adapter** — full pytest | **2162 passed, 1 skipped, 0 failed**, across all **93** top-level test files, reconciled 31+31+31 in three foreground batches |
+| **adapter** — DH-IDENTITY-001 migration qualification | pass (M1–M6 backfill, §41 downgrade guard refused as expected) |
+| **adapter** — migration history reaches head on a fresh database | **pass** — 40 migrations from empty, `current == heads == EXPECTED_HEAD` |
+| **adapter** — DH-CLINIC-003C real PostgreSQL | 5 passed *(had not run in CI)* |
+| **adapter** — DH-IDENTITY-001 real PostgreSQL | 3 passed *(had not run in CI)* |
+| **adapter** — DH-CLINIC-006 real PostgreSQL | **3 passed after repair**; 2 of 3 failed before *(had not run in CI)* |
+| **adapter** — DH-CLINIC-007 real PostgreSQL | 2 passed *(had not run in CI)* |
+| **provisioning** — ruff check / format | pass (46 files) |
+| **provisioning** — pytest | **582 passed** (was 579 passed + 1 failed; +2 new tests) |
+| **static** — all **19** steps | **19/19 pass**; 16 of them had been skipped behind the image-pin failure |
+| **compose** — 5 of 6 steps | pass, including the repaired base+overlay parse |
+| **compose** — "a real `.env` must never have appeared in the checkout" | **not locally reproducible by design** — this is a developer machine where `.env` legitimately exists with live credentials. Proven by construction instead: `.env` is untracked, gitignored, and absent from `git ls-tree HEAD`, so a CI checkout cannot have one |
+| **native-demo-boot** — up, status, 3 smoke tests, seed assertion, reset ×2, post-reset assertion, both reset-safety facts | **all pass** |
+
+The static job was reproduced by **extracting each step's own `run:` block from the workflow and
+executing it**, rather than retyping sixteen shell blocks — the same fidelity principle as using
+CI's exact pin logic. Only GitHub-provided pieces were substituted: `$RUNNER_TEMP`, and a `python`
+→ `python3` shim on `PATH`, because GitHub runners provide `python` via `setup-python` and this WSL
+provides only `python3`. Without that shim all sixteen python-based steps reported
+`python: command not found`, which is an environment difference and not a CI finding.
+
+**The UI job was deliberately not re-run.** This ticket changes no UI file, and that job was already
+green at `58b4b3c`.
+
+### Native Demo qualification, through the repaired composition
+
+`up.sh` → `status.sh` → three smoke tests → the direct database assertion → `reset.sh` twice → the
+post-reset assertion → both reset-safety negative controls. Every direct assertion used the same
+two-file composition CI now uses.
+
+| Fact | Observed |
+|---|---|
+| `up.sh` | exit 0, all containers healthy |
+| `status.sh` | exit 0; reports migration head `0040_clinic_appointments` |
+| Keycloak realm through Caddy | `"issuer"` present |
+| Exchange API through Caddy | **401** for an unauthenticated request — routing and the FastAPI process both genuinely up |
+| UI through Caddy | `<html` served |
+| demo database reachable, base+overlay `exec` | yes |
+| organizations / memberships | **2 / 7**, roster as tabled above |
+| reset repeatable | `reset.sh` twice, both exit 0 |
+| baseline preserved after reset | **2 / 7** again |
+| reset safety — wrong database name | **REFUSED**, naming `not_the_demo_database` |
+| reset safety — blank `ADAPTER_DEMO_ENVIRONMENT` | **REFUSED**, naming the variable |
+| teardown scoping | verified by inspection, not executed: `down.sh` names both compose files and the overlay's `name: dhealth-native-demo` bounds the project; every demo volume carries that prefix. `down.sh -v` was **not** run — CI does that because its runner is disposable, while here it would delete a developer's demo database |
+
+**One observation was invalidated and re-taken.** The first `up.sh` run reported a syntax error at
+`up.sh:54`. The cause was mine: a negative control rewrote `up.sh` while that job was executing it,
+and bash reads scripts incrementally. `up.sh` is unmodified in git, parses cleanly, and line 54 is
+an `echo`. The step was re-run alone and passed with exit 0. **Lesson worth keeping: never run a
+file-mutating negative control while a job that executes those files is in flight.**
+
+### Negative controls — 11 mutations, all caught, all reverted byte-for-byte
+
+Each breaks one repaired guard, runs the check that should catch it, and must fail. Exit codes were
+captured inside a script with a deliberate `false` control first, because `$?` observed through
+`wsl … bash -lc '…'` is not trustworthy.
+
+| Control | Mutation | Result |
+|---|---|---|
+| NC-CI-1a | `EXPECTED_HEAD=0039_lab_specimens` | **rejected** (exit 1) |
+| NC-CI-1b | `EXPECTED_HEAD=0026_facility_enrollment` — the value CI actually had | **rejected** (exit 1) |
+| NC-CI-1c | `EXPECTED_HEAD=0040_clinic_appointments` | accepted (exit 0) |
+| NC-CI-2 | provisioning stops rendering the variable | **caught** — both new tests fail, plus the sync test |
+| NC-CI-2b | provisioning renders `http://` instead of `https://` | **caught** |
+| NC-CI-3a | overlay invoked alone | **fails**: `service "dhealth-db" has neither an image nor a build context specified` — the overlay still refuses to pretend it is standalone |
+| NC-CI-3b | canonical base + overlay | **parses** (exit 0) |
+| NC-CI-4 | digest removed from the backup Dockerfile | **caught** by CI's own pin logic, naming the file and line |
+| NC-CI-5 | a CI invocation reverted to overlay-only | **caught** by the new structural guard |
+| NC-CI-5b | a demo *script* reverted to overlay-only | **caught** — two assertions fire, including the base-must-come-first ordering |
+| NC-CI-6a/b/c | demo seed asserted as 3 memberships / 6 / 1 organization | **all rejected** against the live database |
+| NC-CI-6d | the real 2 / 7 | accepted |
+
+NC-CI-3 is the paired architecture control the ticket asked for: the overlay-alone failure is
+**evidence the architecture is intact**, not a defect to fix. NC-CI-6a is worth naming separately —
+it proves the *old* CI assertion genuinely fails against the real database, so correcting 3 → 7 was
+fixing a stale number rather than relaxing a check.
+
+### Appointment regression evidence — kept distinct
+
+DHEALTH-APPOINTMENTS-001 could not finish two local runs; the agent harness reaped them for memory
+pressure three times. **Those remain incomplete local observations and this ticket does not
+retroactively rewrite them.** What exists now, as separate evidence from separate sources:
+
+- **remote**, at `58b4b3c`: the UI job passed lint, typecheck, Vitest and build, and the adapter
+  job's full pytest step passed — it failed only afterwards, on the stale `EXPECTED_HEAD`.
+- **local**, in *this* ticket and against *this* commit: the full adapter suite passed
+  (2162 passed, 1 skipped, 93 files reconciled).
+
+The Appointment ticket's own record stands as written: its local full runs did not complete. The
+adapter suite has since been observed green remotely at `58b4b3c` and locally here. The UI suite's
+whole-suite pass remains observed **remotely only**.
+
+### What is supported locally versus what still needs GitHub Actions
+
+**Supported by local evidence now:** the migration guard reaches 0040 on a fresh database;
+provisioning renders every hard-required variable; all 19 static steps pass; the base+overlay
+composition parses and boots; the whole native-demo sequence including reset safety; the adapter,
+provisioning, lint, format and migration-qualification steps; the backup image builds and works.
+
+**Still requires remote Actions to claim:** that the *workflow as GitHub executes it* is green —
+runner-provided `python`, the `services: postgres` container, `actions/setup-python` caching, the
+Maven/Java jobs (`openmrs-narrow-order`, `openelis-order-correlation-build`,
+`oauth2login-provider-tests`, `clinical-config`), and the `.env`-absent assertion that can only be
+true in a fresh checkout. **CI is not claimed repaired on local evidence alone.**
+
+### Deliberately not fixed here
+
+| Item | Why |
+|---|---|
+| `docker-compose.native.yml`'s unpinned `postgres:16-alpine` | Outside the pin gate's coverage; pinning the database server is a deployment decision, not CI maintenance. Follow-up, noted in the Dockerfile |
+| `native-report-results.json` tracked at the repository root | The ticket explicitly excluded it, and it did not block the repair |
+| Expanding the pin gate to cover `docker-compose.native.yml` | That is a policy widening, not a repair — it would be a separate decision |
+| The UI suite | No UI file changed; already green remotely at `58b4b3c` |

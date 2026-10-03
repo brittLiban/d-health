@@ -1,5 +1,41 @@
 # Current State — Daher Health
 
+> **CI repaired at a correct repository state, 2026-10-04 (DHEALTH-CI-REPAIR-001):** GitHub Actions
+> was red while the product was right. Five failures: `EXPECTED_HEAD` fourteen migrations behind the
+> real head; facility provisioning never rendering `DHEALTH_PATIENT_PUBLIC_BASE_URL`, which the
+> clinical compose file hard-requires with no default; four CI commands invoking the Native **demo
+> overlay** alone when it defines no database, Keycloak or edge; and an unpinned `postgres:16-alpine`
+> in the backup Dockerfile.
+>
+> **Only two were repository defects** — the provisioning gap, which would have made a freshly
+> provisioned facility fail at `docker compose up` *after* provisioning finished, and the unpinned
+> image. The other three were CI asserting things about a repository that had moved on.
+>
+> **Nothing was weakened to get green:** 10 jobs and 87 steps before and after, identical step names,
+> no `continue-on-error`, no `|| true`, no skipped job, no lowered floor. The one assertion whose
+> value changed moved from a stale 3 demo memberships to the true 7 — verified against the live demo
+> database, and still an exact equality.
+>
+> **The red build had been hiding a real test defect.** Four adapter real-PostgreSQL steps sat behind
+> the failing migration guard and had not run for fourteen migrations; with the guard repaired,
+> `DH-CLINIC-006` failed on a fixture that built unenrolled, unstaffed, untemplated organizations —
+> a state production cannot produce. That is the honest cost of tolerating a red badge: the checks
+> behind the first failure stop protecting anything, silently. Sixteen of the twenty static checks
+> and the compose job's final `.env` assertion were in the same position.
+>
+> **The pinned digest was earned, not guessed.** `postgres:16-alpine@sha256:1a66d744…` was resolved
+> with `docker manifest inspect`, then actually pulled (AGENTS.md forbids recording a digest that has
+> not been pulled), then verified to be PostgreSQL 16.15 on Alpine 3.24.2 with no `openssl` binary,
+> exactly as the Dockerfile's own comments claim. A digest already present on the developer machine
+> was **rejected**: the registry would not verify it, so pinning to it would have produced a
+> reference CI could not pull.
+>
+> **Not claimed:** that CI is green. Every job's steps were reproduced locally, but whether the
+> workflow passes as GitHub executes it needs a run on GitHub — runner-provided `python`, the
+> `services: postgres` container, the Maven/Java jobs, and an assertion that only holds in a fresh
+> checkout.
+
+
 > **Clinic appointments and the arrival handoff, 2026-10-03 (DHEALTH-APPOINTMENTS-001, ADR-073):** a
 > clinic can record that a named patient is expected here at a date and time, move it, cancel it,
 > and — when the patient actually arrives — turn that expectation into the **existing** clinic

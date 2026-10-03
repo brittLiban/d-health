@@ -71,6 +71,36 @@ assertions are shaped around the capability catalogue this ticket changed — wa
 **7 passed**, including the catalogue mirror and the French-description guard. The remaining adapter
 files are unobserved against this code. Neither gap is a failure; both are unobserved.
 
+> **[2026-10-04 DHEALTH-CI-REPAIR-001 dated update — one of those two gaps is now closed, from a
+> different source.]** The product state above is unchanged; this is a CI-maintenance addendum.
+>
+> **CI was red at this correct repository state**, for five reasons: a stale `EXPECTED_HEAD`
+> (`0026_facility_enrollment`, fourteen migrations behind `0040_clinic_appointments`); facility
+> provisioning never rendering `DHEALTH_PATIENT_PUBLIC_BASE_URL`, which `docker-compose.yml`
+> hard-requires with no default; four CI commands invoking `docker-compose.native-demo.yml` alone
+> when it is an overlay that defines no database, Keycloak or edge; and an unpinned
+> `postgres:16-alpine` in the backup Dockerfile. Only the provisioning gap and the unpinned image
+> were defects in the repository — the rest was CI describing a repository that had moved on.
+> **All repaired without weakening anything: 10 jobs and 87 steps before and after, identical step
+> names, no `continue-on-error`, no `|| true`, no skipped job.**
+>
+> **Repairing them uncovered a real test defect that the red build had been hiding.** With the
+> migration guard working again, the adapter job's four real-PostgreSQL steps could run for the
+> first time in fourteen migrations, and `DH-CLINIC-006` failed — its integration fixture built
+> unenrolled, unstaffed, untemplated organizations, a state production cannot produce since
+> migration 0026 backfills an enrollment for every organization. Repaired with the repository's own
+> shared helpers, which makes the fixture more realistic rather than laxer.
+>
+> **The adapter-suite gap above is now closed, and the sources are kept distinct:** the remote CI
+> run at `58b4b3c` had already passed the adapter job's full pytest step (failing only afterwards,
+> on the stale `EXPECTED_HEAD`), and this ticket then observed it locally — **2162 passed, 1 skipped,
+> across all 93 top-level test files**. The Appointment ticket's own record stands as written: *its*
+> local runs did not complete. **The UI whole-suite pass is still observed remotely only.**
+>
+> **CI is not claimed repaired on local evidence alone.** Every job's steps were reproduced locally,
+> including the 16 static steps and 4 PostgreSQL steps that had been skipped behind the first
+> failures, but whether the workflow is green as GitHub executes it requires a run on GitHub.
+
 **The UI production build did run**, as the thing it already is: `ui/Dockerfile:15` is
 `RUN npm run build` and `up.sh` builds with `--build`, so the rebuild after the CSS fix compiled it.
 The served bundle carries the Vite-hashed `_rowIdentity_11iem` class — a different hash from the one
