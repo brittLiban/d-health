@@ -264,9 +264,14 @@ export function ClinicAppointments() {
 
   return (
     <Card>
-      <div className={styles.panel}>
+      {/* A named landmark, the same way `ClinicArrivals` names its own: these two panels sit on the
+          one screen and use some of the same words, so "the schedule" and "the waiting list" have
+          to be distinguishable to a screen reader -- and, for the same reason, to a test. */}
+      <section className={styles.panel} aria-labelledby="appointments-heading">
         <div className={styles.header}>
-          <h2 className={styles.heading}>Rendez-vous</h2>
+          <h2 id="appointments-heading" className={styles.heading}>
+            Rendez-vous
+          </h2>
           {mayManage ? (
             <Button type="button" onClick={openForm} disabled={busy}>
               Nouveau rendez-vous
@@ -502,7 +507,7 @@ export function ClinicAppointments() {
             })}
           </ul>
         )}
-      </div>
+      </section>
     </Card>
   )
 }

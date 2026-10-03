@@ -92,7 +92,9 @@
   display: grid;
   /* time | patient | state | actions. `minmax(0, 1fr)` on the identity column is what stops a long
      name pushing the actions off the right edge. */
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  /* The name column may shrink, but never below its own longest word -- `minmax(0, …)` allowed the
+     column to go to nothing while the action buttons kept their width. */
+  grid-template-columns: auto minmax(min-content, 1fr) auto auto;
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3);
@@ -109,9 +111,13 @@
 }
 
 .rowIdentity {
-  min-width: 0;
   color: var(--color-text);
-  overflow-wrap: anywhere;
+  /* `break-word`, never `anywhere`. `anywhere` lets the name break between any two letters *and*
+     reports a min-content width of one character, so in a four-column row whose buttons want the
+     space the column collapsed and "Patient Démo Alpha" rendered as a vertical stack of single
+     letters at 768px. `break-word` keeps the min-content width at the longest word, so the name
+     wraps onto another line instead of becoming unreadable. */
+  overflow-wrap: break-word;
 }
 
 .rowActions {
@@ -122,10 +128,15 @@
 
 /* ── Narrow screens ───────────────────────────────────────────────────────── */
 
-/* At 390px a four-column row cannot hold a time, a name, a badge and two buttons. The row becomes a
-   stack, which keeps every value readable instead of scrolling the schedule sideways -- the same
-   decision `staffSections`' navigation rail made for the same width. */
-@media screen and (max-width: 760px) {
+/* A four-column row cannot hold a time, a name, a badge and two buttons. The row becomes a stack,
+   which keeps every value readable instead of scrolling the schedule sideways -- the same decision
+   `staffSections`' navigation rail made.
+
+   The bound is 900px, not 760px. It was 760px, chosen for the 390px phone, and 768px -- the tablet
+   width this ticket's own browser phase checks -- fell into the gap just above it: the row stayed
+   four-column with no room for the name. A breakpoint that a required test width sits just outside
+   is the wrong breakpoint. */
+@media screen and (max-width: 900px) {
   .row {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);

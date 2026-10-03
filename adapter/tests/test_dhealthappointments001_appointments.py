@@ -611,6 +611,38 @@ def test_ap_c2_a_cancelled_booking_cannot_be_moved(client, keypair, organization
     assert response.status_code == 409, response.text
 
 
+def test_ap_c3_a_booking_that_already_arrived_cannot_be_moved(
+    client, keypair, organizations, patients, sessions
+):
+    """Once a booking has produced an encounter, its scheduled instant is history and moving it
+    would make the record say the patient was expected at a time they had already been seen at.
+
+    **Written because a negative control found this untested.** `NC-AP-12` disabled
+    `_require_mutable`'s `visit_id` guard and the AP-C tests stayed green: `ap_c1` moves a booking
+    that never arrived and `ap_c2` moves a cancelled one, so nothing exercised the arrived case and
+    `AppointmentAlreadyArrived` was never asserted on the reschedule path at all. The guard was
+    correct; the suite simply did not look at it."""
+    private_key, _ = keypair
+    clinic = _clinic(client, private_key, organizations, patients, "C3")
+    booking = _booked(client, clinic, day=date(2026, 10, 6), at=time(10, 0))
+
+    arrived = _check_in(client, clinic, booking["id"])
+    assert arrived.status_code == 200, arrived.text
+
+    response = _reschedule(client, clinic, booking["id"], day=date(2026, 10, 7), at=time(15, 0))
+    assert response.status_code == 409, response.text
+
+    # And the refusal changed nothing: same instant, same single visit.
+    with sessions() as session:
+        stored = session.get(Appointment, uuid.UUID(booking["id"]))
+        instant = stored.scheduled_at
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=UTC)
+        assert instant == datetime(2026, 10, 6, 7, 0, tzinfo=UTC)  # 10:00 Djibouti
+        assert stored.visit_id is not None
+        assert len(session.scalars(select(Visit)).all()) == 1
+
+
 # ==================================================================================================
 # AP-D: cancellation
 # ==================================================================================================
