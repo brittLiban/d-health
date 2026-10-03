@@ -24477,24 +24477,44 @@ additionally requiring the scripts to name the base *first* because Compose merg
 ### 4 — the backup image digest, and where the digest came from
 
 `FROM postgres:16-alpine` →
-**`FROM postgres:16-alpine@sha256:1a66d744c1b459e13b05a8fca341da84cb63383e99ce262210efee5a319d4551`**
+**`FROM postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea`**
 
 The file's TODO said this could not be pinned "from a machine that can reach Docker Hub's blob CDN",
 citing AGENTS.md's rule against recording a digest that has not been pulled. **That premise had
 expired**, and the rule was satisfied literally rather than worked around:
 
-1. `docker manifest inspect postgres:16-alpine` resolved the tag to this digest;
-2. `docker pull postgres:16-alpine@sha256:1a66d744…` **succeeded** — so the digest is retrievable,
+1. the registry's own `Docker-Content-Digest` for `postgres:16-alpine`, requested with the index
+   media types in `Accept`, is this value; the index lists **eight** platforms (amd64, armv6,
+   armv7, arm64v8, 386, ppc64le, riscv64, s390x);
+2. `docker pull postgres:16-alpine@sha256:721873c3…` **succeeded** — so the digest is retrievable,
    not merely well-formed;
-3. the pulled image was verified to be what the Dockerfile's comments claim: **PostgreSQL 16.15 on
+3. `docker manifest inspect` on it returns `application/vnd.oci.image.index.v1+json`, which is the
+   check that it really is the **index** and not one platform's manifest;
+4. the pulled image was verified to be what the Dockerfile's comments claim: **PostgreSQL 16.15 on
    Alpine 3.24.2**, `pg_dump`/`pg_restore` 16.15, and **no `openssl` binary** (so the `apk add
    openssl` below it is still necessary, and that comment is still true).
 
-**A digest found on this machine was rejected.** `docker image inspect postgres:16-alpine` reported a
-local `RepoDigest` of `sha256:530a5243…`, but `docker manifest inspect` on it returned *manifest
-verification failed* — consistent with this machine's images having been side-loaded. Pinning to it
-would have produced a reference CI could not pull. The tag had also moved since that local pull,
-which is precisely the drift a digest exists to prevent.
+**Two digests were rejected on the way to this one, for different reasons — both worth recording.**
+
+*The machine's own local digest.* `docker image inspect postgres:16-alpine` reported a `RepoDigest`
+of `sha256:530a5243…`, which the registry **would not verify at all** — consistent with this
+machine's images having been side-loaded. Pinning it would have produced a reference CI could not
+pull. The tag had also moved since that local pull, which is precisely the drift a digest prevents.
+
+*A platform manifest mistaken for the tag's digest.* The first commit of this repair pinned
+`sha256:1a66d744…`, taken from `docker manifest inspect --verbose postgres:16-alpine`. That output
+reports **one `Ref` per platform**, amd64 first, and that digest is the linux/amd64 manifest *inside*
+this very index — so the pin would have built on a GitHub runner and **failed on an arm64 developer
+machine**, while claiming to follow a convention it had not been checked against. Corrected in a
+third commit. Two things make this catchable next time: `docker manifest inspect <ref>@<digest>`
+verifies against an index and answers *manifest verification failed* for a platform manifest (the
+same answer the side-loaded local digest gave, which is what prompted checking the new one the same
+way); and the repository's existing pins are **mixed** — `python:3.13.14-slim-bookworm@sha256:67a1e…`
+is an index digest, `mariadb:10.11.18@sha256:de61fed…` is a platform digest — so "the convention used
+elsewhere" was not a safe assumption either.
+
+Everything downstream was re-qualified at the corrected digest rather than assumed: the image-pin
+gate, the identity checks above, and the full backup-image build qualification below.
 
 **The pinned image was then built and qualified** — synthetic only, never a facility database:
 build succeeds; `pg_dump`/`pg_restore` 16.15 present; `openssl 3.5.9` installed by the `apk add`;

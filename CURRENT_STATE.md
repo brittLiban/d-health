@@ -23,12 +23,17 @@
 > behind the first failure stop protecting anything, silently. Sixteen of the twenty static checks
 > and the compose job's final `.env` assertion were in the same position.
 >
-> **The pinned digest was earned, not guessed.** `postgres:16-alpine@sha256:1a66d744…` was resolved
-> with `docker manifest inspect`, then actually pulled (AGENTS.md forbids recording a digest that has
+> **The pinned digest was earned, not guessed — and two candidates were rejected first.**
+> `postgres:16-alpine@sha256:721873c3…` is the multi-arch **index** digest, taken from the registry's
+> own `Docker-Content-Digest`, then actually pulled (AGENTS.md forbids recording a digest that has
 > not been pulled), then verified to be PostgreSQL 16.15 on Alpine 3.24.2 with no `openssl` binary,
-> exactly as the Dockerfile's own comments claim. A digest already present on the developer machine
-> was **rejected**: the registry would not verify it, so pinning to it would have produced a
-> reference CI could not pull.
+> exactly as the Dockerfile's own comments claim. Rejected: the digest already present on the
+> developer machine, which the registry **would not verify at all** (a side-loaded image), and then
+> `sha256:1a66d744…`, which this repair pinned at first and which turns out to be the **linux/amd64
+> manifest inside** that index — it would have built on a GitHub runner and failed on an arm64
+> machine. `docker manifest inspect --verbose` lists one digest per platform, not the tag's own;
+> the repository's existing pins are mixed between the two kinds, so "the convention used elsewhere"
+> was not a safe assumption either.
 >
 > **Not claimed:** that CI is green. Every job's steps were reproduced locally, but whether the
 > workflow passes as GitHub executes it needs a run on GitHub — runner-provided `python`, the
