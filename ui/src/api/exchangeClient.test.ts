@@ -1196,4 +1196,65 @@ describe('ExchangeClient', () => {
     expect((error as ExchangeApiError).code).toBe("NETWORK_ERROR")
     expect(isAmbiguousExchangeError(error)).toBe(true)
   })
+
+  // DHEALTH-FACILITY-PROFILE-001/ADR-074 §15.
+  //
+  // These two exist because the real-browser qualification found a defect that every unit test in
+  // this repository was blind to: `setFacilityTimezone` sent its body without a `Content-Type`.
+  // `buildHeaders` sets only `Accept`, so `fetch` supplied `text/plain;charset=UTF-8`, FastAPI
+  // parsed the body as a plain JSON *string* rather than an object, and **every** timezone change
+  // was refused 422 — `{"type":"model_attributes_type", ... "input":
+  // "{\"timezone_name\":\"America/Vancouver\"}"}`. The screen's own tests mock this method, so
+  // they could not see it. Asserting the header is the cheap guard that makes the defect
+  // impossible to reintroduce silently.
+  it("setFacilityTimezone sends a JSON object, with the Content-Type that makes it one", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          organization_id: "prov-1",
+          organization_name: "Clinique",
+          timezone_name: "America/Vancouver",
+          created_at: "2026-10-04T00:00:00Z",
+          updated_at: "2026-10-04T00:00:00Z",
+        }),
+        { status: 200 },
+      ),
+    )
+
+    const client = new ExchangeClient()
+    const profile = await client.setFacilityTimezone("prov-1", "America/Vancouver")
+    expect(profile.timezone_name).toBe("America/Vancouver")
+
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe("/exchange/v1/organizations/prov-1/facility-profile/timezone")
+    expect(init?.method).toBe("PUT")
+    expect((init?.headers as Record<string, string>)["Content-Type"]).toBe("application/json")
+    // And the body is the object the route's model expects, not a stringified string.
+    expect(JSON.parse(String(init?.body))).toEqual({ timezone_name: "America/Vancouver" })
+  })
+
+  it("getFacilityProfile reads the one organization it is given", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          organization_id: "prov-1",
+          organization_name: "Clinique",
+          timezone_name: "Africa/Djibouti",
+          created_at: "2026-10-04T00:00:00Z",
+          updated_at: "2026-10-04T00:00:00Z",
+        }),
+        { status: 200 },
+      ),
+    )
+
+    const client = new ExchangeClient()
+    const profile = await client.getFacilityProfile("prov-1")
+    expect(profile.timezone_name).toBe("Africa/Djibouti")
+
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0]
+    expect(url).toBe("/exchange/v1/organizations/prov-1/facility-profile")
+    // A read, so no method and no body: a GET that carried either would be a different request.
+    expect(init?.method ?? "GET").toBe("GET")
+    expect(init?.body ?? null).toBeNull()
+  })
 })

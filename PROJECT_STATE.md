@@ -24719,7 +24719,7 @@ remote CI observed it, this machine did not.**
 
 ---
 
-## DHEALTH-FACILITY-PROFILE-001 · Each facility's own authoritative timezone · ✅ BUILT, NOT BROWSER-QUALIFIED · 2026-10-04 · not pushed
+## DHEALTH-FACILITY-PROFILE-001 · Each facility's own authoritative timezone · ✅ BUILT AND BROWSER-QUALIFIED · 2026-10-04 · not pushed
 
 **ADR-074.** Migration **`0041_facility_profiles`**, one head. `EXPECTED_HEAD` bumped to match.
 
@@ -24757,11 +24757,41 @@ a zone *correction* from a *relocation*, so moving them would be a guess with cl
 | 15 UI unit tests for the screen (incl. an axe scan with the picker open) | ✅ passed |
 | 35 navigation tests (6 new) | ✅ passed |
 | 15 negative controls | ✅ 13 reddened, 2 deliberately green, 0 unexpected, all reverted byte-for-byte |
-| Full UI unit suite | ✅ 67 of 67 files reconciled, 1088 tests — one pre-existing flake, below |
+| Full UI unit suite | ✅ 67 of 67 files reconciled, **1090 tests, zero failures** — run twice, the second time after the client fix |
 | `tsc -b`, oxlint, `tsc -p e2e/tsconfig.json`, `alembic heads` | ✅ clean |
-| **Real-browser qualification** | ❌ **NOT RUN.** Suite written, typechecked and linted; the stack on this machine runs pre-ticket images |
+| **Real-browser qualification** | ✅ **11 of 11 phases passed** against the real stack — and found a defect the whole unit suite was blind to, below |
+| 47 client tests (2 new) | ✅ passed — the new pair guards that defect |
+| **Sibling browser suites** | ✅ **171 phases re-run green** across all thirteen. With this ticket's 11, **182 browser phases** |
 | **Full adapter suite** | ❌ not run locally |
-| **Sibling browser suites** | ❌ not re-run |
+
+### The browser found a defect every unit test in the repository was blind to
+
+**Every timezone change was refused with 422, and the whole unit suite was green.**
+
+`ExchangeClient.setFacilityTimezone` sent its body without a `Content-Type`. `buildHeaders` sets
+only `Accept`, so `fetch` supplied `text/plain;charset=UTF-8` and FastAPI parsed the body as a plain
+JSON **string** rather than an object — `{"type":"model_attributes_type", … "input":
+"{\"timezone_name\":\"America/Vancouver\"}"}`. Every other PUT in `exchangeClient.ts` sets the
+header; this one did not.
+
+Nothing could see it. The screen's own tests mock the client method, the client's tests had no case
+for it, and the adapter's 63 tests call the route directly with a correct body. It took a real
+browser talking to a real adapter. Fixed by one line, guarded by two new `exchangeClient.test.ts`
+cases, and `NC-FP-16` removes the header again to confirm the guard reddens.
+
+### And the first browser run was a false green, which is the same mistake twice in one ticket
+
+`changeZoneByClicking` originally treated "an element whose text is exactly `America/Vancouver` is
+visible" as proof the change had saved. It is not: the confirmation step renders the candidate in a
+`<strong>`, so that text is on the page **before** the save and stays there when the save fails,
+because the editor is left open with its error. The suite reported a green change while the database
+had never been written — it was hiding the defect above.
+
+The success signal is now the **editor unmounting**, which happens only when the PUT returns, plus a
+`page.waitForResponse` on the PUT so a refusal is reported with the server's own message rather than
+as a locator timeout. This is the identical failure shape to the `PG-FP-2` tautology below, found
+twice in one ticket in two different languages: **a test that observes a consequence of the thing it
+is testing, rather than the thing.**
 
 ### The three controls that found holes
 
@@ -24820,16 +24850,18 @@ where only its offset matters.
 
 ### Environment notes for whoever picks this up
 
-- **The UI suite needed 11 batches.** The runner failed to start a worker for **15 of 67** files in
-  the batched pass, under `--pool=threads` *and* the default forks pool. Those files were re-run in
-  batches of three until every file reported. The reconciliation is **by file**, parsed from every
-  log (`scratchpad/reconcile_fp_ui.py`), never a sum of batch totals: summing would have missed a
+- **The UI suite only reconciles in small batches.** The runner failed to start a worker for
+  **15 of 67** files in the first full pass and **2 of 67** in the second, under `--pool=threads`
+  *and* the default forks pool. Those files were re-run in batches of three until every file
+  reported. The reconciliation is **by file**, parsed from every log
+  (`scratchpad/reconcile_fp_ui.py`), never a sum of batch totals: summing would have missed a
   dropped file and double-counted a retried one.
-- **`ExchangeAuthProvider.test.tsx` fails here and is the catalogued flake.** `retry() re-runs
-  initialization from scratch` times out at 5.0–7.5s against vitest's 5s default. Untouched by this
-  ticket (last changed in DH-CLINIC-004A), imports nothing this ticket changed, and **all ten tests
-  in the file pass with `--testTimeout=30000`** with that one taking 7153ms. Margin loss under load.
-  Green in remote CI at `00de1de`. Do not debug it as a regression.
+- **`ExchangeAuthProvider.test.tsx` is the catalogued flake, and it is load-sensitive.** `retry()
+  re-runs initialization from scratch` timed out at 5.0–7.5s against vitest's 5s default while other
+  work was running, and **passed on an idle machine**. All ten tests in the file pass with
+  `--testTimeout=30000`, that one taking 7153ms. Untouched by this ticket (last changed in
+  DH-CLINIC-004A), imports nothing this ticket changed, green in remote CI at `00de1de`. Do not
+  debug it as a regression — re-run it alone on an idle box first.
 - **Do not run the adapter suite and the UI batch script at the same time** — it manufactures that
   flake. This session did, once, and the failure it produced was its own.
 - **The negative-control driver's failure regex must be anchored.** An unanchored `(\d+) failed`
@@ -24837,21 +24869,45 @@ where only its offset matters.
   reddened assertions. `scratchpad/nc_fp.py` anchors on pytest's summary line and calibrates every
   PostgreSQL control *before* mutating, because the Docker daemon here bounces about every quarter
   of an hour and a container with no restart policy dies mid-run.
+- **The Docker daemon here restarts every container roughly every quarter of an hour.** One browser
+  run was destroyed mid-flight by it — every phase failing against a 502 edge — and the disposable
+  PostgreSQL died under the negative-control pass. Check the stack before believing any single red
+  run: `curl -sk -o /dev/null -w '%{http_code}' https://app.localhost/exchange/v1/me` must answer
+  401, not 502.
+- **`scripts/demo/qualify-appointments.sh` needed its head pin bumped** `0040` → `0041` or it
+  refuses to start against a correct database. **Every migration will need that one-line bump in
+  every qualify script that pins a head.** A looser "does the table exist?" check was deliberately
+  not substituted: it would survive future migrations and would also stop catching the case the
+  guard exists for, an adapter that booted without applying the newest migration.
 - **`chmod +x` is not enough.** `scripts/demo/qualify-facility-profile.sh` committed as `100644`
   after a WSL `chmod +x`; `git update-index --chmod=+x` fixed it. Check `git ls-files -s` before
   pushing anything CI runs directly.
 
-### To finish this ticket
+### What remains
 
-1. `sudo scripts/demo/up.sh` — rebuilds both images and applies `0041`. The stack currently running
-   is pre-ticket: database at `0040`, adapter without `FacilityProfileRepository`, bundle without
-   `Établissement`. Expect one `RecoveryFenceUnavailable` crash-loop after a rebuild.
-2. `scripts/demo/qualify-facility-profile.sh` as the **normal user** with `SEC_DOCKER="sudo -n
-   docker"`. It refuses to start unless both images, the migration head *and* the seeded
-   `Africa/Djibouti` are what it expects — the last because a crashed earlier run of itself would
-   otherwise make FP-C compare two instants that were never under the zone it names.
-3. Re-run `17-clinic-appointments` (the conversion path changed) and `10-capabilities`.
-4. The full adapter suite.
+1. **The full adapter suite has not run locally.** The ~900 tests beyond this ticket's 74 are
+   unobserved against this code. Same gap ADR-073 §11 recorded, same reason.
+2. **No DOM assertion on an existing booking's rendered wall clock.** The browser suite deliberately
+   does not make one: the booking is a week out so it is off the day view, FP-C acts as an
+   administrator who sees no schedule, and under Vancouver's offset 07:00Z falls on the previous
+   calendar date. An `Intl.DateTimeFormat` call inside the spec would assert **Node's** ICU rather
+   than the browser's, so none is made. A follow-up that books for *today*, signs in as a clinician
+   and reads the row's own text is the honest way to close it.
+3. **Nobody who administers a clinic has used the screen.** That is DHEALTH-NATIVE-MVP-1.0's
+   territory and no script can stand in for it.
+
+### How to re-run what was run
+
+```
+sudo scripts/demo/up.sh                    # rebuilds both images, applies 0041, seeds the baseline
+sudo scripts/demo/reset.sh                 # before each suite
+scripts/demo/qualify-facility-profile.sh   # as the NORMAL user, SEC_DOCKER="sudo -n docker"
+```
+
+The qualify script refuses to start unless both images, the migration head **and** the seeded
+`Africa/Djibouti` are what it expects — the last because a crashed earlier run of itself would
+otherwise leave Vancouver behind and make FP-C compare two instants that were never under the zone
+it names.
 
 **Human Decision Required: No.** Every open question is recorded in ADR-074 §14 as a decision
 nobody has made, not as a blocker on this work: facility rename, whether an address is one fact or

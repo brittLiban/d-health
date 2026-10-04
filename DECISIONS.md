@@ -11189,29 +11189,71 @@ and exactly as open as they were.**
 |---|---|
 | `test_dhealthfacilityprofile001_facility_profile.py` (FP-A…FP-J) | **63 passed** |
 | `integration/test_dhealthfacilityprofile001_postgres_qualification.py` (PG-FP-1…9b) | **11 passed**, on a disposable PostgreSQL 16 migrated to `0041`, destroyed with its volume |
+| `ui/e2e/native/18-facility-profile.spec.ts` (FP-A…FP-H) | **11 of 11 browser phases passed** against the real stack — and found a defect, below |
+| `ui/src/api/exchangeClient.test.ts` | **47 passed** (45 existing, 2 new for the defect) |
 | `ui/src/features/facility/FacilitySettingsPage.test.tsx` | **15 passed**, including an axe scan with the picker open |
 | `ui/src/features/staff/staffSections.test.ts` | **35 passed** (29 existing, 6 new for the navigation gate) |
-| Negative controls `NC-FP-1`…`NC-FP-15` | **15 run, 13 reddened, 2 deliberately green, 0 unexpected**, every one reverted byte-for-byte |
-| Full UI unit suite | **67 of 67 files reconciled, 1088 tests** — see the gap below |
+| Negative controls `NC-FP-1`…`NC-FP-16` | **16 run, 14 reddened, 2 deliberately green, 0 unexpected**, every one reverted byte-for-byte |
+| Full UI unit suite | **67 of 67 files reconciled, 1090 tests, zero failures** — twice, the second time after the client fix |
+| Sibling browser suites | **171 phases re-run green** across all thirteen — appointments 13, capabilities 6, clinic-visit 9, golden journey 12, front desk 9, access 16, security 31, offerings 13, report 19, lab-blocked 13, specimen 14, lab-reception 10, billing 6 |
 | `npm run typecheck` (`tsc -b`), `npm run lint` (oxlint), `tsc -p e2e/tsconfig.json` | clean |
 | `alembic heads` | one head, `0041_facility_profiles`, matching CI's `EXPECTED_HEAD` |
 
+Every sibling suite was re-run, not only the appointment one: the conversion path inside the
+booking transaction changed, `config.py`'s boot check changed, and `demo_seed` gained a step
+that runs before any appointment is seeded — three things every suite depends on without
+mentioning. With this ticket's 11 that is **182 browser phases**.
+
 **Two timezones are proved, as the ticket required:** `PG-FP-1` books the same wall clock at two
 facilities and gets two distinct instants; `PG-FP-8` shows each facility's day boundaries are its
-own; `FP-C1` does the same thing through the HTTP edge.
+own; `FP-C1` does the same through the HTTP edge.
+
+#### The browser found a defect every unit test in the repository was blind to
+
+**Every timezone change was refused with 422, and the whole unit suite was green.**
+
+`ExchangeClient.setFacilityTimezone` sent its body without a `Content-Type`. `buildHeaders` sets
+only `Accept`, so `fetch` supplied `text/plain;charset=UTF-8`, and FastAPI parsed the body as a
+plain JSON **string** rather than an object:
+
+```
+{"detail":[{"type":"model_attributes_type","loc":["body"],
+            "msg":"Input should be a valid dictionary or object to extract fields from",
+            "input":"{\"timezone_name\":\"America/Vancouver\"}"}]}
+```
+
+Nothing could see it. The screen's own tests mock the client method, the client's tests had no case
+for it, and the adapter's 63 tests exercise the route directly with a correct body. It took a real
+browser talking to a real adapter — which is the entire argument for keeping these suites.
+
+Fixed by one line, and guarded by two new `exchangeClient.test.ts` cases that assert the header and
+that the body parses to an object rather than to a string. `NC-FP-16` removes the header again and
+confirms the guard reddens.
+
+#### And the first run of the browser suite was a false green, which is worth recording
+
+`changeZoneByClicking` originally took "an element whose text is exactly `America/Vancouver` is
+visible" as proof the change had saved. It is not: the confirmation step renders the candidate zone
+in a `<strong>`, so that text is on the page **before** the save and stays there when the save
+fails, because the editor is left open with its error. The suite reported a green change while the
+database had never been written — the defect above, hidden by a test that could not see it.
+
+The success signal is now the **editor unmounting**, which happens only when the PUT returns, plus a
+`page.waitForResponse` on the PUT itself so a refusal is reported with the server's own message
+rather than as a locator timeout. This is the same failure shape as the `PG-FP-2` tautology below,
+found twice in one ticket, in two different languages.
 
 #### Three negative controls found holes rather than confirming guards
 
-`AGENTS.md` asks for controls that can fail. Three did, and each produced a test rather than a
-rationalisation:
+`AGENTS.md` asks for controls that can fail. Three did, and each produced a test:
 
 1. **`NC-FP-2`** — "the booking request carries a timezone and the server honours it" — had **nothing
    to redden**. `api.py`'s docstring asserted that no request body carries a zone; no test did.
    `FP-J6` now asserts it for both appointment request models, in the model *and* at the edge.
 2. **`NC-FP-9`** — removing `facility_profiles.ensure(...)` from `POST /organizations` left all
-   sixty tests green, because every one of them builds its facility through a fixture that writes
-   the profile itself. **Not one test created an organization the way the product does.** `FP-J7`
-   now does, over HTTP.
+   sixty tests green, because every one builds its facility through a fixture that writes the
+   profile itself. **Not one test created an organization the way the product does.** `FP-J7` now
+   does, over HTTP.
 3. **`NC-FP-10`** — turning `ensure` from insert-first-wins into an overwrite reddened nothing. The
    convention lived in a docstring. `FP-J8` now asserts it in both directions.
 
@@ -11241,38 +11283,53 @@ reddens through it.
   `Africa/Djibouti`, so the two agree and no assertion can distinguish them. **This is guarded by
   review only**, and §10 is the reasoning a reviewer needs.
 
+#### What the browser suite deliberately does not assert
+
+It does **not** read the existing booking's rendered wall clock out of the DOM. The booking is a
+week out so it is not on the day view; FP-C acts as an administrator, who holds no clinical
+capability and sees no schedule; and under Vancouver's offset 07:00Z falls on the previous calendar
+date, so reaching the row needs day navigation the suite does not drive. An `Intl.DateTimeFormat`
+call inside the spec would assert **Node's** ICU, not the browser's, so none is made. The
+per-zone arithmetic is asserted in `ClinicAppointments.test.tsx` against the real formatter and
+server-side by `PG-FP-1`/`PG-FP-8`. **A follow-up that books for today, signs in as a clinician and
+reads the row's own text is the honest way to close it**, and is named rather than implied.
+
 #### The gaps, named rather than rounded up
 
-1. **One UI test file fails on this machine, and it is the catalogued pre-existing flake.**
-   `ExchangeAuthProvider.test.tsx`'s `retry() re-runs initialization from scratch` times out at
-   5.0–7.5s against vitest's 5s default. It is **untouched by this ticket** (last changed in
-   DH-CLINIC-004A) and imports nothing this ticket changed. Diagnosed, not assumed: all ten tests in
-   the file pass with `--testTimeout=30000`, with that one taking **7153ms**. It is margin loss under
-   this machine's load. The same file is green in remote CI at `00de1de`.
-2. **The UI suite needed 11 batches to reconcile.** The runner failed to start a worker for 15 of 67
-   files in the batched pass (both `--pool=threads` and the default forks pool), so those files were
-   re-run in batches of three until every file reported. The reconciliation is **by file**, parsed
-   out of every log, not a sum of batch totals — summing would have missed a dropped file and
-   double-counted a retried one.
-3. **No real-browser qualification has been run.** `ui/e2e/native/18-facility-profile.spec.ts`,
-   `native-facility-profile.config.ts` and `scripts/demo/qualify-facility-profile.sh` are written,
-   typechecked and linted, but the demo stack on this machine is running pre-ticket images (its
-   database is at `0040`, its adapter has no `FacilityProfileRepository`, its bundle has no
-   `Établissement` section). **Written is not demonstrated** and this ADR does not claim otherwise.
-4. **No full adapter-suite run.** The ~900 adapter tests beyond this ticket's 74 are unobserved
-   against this code locally. This is the same gap ADR-073 §11 recorded, and for the same reason.
-5. **Sibling browser suites have not been re-run.** The capability catalogue gained no row, so
-   `10-capabilities` has nothing new to see, but the appointment conversion path changed and
-   `17-clinic-appointments` has not been exercised against it.
+1. **The UI suite reconciles only in small batches, and the runner drops files.** It failed to
+   start a worker for 15 of 67 files in the first full pass and 2 of 67 in the second, under both
+   `--pool=threads` and the default forks pool; those files were re-run in batches of three until
+   every one reported. The reconciliation is therefore **by file**, parsed out of every log, never a
+   sum of batch totals — summing would miss a dropped file and double-count a retried one. The
+   second pass came out at 67 of 67 and 1090 tests with **zero failures**.
+2. **The catalogued `ExchangeAuthProvider.test.tsx` flake appeared and was diagnosed rather than
+   assumed.** `retry() re-runs initialization from scratch` failed on timeout at 5.0–7.5s against
+   vitest's 5s default while other work was running, and passed on an idle machine. All ten tests in
+   the file pass with `--testTimeout=30000`, that one taking **7153ms**. The file is **untouched by
+   this ticket** (last changed in DH-CLINIC-004A) and imports nothing this ticket changed. It is
+   margin loss under load: this session manufactured it once by running the adapter suite and the UI
+   batch script at the same time, which is a thing not to do.
+3. **No full adapter-suite run.** The ~900 adapter tests beyond this ticket's 74 are unobserved
+   against this code locally. The same gap ADR-073 §11 recorded, for the same reason.
+4. **The Docker daemon in this environment restarts every container roughly every quarter of an
+   hour.** One browser run was destroyed mid-flight by it (every phase failing against a 502 edge),
+   and the disposable PostgreSQL container died under the negative-control pass. Both were re-run.
+   Any single red run here needs its stack checked before it is believed.
+5. **`scripts/demo/qualify-appointments.sh` needed its migration-head pin bumped** from `0040` to
+   `0041`, or it refuses to start against a correct database. That is required maintenance of the
+   kind §11 describes for `EXPECTED_HEAD`, not scope creep, and the script now says so at the line.
 
 **May now be claimed:** each facility in a Hawva deployment has its own authoritative IANA timezone;
 appointment local-time conversion uses that facility's zone, read under a lock inside the booking
 transaction; a timezone change moves no stored instant; ambiguous and nonexistent local times are
-refused rather than silently resolved; a facility administrator can change the zone through a
-`facility.configure`-gated screen; and the deployment timezone no longer decides any schedule.
+refused rather than silently resolved; **a clinic administrator can change the zone in a real
+browser, through two confirmations, and the change is audited, immediately visible and reversible**;
+a clinician and a billing clerk are offered no such screen and are refused at the edge; the panel
+holds at 1280, 768 and 390; and the deployment timezone no longer decides any schedule.
 
 **May not be claimed:** facility master data; opening hours or closure calendars; per-clinician
-schedules; cross-facility schedule visibility; a governed rename; timezone change history; that the
-screen works in a real browser against the real stack; human usability; staff-ready;
-production-ready; pilot-ready; or clinically live. **Nobody who administers a clinic has used this
-screen.** See `PROJECT_STATE.md` for exactly which qualification steps completed and which did not.
+schedules; cross-facility schedule visibility; a governed rename; timezone change history; that an
+existing booking's *rendered* wall clock changes (see above — asserted in unit tests and server-side,
+not in the browser); human usability; staff-ready; production-ready; pilot-ready; or clinically
+live. **Nobody who administers a clinic has used this screen**, nothing was timed, and product law 3
+("faster than what it replaces") remains a validated target rather than a current claim.

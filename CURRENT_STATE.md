@@ -1,7 +1,7 @@
 # Current State — Daher Health
 
-> **Per-facility timezones, 2026-10-04 (DHEALTH-FACILITY-PROFILE-001, ADR-074) — written and
-> tested, not browser-qualified.** `config.py` had refused to boot unless `TZ == Africa/Djibouti`,
+> **Per-facility timezones, 2026-10-04 (DHEALTH-FACILITY-PROFILE-001, ADR-074) — built, tested and
+> browser-qualified.** `config.py` had refused to boot unless `TZ == Africa/Djibouti`,
 > and every appointment in a deployment was converted through that one literal. For a product that
 > calls itself an interoperable diagnostic network that is a defect waiting for its second facility:
 > a receptionist types `10:00` and the instant stored is 10:00 *somewhere else*, it never errors,
@@ -14,12 +14,20 @@
 > `facility.configure`. **No stored instant is ever rewritten** — a zone change changes future
 > interpretation and present display, nothing else.
 >
-> **What is written but not demonstrated:** the real-browser suite
-> (`ui/e2e/native/18-facility-profile.spec.ts`, its config, and
-> `scripts/demo/qualify-facility-profile.sh`) is typechecked and linted and **has not run**. The
-> demo stack on the development machine carries pre-ticket images — its database is at `0040`, its
-> adapter has no `FacilityProfileRepository`, its bundle has no `Établissement` section. Nobody who
-> administers a clinic has used the screen. The full adapter suite has not run locally either.
+> **What the browser proved, and what it found.** All 11 phases of
+> `ui/e2e/native/18-facility-profile.spec.ts` pass against the real stack, and all **171** phases of
+> the thirteen sibling suites were re-run green. The run also found a defect **no unit test in this
+> repository could see**: `setFacilityTimezone` sent its body without a `Content-Type`, so FastAPI
+> parsed it as a JSON *string* and **every timezone change was refused 422** — while the screen's
+> tests (which mock the client) and the adapter's 63 tests (which call the route directly) all
+> stayed green. That is the entire argument for keeping a real-browser suite, stated as evidence
+> rather than as principle.
+>
+> **What is still not demonstrated:** the full adapter suite has not run locally, and the browser
+> suite makes no DOM assertion about an existing booking's *rendered* wall clock — the booking is a
+> week out, FP-C acts as an administrator who sees no schedule, and a formatter call inside the spec
+> would assert Node's ICU rather than the browser's. ADR-074 §15 names what would close it. **Nobody
+> who administers a clinic has used the screen.**
 >
 > **What the negative controls found, which is the part worth reading:** of fifteen, **three found
 > holes rather than confirming guards** — nothing asserted that a request body carries no timezone,
@@ -30,8 +38,9 @@
 > removed. It now observes commit order and re-read stability instead. Two controls stay green on
 > purpose and say why (ADR-074 §15).
 >
-> **Say "built and tested", never "qualified".** The distinction this file exists for applies
-> exactly here.
+> **Say "browser-qualified", never "pilot-ready".** A green suite says the mechanism works when
+> driven correctly. It says nothing about whether a clinic administrator can run their facility with
+> it, and this ticket makes no such claim.
 
 > **CI repaired at a correct repository state, 2026-10-04 (DHEALTH-CI-REPAIR-001):** GitHub Actions
 > was red while the product was right. Five failures: `EXPECTED_HEAD` fourteen migrations behind the

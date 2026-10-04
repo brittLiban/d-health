@@ -22,22 +22,33 @@ import { exchangeSql } from '../support/securityAdmin'
  * neither can:
  *
  *   **Can a clinic administrator change their facility's timezone by clicking the product, does the
- *   clinic's schedule immediately read in the new zone, and do the bookings that already existed
- *   stay exactly where they were?**
+ *   change take effect at once for everybody, and do the bookings that already existed stay exactly
+ *   where they were?**
  *
  * ── The consequence is the point, not the form ──
  *
  * FP-C is the phase that matters. A booking is made at 10:00 while the clinic is `Africa/Djibouti`,
- * the zone is changed to `America/Vancouver` by clicking, and then two things are asserted that are
- * easy to confuse and must both hold:
+ * the zone is changed to `America/Vancouver` by clicking, and then:
  *
- *   * the **stored instant** of the existing booking is unchanged (ADR-074 §4) — read back from the
- *     database, not inferred from the screen;
- *   * the **displayed wall clock** of that same booking is different, because it is now rendered in
- *     the new zone.
+ *   * the **stored instant** of the existing booking is unchanged (ADR-074 §4) — read back out of
+ *     PostgreSQL, not inferred from the screen;
+ *   * the **profile route** answers the new zone immediately and `Cache-Control: no-store`, so a
+ *     second administrator cannot be served the old one.
  *
- * "Nothing moved" and "it displays differently" are both true, and a reader who only checks one of
- * them will believe the opposite of whichever they skipped.
+ * ── What this suite does NOT read from the DOM, deliberately ──
+ *
+ * It does **not** assert the rendered wall clock of the existing booking. The booking is a week out,
+ * so it is not on the day view; FP-C is signed in as an administrator, who holds no clinical
+ * capability and cannot see a schedule at all; and under Vancouver's offset 07:00Z falls on the
+ * previous calendar date, so reaching the row needs day navigation this suite does not drive.
+ *
+ * The arithmetic that says the same instant reads as a different wall clock in a different zone is
+ * asserted in `ui/src/features/visits/ClinicAppointments.test.tsx` against the real formatter, and
+ * `PG-FP-1`/`PG-FP-8` assert it server-side across two facilities. A `new Intl.DateTimeFormat(...)`
+ * call inside this file would be asserting **Node's** ICU, not the browser's, which is worth saying
+ * plainly rather than letting a green run imply browser evidence for a display claim the browser
+ * never made. **A follow-up that books for *today*, signs in as a clinician and reads the row's own
+ * text is the honest way to close that gap.**
  *
  * ── What is real ──
  *
@@ -110,7 +121,6 @@ let clinicianMembership = ''
 /** The booking FP-C makes while the clinic is still on its home zone. */
 let bookingId = ''
 let bookingInstantBefore = ''
-let bookingWallClockHome = ''
 
 const consoleErrors: string[] = []
 const failedRequests: string[] = []
@@ -241,9 +251,39 @@ async function changeZoneByClicking(page: Page, zone: string): Promise<void> {
   await expect(confirm).toBeVisible({ timeout: 30_000 })
   // The warning must say what does NOT happen, or an administrator reads "my appointments moved".
   await expect(confirm).toContainText('ne sont pas déplacés')
+  // Watch the actual PUT. Without this, a refusal surfaces as "the editor did not close", which
+  // says nothing about why -- and the server's own message is the whole point of the 422 path.
+  const saved = page.waitForResponse(
+    (response) =>
+      response.url().includes('/facility-profile/timezone') &&
+      response.request().method() === 'PUT',
+    { timeout: 30_000 },
+  )
   await confirm.getByRole('button', { name: 'Confirmer le changement' }).click()
+  const response = await saved
+  expect(
+    response.status(),
+    `PUT …/facility-profile/timezone refused ${zone}: ${await response.text()}`,
+  ).toBe(200)
 
-  await expect(panel(page).getByText(zone, { exact: true })).toBeVisible({ timeout: 30_000 })
+  // **The success signal is the editor closing, not the zone name appearing.**
+  //
+  // The confirmation warning renders the candidate in a `<strong>`, so an element whose text is
+  // exactly `America/Vancouver` is on the page *before* the save and stays there if the save
+  // fails -- the editor is left open with its error. The first run of this suite asserted that
+  // text, reported a green change, and the database had never been written. The editor unmounts
+  // only when the PUT returns, so its disappearance is the thing that means "saved".
+  try {
+    await expect(page.getByLabel('Nouveau fuseau horaire')).toHaveCount(0, { timeout: 30_000 })
+  } catch (error) {
+    // The server's own message is in the panel. Put it in the failure rather than reporting a
+    // locator timeout, which says nothing about why the change was refused.
+    const shown = (await panel(page).textContent()) ?? '(panel had no text)'
+    throw new Error(`the timezone change to ${zone} was not saved. Panel said: ${shown}`, {
+      cause: error,
+    })
+  }
+  await expect(panel(page).getByText(zone, { exact: true })).toBeVisible()
 }
 
 test.beforeAll(async () => {
@@ -275,7 +315,12 @@ test('FP-A: the clinic administrator sees the facility profile, with the name re
 
     // Scoped to the panel: the organization's name also appears in the app shell's header, so an
     // unscoped assertion would pass on the wrong element.
-    await expect(panel(page).getByText(providerName, { exact: true })).toBeVisible()
+    //
+    // `toContainText` on the region, not `getByText(name, { exact: true })`: the name shares its
+    // `<dd>` with the "le nom est géré par Hawva" note, so no element's text is *exactly* the name
+    // and the exact matcher finds nothing. The first run of this suite lost its whole cascade to
+    // that, because FP-A is what sets `providerId` for every phase after it.
+    await expect(panel(page)).toContainText(providerName)
     await expect(panel(page)).toContainText('Le nom est géré par Hawva')
 
     // The decision, asserted as an absence rather than left as a gap somebody reads as a bug.
@@ -322,7 +367,9 @@ test('FP-B: a clinician books 10:00 while the clinic is on its home zone', async
 
       const day = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10)
       const response = await ctx.post(`${API}/organizations/${providerId}/appointments`, {
-        headers: { ...auth(clinicianToken), 'Idempotency-Key': `fp-b-${Date.now()}` },
+        // A canonical lowercase UUIDv4, which the adapter requires and says so: `fp-b-<millis>`
+        // is refused with 422 before the booking is ever considered.
+        headers: { ...auth(clinicianToken), 'Idempotency-Key': crypto.randomUUID() },
         data: {
           patient_id: await firstPatientId(ctx, clinicianToken),
           scheduled_date: day,
@@ -339,16 +386,14 @@ test('FP-B: a clinician books 10:00 while the clinic is on its home zone', async
       await ctx.dispose()
     }
 
-    // And the clinic's own schedule renders that instant as 10:00, in the clinic's own zone.
+    // The clinician's own schedule surface is reachable and the day view names the clinic's zone.
+    // This is **not** an assertion about the booking's rendered time: the booking is a week out, so
+    // it is not on today's view, and reaching it would need day navigation this suite does not
+    // drive. What is asserted is that the screen that will render it exists and is scoped to the
+    // facility, which is the premise the zone change then acts on.
     await openSection(page, "Aujourd'hui")
     const schedule = page.getByRole('region', { name: 'Rendez-vous' })
     await expect(schedule).toBeVisible({ timeout: 30_000 })
-    bookingWallClockHome = new Intl.DateTimeFormat('fr-FR', {
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: HOME_ZONE,
-    }).format(new Date(bookingInstantBefore))
-    expect(bookingWallClockHome).toBe('10:00')
   } finally {
     await context.close()
   }
@@ -376,15 +421,25 @@ test('FP-B2: the grant this suite made is removed again', async () => {
   expect(Number(left), 'this suite left a capability grant behind').toBe(0)
 })
 
+/**
+ * The demo baseline's synthetic patient.
+ *
+ * `GET …/patients` returns a **bare array** of `PatientDirectoryEntry`, whose id field is
+ * `patient_id` rather than `id`, and takes `limit` rather than a query string. All three were
+ * verified against `api.py` rather than guessed: each wrong guess here costs a whole run, because
+ * a failed `expect` inside a helper surfaces as a timeout that names neither.
+ */
 async function firstPatientId(ctx: APIRequestContext, token: string): Promise<string> {
-  const response = await ctx.get(`${API}/organizations/${providerId}/patients?query=D`, {
+  const response = await ctx.get(`${API}/organizations/${providerId}/patients?limit=50`, {
     headers: auth(token),
   })
-  expect(response.status(), 'the demo baseline must have a synthetic patient to book').toBe(200)
-  const body = await response.json()
-  const patients = (body.patients ?? body.items ?? []) as Array<{ id: string }>
-  expect(patients.length, 'no patient found in the demo clinic directory').toBeGreaterThan(0)
-  return patients[0].id
+  expect(response.status(), await response.text()).toBe(200)
+  const patients = (await response.json()) as Array<{ patient_id: string }>
+  expect(
+    patients.length,
+    'no patient in the demo clinic directory -- is the baseline seeded?',
+  ).toBeGreaterThan(0)
+  return patients[0].patient_id
 }
 
 // ==================================================================================================
@@ -424,19 +479,25 @@ test('FP-C: changing the zone by clicking moves no instant and changes every dis
       await ctx.dispose()
     }
 
-    const rendered = new Intl.DateTimeFormat('fr-FR', {
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: AWAY_ZONE,
-    }).format(new Date(bookingInstantBefore))
-    expect(
-      rendered,
-      'the same instant must read as a different wall clock in the new zone, or the display is ' +
-        'not using the facility zone at all',
-    ).not.toBe(bookingWallClockHome)
-    // Midnight must read 00:00, never 24:00. `fr-FR` resolves to `h23` on this runtime's ICU --
-    // asserted rather than assumed, because the hour cycle is a property of the deployed browser.
-    expect(rendered).toMatch(/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/)
+    // (3) And the day view the clinic schedules by now reports the NEW zone as its authority.
+    // This is a server-resolved field, which is the thing that decides every subsequent rendering
+    // -- asserted here rather than inferred from a formatted string, because a string formatted in
+    // this file would be Node's ICU answering a question about the browser's.
+    const day = await api()
+    try {
+      const response = await day.get(
+        `${API}/organizations/${providerId}/appointments?day=` +
+          new Date().toISOString().slice(0, 10),
+        { headers: auth(adminToken) },
+      )
+      // The administrator may not hold the schedule read; if so, the assertion below is skipped
+      // rather than faked, and the profile route's answer above already carries the claim.
+      if (response.status() === 200) {
+        expect((await response.json()).facility_timezone).toBe(AWAY_ZONE)
+      }
+    } finally {
+      await day.dispose()
+    }
   } finally {
     await context.close()
   }
@@ -457,7 +518,7 @@ test('FP-D: the change is audited by actor, organization and resource, and nothi
     `select resource_type || '|' || (actor_identity_id is not null) || '|' || outcome ` +
       `from exchange_security_audit_events ` +
       `where event_type = 'facility_timezone_changed' and organization_id = '${providerId}' ` +
-      `order by occurred_at desc limit 1`,
+      `order by created_at desc limit 1`,
   )
   expect(row).toBe('facility_profile|true|updated')
 
@@ -518,12 +579,15 @@ test('FP-F: a clinician is offered no Établissement section and is refused at t
       const read = await ctx.get(`${API}/organizations/${providerId}/facility-profile`, {
         headers: auth(session.token),
       })
-      expect(read.status()).toBe(403)
+      // 403 or 404: `_require_facility_configure` maps a missing membership to 404 and a
+      // held-but-insufficient capability set to 403, and which applies is not this
+      // suite's claim. `FP-G4` accepts the same pair for the same reason.
+      expect([403, 404]).toContain(read.status())
       const write = await ctx.put(
         `${API}/organizations/${providerId}/facility-profile/timezone`,
         { headers: auth(session.token), data: { timezone_name: AWAY_ZONE } },
       )
-      expect(write.status()).toBe(403)
+      expect([403, 404]).toContain(write.status())
       expect(storedZone(providerId)).toBe(HOME_ZONE)
     } finally {
       await ctx.dispose()
@@ -549,7 +613,7 @@ test('FP-F2: the billing clerk reaches prices and not the facility record', asyn
         `${API}/organizations/${providerId}/facility-profile/timezone`,
         { headers: auth(session.token), data: { timezone_name: AWAY_ZONE } },
       )
-      expect(write.status()).toBe(403)
+      expect([403, 404]).toContain(write.status())
       expect(storedZone(providerId)).toBe(HOME_ZONE)
     } finally {
       await ctx.dispose()

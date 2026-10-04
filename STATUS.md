@@ -46,10 +46,21 @@ British Columbia abolishing it.
 price list is a billing subject and a facility's own wall clock is not. The organization's name is
 shown and **read-only by decision**: no governed rename semantics exist (ADR-074 Human Decision 1).
 
-**Not browser-qualified.** The real-browser suite is written, typechecked and linted; it has not
-run, because the demo stack on the development machine carries pre-ticket images. The full adapter
-suite has not run locally either. ADR-074 §15 and `PROJECT_STATE.md` name both gaps and how to
-close them. **Written is not demonstrated.**
+**Browser-qualified, 11 of 11 phases** — and the browser found a defect no unit test in this
+repository could see. `ExchangeClient.setFacilityTimezone` sent its body without a `Content-Type`,
+so `fetch` supplied `text/plain`, FastAPI parsed the body as a JSON *string* rather than an object,
+and **every timezone change was refused 422 while the whole unit suite stayed green**: the screen's
+tests mock the client, the client's tests had no case for it, and the adapter's 63 tests call the
+route directly with a correct body. One line, plus two client tests and `NC-FP-16` to keep it fixed.
+
+**All thirteen sibling browser suites re-run green — 171 phases, 182 with this ticket's 11.** Every
+one was re-run rather than only the appointment suite: the conversion path inside the booking
+transaction changed, `config.py`'s boot check changed, and `demo_seed` gained a step that runs before
+any appointment is seeded.
+
+**Still not claimed:** the full adapter suite has not run locally, and the browser suite makes no
+DOM assertion about an existing booking's *rendered* wall clock (ADR-074 §15 says why, and what
+would close it). **Nobody who administers a clinic has used the screen.**
 
 ---
 

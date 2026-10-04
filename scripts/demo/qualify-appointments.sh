@@ -125,16 +125,24 @@ if ! ${SEC_DOCKER:-docker} exec -i "$ADAPTER_CONTAINER" \
 fi
 echo "Running adapter carries the appointment repository."
 
-# A migration landed in this ticket, so the running database must actually be at its head. A stale
-# container would otherwise serve 500s from a missing table and look like a product defect.
+# A migration landed in this ticket, so the running database must actually be at the current head.
+# A stale container would otherwise serve 500s from a missing table and look like a product defect.
+#
+# **This literal needs bumping with every migration**, and 2026-10-04 was the first time
+# (0040 -> 0041, DHEALTH-FACILITY-PROFILE-001): the script refused to start against a correct
+# database because it was pinned to the previous head. A looser check -- "does
+# `exchange_appointments` exist?" -- was deliberately NOT substituted: it would survive future
+# migrations, and would also stop catching the case this guard exists for, an adapter that booted
+# without applying the newest migration. A one-line bump per migration is the cost of keeping it.
 DB_CONTAINER="${SEC_DB_CONTAINER:-dhealth-native-demo-dhealth-db-1}"
+EXPECTED_DB_HEAD="0041_facility_profiles"
 head_in_db="$(${SEC_DOCKER:-docker} exec -i "$DB_CONTAINER"   psql -U "${ADAPTER_DB_USER:-adapter}" -d "${ADAPTER_DB_NAME:-dhealth_native_demo}"   -tAc 'select version_num from alembic_version' 2>/dev/null | tr -d '[:space:]')"
-if [ "$head_in_db" != "0040_clinic_appointments" ]; then
-  echo "The running database is at '${head_in_db}', not 0040_clinic_appointments." >&2
-  echo "Run scripts/demo/up.sh so the adapter applies this ticket's migration." >&2
+if [ "$head_in_db" != "$EXPECTED_DB_HEAD" ]; then
+  echo "The running database is at '${head_in_db}', not ${EXPECTED_DB_HEAD}." >&2
+  echo "Run scripts/demo/up.sh so the adapter applies every migration." >&2
   exit 1
 fi
-echo "Running database is at 0040_clinic_appointments."
+echo "Running database is at ${EXPECTED_DB_HEAD}."
 echo
 echo "Edge ready. Running the clinic-appointment qualification."
 

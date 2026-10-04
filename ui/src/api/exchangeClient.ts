@@ -2333,7 +2333,19 @@ export class ExchangeClient {
     const body: FacilityTimezoneUpdateRequest = { timezone_name: timezoneName }
     return this.request<FacilityProfile>(
       `/organizations/${encodeURIComponent(organizationId)}/facility-profile/timezone`,
-      { method: 'PUT', body: JSON.stringify(body), signal: options.signal },
+      {
+        method: 'PUT',
+        // `Content-Type` is **not** optional, and omitting it is not a style slip.
+        // `buildHeaders` sets only `Accept`, so without this line `fetch` sends
+        // `text/plain;charset=UTF-8` and FastAPI parses the body as a plain JSON *string* rather
+        // than an object: `{"detail":[{"type":"model_attributes_type", ... "input":
+        // "{\"timezone_name\":\"America/Vancouver\"}"}]}`. Every change was refused with 422 while
+        // the unit tests stayed green, because they mock this method. Found by the real-browser
+        // qualification, which is the only place this class of defect is visible.
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
       options.token,
     )
   }
