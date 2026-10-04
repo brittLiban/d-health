@@ -24673,11 +24673,40 @@ provisioning renders every hard-required variable; all 19 static steps pass; the
 composition parses and boots; the whole native-demo sequence including reset safety; the adapter,
 provisioning, lint, format and migration-qualification steps; the backup image builds and works.
 
-**Still requires remote Actions to claim:** that the *workflow as GitHub executes it* is green —
-runner-provided `python`, the `services: postgres` container, `actions/setup-python` caching, the
-Maven/Java jobs (`openmrs-narrow-order`, `openelis-order-correlation-build`,
-`oauth2login-provider-tests`, `clinical-config`), and the `.env`-absent assertion that can only be
-true in a fresh checkout. **CI is not claimed repaired on local evidence alone.**
+**Required remote Actions to claim, and now observed.** Local qualification could not settle whether
+the *workflow as GitHub executes it* is green — runner-provided `python`, the `services: postgres`
+container, `actions/setup-python` caching, the Maven/Java jobs, and the `.env`-absent assertion that
+can only be true in a fresh checkout.
+
+### ✅ Remote acceptance met — run `37170009536`, `00de1de`, all ten jobs green
+
+Pushed `58b4b3c..00de1de` and the CI workflow completed **`conclusion=success`** with **zero failed
+steps in any job**:
+
+| Job | Result |
+|---|---|
+| `adapter — ruff + pytest` | success — the first time this job has finished since `EXPECTED_HEAD` went stale, so its four real-PostgreSQL steps ran remotely too |
+| `provisioning — ruff + pytest` | success |
+| `ui — lint, typecheck, test, build` | success |
+| `static checks` | success — all twenty steps, sixteen of which had been skipped behind the image-pin failure |
+| `compose interpolates and parses` | success — including the base+overlay parse and the final `.env`-absent assertion, which only a fresh checkout can genuinely run |
+| `native demo — real boot (DH-DEMO-001)` | success — boot, smoke tests, the 2/7 seed assertion, reset repeatability and both reset-safety negative controls, all through the repaired two-file composition |
+| `OpenMRS narrow TestOrder module` | success |
+| `seed + form-safety suites` | success |
+| `oauth2login — patched identity tests` | success |
+| `openelis order-correlation patch — compiles` | success |
+
+The pinned **index** digest resolved and built on a GitHub runner, which is the check the first
+(platform-manifest) pin would have passed too — the arm64 failure mode it would have introduced is
+not one CI could have caught, which is why it was worth correcting on its own evidence rather than
+waiting for a red build.
+
+**This also closes DHEALTH-APPOINTMENTS-001's remaining UI gap, from a remote source.** That ticket
+could never observe a full UI suite pass locally — the harness reaped it three times. The `ui` job
+here is green on a commit that **contains** the `workspaceCapabilities.test.ts` fix, so the whole
+66-file suite has now passed remotely with that correction in place. The Appointment ticket's own
+record still stands as written: *its* local runs did not complete. **The sources remain distinct —
+remote CI observed it, this machine did not.**
 
 ### Deliberately not fixed here
 

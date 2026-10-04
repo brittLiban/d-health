@@ -35,10 +35,12 @@
 > the repository's existing pins are mixed between the two kinds, so "the convention used elsewhere"
 > was not a safe assumption either.
 >
-> **Not claimed:** that CI is green. Every job's steps were reproduced locally, but whether the
-> workflow passes as GitHub executes it needs a run on GitHub — runner-provided `python`, the
-> `services: postgres` container, the Maven/Java jobs, and an assertion that only holds in a fresh
-> checkout.
+> **Now green, remotely.** Run `37170009536` on `00de1de` finished `conclusion=success` — **all ten
+> jobs, zero failed steps**, including the `native demo — real boot` job driving reset safety through
+> the repaired two-file composition, and the `static checks` job running all twenty of its steps.
+> Local qualification had reproduced every job's steps, but only a GitHub-hosted run could settle
+> runner-provided `python`, the `services: postgres` container, the Maven/Java jobs and an assertion
+> that only holds in a fresh checkout.
 
 
 > **Clinic appointments and the arrival handoff, 2026-10-03 (DHEALTH-APPOINTMENTS-001, ADR-073):** a

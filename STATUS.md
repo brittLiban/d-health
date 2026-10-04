@@ -97,9 +97,19 @@ files are unobserved against this code. Neither gap is a failure; both are unobs
 > across all 93 top-level test files**. The Appointment ticket's own record stands as written: *its*
 > local runs did not complete. **The UI whole-suite pass is still observed remotely only.**
 >
-> **CI is not claimed repaired on local evidence alone.** Every job's steps were reproduced locally,
-> including the 16 static steps and 4 PostgreSQL steps that had been skipped behind the first
-> failures, but whether the workflow is green as GitHub executes it requires a run on GitHub.
+> **CI is now green remotely, which is the claim that counts.** Run `37170009536` on `00de1de`
+> completed `conclusion=success` with **all ten jobs green and zero failed steps in any job** —
+> adapter, provisioning, UI, static, compose, native demo real boot, OpenMRS, seed/form-safety,
+> oauth2login and OpenELIS. Local qualification had reproduced every job's steps, including the 16
+> static steps and 4 real-PostgreSQL steps that had been skipped behind the first failures, but only
+> a GitHub-hosted run could settle runner-provided `python`, the `services: postgres` container, the
+> Maven/Java jobs and the fresh-checkout `.env` assertion.
+>
+> **A side effect worth naming:** the green `ui` job is on a commit containing the
+> `workspaceCapabilities.test.ts` fix, so the whole 66-file UI suite has now passed **remotely** with
+> that correction — the gap DHEALTH-APPOINTMENTS-001 could not close locally after the harness reaped
+> its runs three times. That ticket's own record stands: its local runs did not complete. The
+> evidence sources stay distinct.
 
 **The UI production build did run**, as the thing it already is: `ui/Dockerfile:15` is
 `RUN npm run build` and `up.sh` builds with `--build`, so the rebuild after the CSS fix compiled it.
