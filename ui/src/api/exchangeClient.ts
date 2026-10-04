@@ -87,6 +87,8 @@ import type {
   AppointmentCreateRequest,
   AppointmentDay,
   AppointmentRescheduleRequest,
+  FacilityProfile,
+  FacilityTimezoneUpdateRequest,
   ReleasedReport,
   ReleaseQueue,
   ResultEntryPlan,
@@ -2299,6 +2301,43 @@ export class ExchangeClient {
    * browser in another zone asking the same question gets the same list. Computing `new Date()`
    * here and sending its date would hand that decision to the viewer's machine.
    */
+  /**
+   * DHEALTH-FACILITY-PROFILE-001: this facility's own operational settings.
+   *
+   * A **configuration** read, not a directory read — `facility.configure` guards it, and an
+   * unrelated organization is told the organization does not exist rather than that it is not
+   * theirs.
+   */
+  async getFacilityProfile(
+    organizationId: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityProfile> {
+    return this.request<FacilityProfile>(
+      `/organizations/${encodeURIComponent(organizationId)}/facility-profile`,
+      { method: 'GET', signal: options.signal },
+      options.token,
+    )
+  }
+
+  /**
+   * Change the timezone Hawva interprets this facility's local wall clocks in.
+   *
+   * The value is a **candidate**: the server validates it against its own tz database. No existing
+   * appointment instant moves — only future conversions and present display change.
+   */
+  async setFacilityTimezone(
+    organizationId: string,
+    timezoneName: string,
+    options: { token?: string; signal?: AbortSignal } = {},
+  ): Promise<FacilityProfile> {
+    const body: FacilityTimezoneUpdateRequest = { timezone_name: timezoneName }
+    return this.request<FacilityProfile>(
+      `/organizations/${encodeURIComponent(organizationId)}/facility-profile/timezone`,
+      { method: 'PUT', body: JSON.stringify(body), signal: options.signal },
+      options.token,
+    )
+  }
+
   async listAppointments(
     providerId: string,
     options: { day?: string; token?: string; signal?: AbortSignal } = {},

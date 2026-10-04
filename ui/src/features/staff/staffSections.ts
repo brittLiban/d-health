@@ -44,6 +44,7 @@ export type StaffSectionId =
   | 'team'
   | 'billing'
   | 'prices'
+  | 'facility'
 
 export interface StaffSection {
   id: StaffSectionId
@@ -85,6 +86,18 @@ const SECTION_LABELS: Record<StaffSectionId, string> = {
   // `Équipe et accès` (which administers people) and `Facturation` (which is the till). It is
   // configuration, and it belongs with configuration even before a full `Paramètres` exists.
   prices: 'Services et tarifs',
+  // DHEALTH-FACILITY-PROFILE-001/ADR-074. A new section, and ADR-071's own reasoning is why this
+  // is not the two-doors-into-one-room problem it refused elsewhere: `Services et tarifs` is the
+  // configuration surface for *what a facility offers and what it charges*, and the facility's own
+  // record is a different subject. `facility.configure`'s French description has named all three of
+  // its subjects since before either ticket existed — "Gérer le catalogue, les modèles de résultats
+  // et la fiche de l'établissement" — and this is the third clause, which had no screen anywhere.
+  // `docs/NATIVE-OPERATING-PRODUCT.md` §30 recorded the facility profile as exactly the remaining
+  // content a settings section would hold.
+  //
+  // Putting a timezone under a heading reading "Services and prices" would be the mislabelling that
+  // costs a receptionist more than one extra navigation entry does.
+  facility: 'Établissement',
 }
 
 export function sectionLabel(id: StaffSectionId): string {
@@ -192,6 +205,15 @@ export function availableSections(
     can(capabilities, Capability.FACILITY_CONFIGURE)
   ) {
     ids.push('prices')
+  }
+
+  // DHEALTH-FACILITY-PROFILE-001: `facility.configure` **alone**, deliberately not the
+  // `facility.configure || billing.configure_prices` disjunction `prices` above uses. Somebody who
+  // may set a price has no business in the facility's own record, and reaching a section is not
+  // authority over everything in it — the distinction `Facturation` already draws between its till
+  // and price halves.
+  if (can(capabilities, Capability.FACILITY_CONFIGURE)) {
+    ids.push('facility')
   }
 
   return ids.map((id) => ({ id, label: SECTION_LABELS[id] }))

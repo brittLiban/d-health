@@ -4,6 +4,7 @@ import type { ExchangeApiError } from '../../api/exchangeClient'
 import type { ErrorCode } from '../../api/types'
 import type { LabOrder, PatientCreateRequest } from '../../api/exchangeTypes'
 import { ClinicProvider } from '../clinic/ClinicContext'
+import { FacilitySettingsPage } from '../facility/FacilitySettingsPage'
 import { ClinicHomePage } from '../clinic/pages/ClinicHomePage'
 import { ClinicOrdersPage } from '../clinic/pages/ClinicOrdersPage'
 import { ClinicPatientsPage } from '../clinic/pages/ClinicPatientsPage'
@@ -342,6 +343,27 @@ export function StaffWorkspace({
   // deliberately: those load clinical context a cashier must not pull in, and wrapping the till in
   // either would fetch patients, orders and results in order to take a payment. A clerk holds no
   // clinical authority, so those fetches would also simply be refused.
+  // DHEALTH-FACILITY-PROFILE-001: outside `ClinicProvider`/`LabProvider` for the same reason
+  // `Facturation` is. Configuring the facility's own record needs no clinical context, and
+  // wrapping it in either provider would fetch patients, orders and results in order to show a
+  // timezone — fetches a `facility.configure` holder with no clinical authority would be refused
+  // anyway. It is also before the provider/laboratory branch because the facility's record is the
+  // same subject at both kinds of facility.
+  if (activeSection === 'facility') {
+    return (
+      <StaffShell
+        sections={sections}
+        activeSection={activeSection}
+        onSelectSection={(section) => setRequestedSection(section as StaffSectionId)}
+        onLogout={handleLogout}
+      >
+        <div key={activeOrganization.organization_id}>
+          <FacilitySettingsPage />
+        </div>
+      </StaffShell>
+    )
+  }
+
   if (activeSection === 'billing' || activeSection === 'prices') {
     return (
       <StaffShell

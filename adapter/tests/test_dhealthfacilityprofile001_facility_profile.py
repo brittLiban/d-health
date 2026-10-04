@@ -44,6 +44,7 @@ from daher_adapter.exchange.appointments import (
     is_nonexistent_local_time,
 )
 from daher_adapter.exchange.audit import ExchangeAuditWriter
+from daher_adapter.exchange.authorization import AuthenticatedPrincipal
 from daher_adapter.exchange.facility_profile import (
     FacilityProfileRepository,
     InvalidFacilityTimezone,
@@ -981,3 +982,112 @@ def test_fp_j5_the_organization_name_is_read_only_here(client, keypair, organiza
     assert response.status_code == 422, response.text
     after = _get_profile(client, facility.provider_id, facility.admin).json()["organization_name"]
     assert after == before
+
+
+def test_fp_j6_no_request_body_anywhere_carries_a_timezone(
+    client, keypair, organizations, patients
+):
+    """**A client-supplied timezone is never trusted for conversion.**
+
+    Added because `NC-FP-2` -- "the booking request trusts a zone from the body" -- had nothing to
+    redden. Every other claim in this ticket had a guard; this one was asserted only in prose, in
+    `api.py`'s own docstring, which is the shape of claim that quietly stops being true.
+
+    Two halves, because either alone is insufficient: the model must not *declare* a timezone
+    field, and `extra="forbid"` must mean a submitted one is refused rather than ignored. A model
+    that silently dropped the field would pass the first half while letting a future reader believe
+    the zone was honoured.
+    """
+    from daher_adapter.exchange.api import (
+        AppointmentCreateRequest,
+        AppointmentRescheduleRequest,
+    )
+
+    for model in (AppointmentCreateRequest, AppointmentRescheduleRequest):
+        fields = set(model.model_fields)
+        for forbidden in ("timezone", "timezone_name", "tz", "utc_offset", "scheduled_at"):
+            assert forbidden not in fields, (model.__name__, forbidden)
+        assert model.model_config.get("extra") == "forbid", model.__name__
+
+    private_key, _ = keypair
+    facility = _facility(client, private_key, organizations, patients, "J6")
+
+    # And at the edge: a booking that submits a zone is refused outright, not silently converted
+    # under the facility's. 10:00 "in America/Vancouver" must not become 18:00Z.
+    response = client.post(
+        f"/exchange/v1/organizations/{facility.provider_id}/appointments",
+        headers={**_auth(facility.scheduler), "Idempotency-Key": "fp-j6-zone"},
+        json={
+            "patient_id": facility.patient_id,
+            "scheduled_date": "2026-06-15",
+            "scheduled_time": "10:00:00",
+            "timezone_name": VANCOUVER,
+        },
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_fp_j7_an_organization_created_through_the_route_gets_a_profile(client, keypair):
+    """**Added because `NC-FP-9` had nothing to redden.**
+
+    Every other test in this suite builds its facility through `exchange_support.make_provider`,
+    which writes the profile itself. That is right for a fixture and wrong as coverage: removing
+    `facility_profiles.ensure(...)` from `POST /organizations` left all sixty tests green, because
+    not one of them creates an organization the way the product does.
+
+    So this one does, over HTTP, and then asks the profile route for it. The assertion is the
+    guarantee ADR-074 §10 states -- a facility has a timezone authority from the moment it exists,
+    never after a separate configuration step.
+    """
+    private_key, _ = keypair
+    platform = make_token(private_key, subject="j7-platform", roles=[PLATFORM_ADMIN_ROLE])
+
+    created = client.post(
+        "/exchange/v1/organizations",
+        headers=_auth(platform),
+        json={"name": "Clinique J7", "organization_type": "PROVIDER"},
+    )
+    assert created.status_code == 201, created.text
+    organization_id = created.json()["id"]
+
+    profile = _get_profile(client, organization_id, platform)
+    assert profile.status_code == 200, profile.text
+    assert profile.json()["timezone_name"] == DEPLOYMENT_TIMEZONE
+    assert profile.json()["organization_id"] == organization_id
+
+
+def test_fp_j8_ensure_never_overwrites_a_configured_timezone(profiles, organizations):
+    """**Added because `NC-FP-10` had nothing to redden.**
+
+    `ensure` is insert-first-wins by design: it runs on every organization creation and every demo
+    seed, and a replay of either must not be a decision to discard a zone somebody set. Turning it
+    into an overwrite left the whole suite green, which means the convention was documented in a
+    docstring and nowhere else.
+
+    `demo_seed` deliberately *does* overwrite, through its own function, so that `reset.sh` can
+    undo a browser suite's change (ADR-074 §10). That is a separate code path and this assertion
+    does not constrain it.
+    """
+    provider = make_provider(organizations, name="Clinique J8")
+
+    assert profiles.timezone_for(provider.id) == DEPLOYMENT_TIMEZONE
+    profiles.ensure(provider.id, VANCOUVER)
+    # Still the first value: the row existed, so the second call is a no-op, not an update.
+    assert profiles.timezone_for(provider.id) == DEPLOYMENT_TIMEZONE
+
+    # And the other direction, which is the one that actually loses data: a configured zone
+    # survives a re-run of the path that seeds the deployment default. The `profiles` fixture is
+    # built without an audit writer, so this records nothing -- FP-I covers the audit row.
+    record = profiles.set_timezone(
+        principal=AuthenticatedPrincipal(
+            identity_id=uuid.uuid4(),
+            subject="j8-actor",
+            issuer="https://dhfp.tests.invalid",
+            platform_admin=False,
+        ),
+        organization_id=provider.id,
+        timezone_name=VANCOUVER,
+    )
+    assert record.timezone_name == VANCOUVER
+    profiles.ensure(provider.id, DEPLOYMENT_TIMEZONE)
+    assert profiles.timezone_for(provider.id) == VANCOUVER

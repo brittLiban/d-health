@@ -1906,6 +1906,31 @@ export interface AppointmentDay {
   appointments: Appointment[]
 }
 
+/**
+ * DHEALTH-FACILITY-PROFILE-001/ADR-074 — a facility's own operational settings.
+ *
+ * Three fields, deliberately. This is not a facility master-data record: no address, no phone, no
+ * licence, no logo. `organization_name` is **read-only** here — it is network participant identity
+ * and whether a facility may rename itself is an open question (ADR-074 Human Decision 1).
+ */
+export interface FacilityProfile {
+  organization_id: string
+  organization_name: string
+  timezone_name: string
+  updated_at: string
+}
+
+/**
+ * An IANA timezone identifier, and nothing else.
+ *
+ * The browser may offer a picker, but what it sends is a **candidate**: the server validates
+ * against its own tz database and refuses an offset like `+03:00`, which carries no
+ * daylight-saving rule.
+ */
+export interface FacilityTimezoneUpdateRequest {
+  timezone_name: string
+}
+
 /** A clinic-local calendar date and wall clock — never an instant. The server combines them. */
 export interface AppointmentCreateRequest {
   patient_id: string

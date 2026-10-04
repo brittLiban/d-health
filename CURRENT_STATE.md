@@ -1,5 +1,38 @@
 # Current State — Daher Health
 
+> **Per-facility timezones, 2026-10-04 (DHEALTH-FACILITY-PROFILE-001, ADR-074) — written and
+> tested, not browser-qualified.** `config.py` had refused to boot unless `TZ == Africa/Djibouti`,
+> and every appointment in a deployment was converted through that one literal. For a product that
+> calls itself an interoperable diagnostic network that is a defect waiting for its second facility:
+> a receptionist types `10:00` and the instant stored is 10:00 *somewhere else*, it never errors,
+> and the data on disk is indistinguishable from correct data.
+>
+> **What actually works now:** `exchange_facility_profiles` gives every organization its own IANA
+> timezone (migration `0041`); the booking path converts inside its transaction under a `FOR SHARE`
+> read of that row; ambiguous and nonexistent local times are refused with 422 instead of being
+> silently resolved; and an administrator changes the zone from an `Établissement` screen gated on
+> `facility.configure`. **No stored instant is ever rewritten** — a zone change changes future
+> interpretation and present display, nothing else.
+>
+> **What is written but not demonstrated:** the real-browser suite
+> (`ui/e2e/native/18-facility-profile.spec.ts`, its config, and
+> `scripts/demo/qualify-facility-profile.sh`) is typechecked and linted and **has not run**. The
+> demo stack on the development machine carries pre-ticket images — its database is at `0040`, its
+> adapter has no `FacilityProfileRepository`, its bundle has no `Établissement` section. Nobody who
+> administers a clinic has used the screen. The full adapter suite has not run locally either.
+>
+> **What the negative controls found, which is the part worth reading:** of fifteen, **three found
+> holes rather than confirming guards** — nothing asserted that a request body carries no timezone,
+> nothing created an organization the way the product does (every test used a fixture that wrote the
+> profile itself), and nothing asserted that `ensure` does not overwrite. All three now have tests.
+> A fourth and fifth exposed a **lock test that was a tautology**: `PG-FP-2` read the zone, waited,
+> then converted using the variable it had already read, so its assertions held with every lock
+> removed. It now observes commit order and re-read stability instead. Two controls stay green on
+> purpose and say why (ADR-074 §15).
+>
+> **Say "built and tested", never "qualified".** The distinction this file exists for applies
+> exactly here.
+
 > **CI repaired at a correct repository state, 2026-10-04 (DHEALTH-CI-REPAIR-001):** GitHub Actions
 > was red while the product was right. Five failures: `EXPECTED_HEAD` fourteen migrations behind the
 > real head; facility provisioning never rendering `DHEALTH_PATIENT_PUBLIC_BASE_URL`, which the

@@ -6,6 +6,53 @@ other document disagree, see §J (Documentation precedence) before assuming eith
 
 ## A. As-of
 
+**2026-10-04, DHEALTH-FACILITY-PROFILE-001, directly on `master` — not pushed.** **Each facility in
+a deployment now owns its own authoritative IANA timezone, and the deployment timezone no longer
+decides any schedule.** Alembic head moves to **`0041_facility_profiles`**, exactly one head, and
+CI's `EXPECTED_HEAD` moves with it. **ADR-074.**
+
+**`config.py` stopped asserting a coherence it should never have wanted.** It had refused to boot
+unless `TZ == Africa/Djibouti`; it now refuses unless `TZ` is an IANA identifier it recognises. The
+server's own zone and a facility's zone are different facts, and `DEPLOYMENT_TIMEZONE` is now only
+the former plus a new facility's starting value — it converts nothing.
+
+**`exchange_facility_profiles` is a fourth facility-shaped table, deliberately.** `Organization` is
+platform identity, `FacilityEnrollment` is an onboarding state machine, `LabDirectoryProfile` is
+marketplace visibility keyed on a *laboratory*. A clinic needing a laboratory directory listing in
+order to schedule would have been the alternative. One row per organization, one column in it, and
+`FP-A2`/`FP-J1` assert it stays that way — no address, no phone, no licence, no logo.
+
+**Nothing rewrites a stored instant.** `Appointment.scheduled_at` is what staff agreed with the
+patient under the authority in effect then. A zone change changes how *future* wall clocks are
+interpreted and how stored instants *display*; `PG-FP-5` and `NC-FP-7` hold that line from both
+sides. The confirmation copy says so in as many words, because "it displays differently" and
+"nothing moved" are both true and a reader who checks only one believes the opposite of the other.
+
+**The conversion happens inside the booking transaction, under a `FOR SHARE` read of the facility's
+profile.** A receptionist submitting *10:00* while an administrator changes the zone either completes
+under the old zone or waits and completes under the new one; the torn outcome — validated under one,
+stored under another — cannot occur. `PG-FP-2` observes commit order and re-read stability to prove
+it, after the first version of that test turned out to be a tautology that two negative controls
+walked straight through.
+
+**DST is a stated policy now, not a library default.** An ambiguous or nonexistent local time is
+**refused** with 422 rather than silently resolved to `fold=0`. ADR-073 §8 had to record *"DST
+handling is untested rather than proven"*; `PG-FP-9b` proves it against `America/New_York`'s real
+2025 transitions. `America/Vancouver` is deliberately not the DST fixture — tzdata 2026c records
+British Columbia abolishing it.
+
+**`Établissement` is a new section, gated on `facility.configure` alone** — not the
+`facility.configure || billing.configure_prices` disjunction `Services et tarifs` uses, because a
+price list is a billing subject and a facility's own wall clock is not. The organization's name is
+shown and **read-only by decision**: no governed rename semantics exist (ADR-074 Human Decision 1).
+
+**Not browser-qualified.** The real-browser suite is written, typechecked and linted; it has not
+run, because the demo stack on the development machine carries pre-ticket images. The full adapter
+suite has not run locally either. ADR-074 §15 and `PROJECT_STATE.md` name both gaps and how to
+close them. **Written is not demonstrated.**
+
+---
+
 **2026-10-03, DHEALTH-APPOINTMENTS-001, directly on `master`.** From `cf4111d`. **A Hawva clinic can
 now say that a named patient is expected here at a date and time, move it, cancel it, and turn an
 arrival into the existing clinic Visit — and a walk-in still needs no appointment at all.** Alembic

@@ -28,6 +28,7 @@ import os
 import uuid
 from datetime import UTC, date, datetime, time
 from threading import Barrier, Thread
+from time import monotonic, sleep
 
 import pytest
 from exchange_auth_support import generate_keypair, make_token  # noqa: F401 -- parity with siblings
@@ -220,12 +221,31 @@ def test_pg_fp_2_a_booking_in_flight_serializes_against_a_timezone_change(sessio
     The booking's transaction takes `FOR SHARE` on the profile row before converting, and the
     settings update takes `FOR UPDATE`. Here the booking's lock is taken and **held** while the
     update contends, so the update waits and the booking is validated and stored under one zone --
-    the old one. What must never happen is a booking validated under one zone and stored under
-    another, and this asserts the stored instant matches the zone the booking actually read.
+    the old one.
+
+    **Rewritten after NC-FP-11 and NC-FP-12 both stayed green.** The first version read the zone,
+    waited at the barrier, and then converted in Python using the variable it had already read --
+    so its assertions held whether or not any lock existed, because a transaction's own local
+    variable is trivially consistent with itself. It looked like a serialization proof and was a
+    tautology. Two things are observed instead, and each one flips when either lock is removed:
+
+    1. **Commit order.** The updater's `FOR UPDATE` conflicts with the held `FOR SHARE`, so the
+       update cannot commit until the booking's transaction ends. With either lock gone, the
+       updater commits during the booking's deliberate pause and the order inverts.
+    2. **Re-read stability.** The same transaction reads the zone a second time, after the
+       updater has had ample time to commit, and must get the same answer. `expire_all()` is
+       required before that second read or SQLAlchemy's identity map answers from memory and the
+       assertion would pass without ever reaching PostgreSQL -- which is precisely how a lock test
+       passes while proving nothing.
+
+    The proof stays an observable outcome: nothing here reads `pg_locks`.
     """
     fx = _seed(sessions, _prefix("fp2"), DJIBOUTI)
     outcome: dict[str, object] = {}
     gate = Barrier(2, timeout=30)
+    # Long enough that an unlocked updater certainly commits inside it, short enough to keep the
+    # suite quick. The assertions are about order, not about this number.
+    hold = 3.0
 
     def booking() -> None:
         # The repository's own transaction, so this is the real locking path rather than a mock.
@@ -233,10 +253,20 @@ def test_pg_fp_2_a_booking_in_flight_serializes_against_a_timezone_change(sessio
             zone = fx.profiles.timezone_for_conversion_in_session(session, fx.provider.id)
             outcome["zone_read_by_booking"] = zone
             gate.wait()  # the updater may now try to take FOR UPDATE and will block
+            sleep(hold)
+
+            # Second read, same transaction. Without the identity map cleared this would answer
+            # from memory and prove nothing about the database.
+            session.expire_all()
+            outcome["zone_reread_by_booking"] = fx.profiles.timezone_for_conversion_in_session(
+                session, fx.provider.id
+            )
+
             from daher_adapter.exchange.appointments import instant_from_local
 
             outcome["instant"] = instant_from_local(date(2026, 6, 15), time(10, 0), zone)
             # Commit happens on exiting this block, releasing the share lock.
+        outcome["booking_committed_at"] = monotonic()
 
     def updater() -> None:
         gate.wait()
@@ -245,7 +275,7 @@ def test_pg_fp_2_a_booking_in_flight_serializes_against_a_timezone_change(sessio
             organization_id=fx.provider.id,
             timezone_name=VANCOUVER,
         )
-        outcome["update_committed"] = True
+        outcome["update_committed_at"] = monotonic()
 
     threads = [Thread(target=booking), Thread(target=updater)]
     for thread in threads:
@@ -257,7 +287,21 @@ def test_pg_fp_2_a_booking_in_flight_serializes_against_a_timezone_change(sessio
     # The booking read Djibouti and its instant is Djibouti's 10:00. Coherent, not torn.
     assert outcome["zone_read_by_booking"] == DJIBOUTI
     assert outcome["instant"] == datetime(2026, 6, 15, 7, 0, tzinfo=UTC)
-    assert outcome.get("update_committed") is True
+
+    # (1) The zone did not change under the booking's feet mid-transaction.
+    assert outcome["zone_reread_by_booking"] == DJIBOUTI, (
+        "the facility timezone changed inside a transaction that had already read it -- "
+        "the FOR SHARE lock is not holding"
+    )
+
+    # (2) The update waited for the booking rather than slipping in beside it.
+    booking_at = outcome["booking_committed_at"]
+    update_at = outcome["update_committed_at"]
+    assert isinstance(booking_at, float) and isinstance(update_at, float)
+    assert booking_at < update_at, (
+        f"the timezone change committed {booking_at - update_at:.2f}s BEFORE the booking that was "
+        f"already holding the profile row -- the locks are not serializing the two"
+    )
 
     # And the change did land -- the booking delayed it, it did not lose it.
     assert fx.profiles.timezone_for(fx.provider.id) == VANCOUVER

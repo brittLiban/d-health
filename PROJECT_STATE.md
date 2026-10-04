@@ -4,9 +4,9 @@
 > **`docs/MVP-1.0.md`** (2026-09-12, ticket DH-MVP-001) — an interoperable diagnostic network, not
 > primarily the maternity/birth-centre system the "Updated: 2026-08-21" header immediately below
 > describes. **The newest ticket entries are at the end of this file** (currently
-> DHEALTH-LAB-BLOCKED-001, 2026-09-29 — this parenthetical has now gone stale fourteen
+> DHEALTH-FACILITY-PROFILE-001, 2026-10-04 — this parenthetical has now gone stale fifteen
 > times, first reading "DH-MVP-001 and
-> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001", then "DHEALTH-RESULT-DELIVERY-001", then "DHEALTH-CLINIC-VISIT-001", then "DHEALTH-BILLING-001", then "DHEALTH-ACCESS-CAPABILITIES-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
+> DH-DOC-001", then "DH-PATIENT-001", then "DH-MVP-ONBOARD-001", then "DH-USABILITY-001", then "DHEALTH-NATIVE-DEPLOY-001", then "DHEALTH-NATIVE-RECOVERY-001", then "DHEALTH-STATE-001", then "DHEALTH-NATIVE-SEC-001", then "DHEALTH-NATIVE-ACCESS-001", then "DHEALTH-NATIVE-OPERATING-PRODUCT-001", then "DHEALTH-RESULT-DELIVERY-001", then "DHEALTH-CLINIC-VISIT-001", then "DHEALTH-BILLING-001", then "DHEALTH-ACCESS-CAPABILITIES-001", then "DHEALTH-LAB-BLOCKED-001"; always read the *last* entry rather than trusting this list) — that is where current handoff state
 > and the active backlog live, not the header
 > below or its old "Current phase"/BLOCKER-6 framing, both superseded by the Exchange pivot
 > (ADR-042, 2026-09-08) and everything after it. The header and "Current phase" section immediately
@@ -24716,3 +24716,147 @@ remote CI observed it, this machine did not.**
 | `native-report-results.json` tracked at the repository root | The ticket explicitly excluded it, and it did not block the repair |
 | Expanding the pin gate to cover `docker-compose.native.yml` | That is a policy widening, not a repair — it would be a separate decision |
 | The UI suite | No UI file changed; already green remotely at `58b4b3c` |
+
+---
+
+## DHEALTH-FACILITY-PROFILE-001 · Each facility's own authoritative timezone · ✅ BUILT, NOT BROWSER-QUALIFIED · 2026-10-04 · not pushed
+
+**ADR-074.** Migration **`0041_facility_profiles`**, one head. `EXPECTED_HEAD` bumped to match.
+
+**The defect closed.** `config.py` refused to boot unless `TZ == Africa/Djibouti`, and every
+appointment in the deployment was converted through that one literal. The moment two facilities in
+one deployment sit in different zones, a receptionist types `10:00` and the instant stored is 10:00
+*somewhere else* — a defect that never errors, surfaces months later as patients arriving at the
+wrong hour, and leaves data on disk indistinguishable from correct data. **This answers ADR-073's
+Human Decision 9: yes, an organization carries its own timezone.**
+
+### What was built
+
+| Piece | What it is |
+|---|---|
+| `exchange_facility_profiles` | one row per `Organization`: `timezone_name`, `UNIQUE(organization_id)`, one nonblank `CHECK` using portable `trim` (not PostgreSQL's `btrim` — the unit suite builds this schema on SQLite from the same metadata) |
+| `facility_profile.py` | `normalize_timezone_name` (`ZoneInfo` is the validator; offsets refused), `FacilityProfileRepository` with a locked and an unlocked read, insert-first-wins `ensure`, and an audited `set_timezone` |
+| `GET`/`PUT …/facility-profile[/timezone]` | both `facility.configure`, both `Cache-Control: no-store`, 404 for a foreign organization (anti-enumeration) |
+| `appointments.py` | conversion moved **inside** the transaction, after a `FOR SHARE` read of the facility's profile; `AmbiguousLocalTime`/`NonexistentLocalTime` refusals → 422 |
+| `config.py` | equality check → **validity** check; `DEPLOYMENT_TIMEZONE` narrowed to the server's own zone and a new facility's starting value, and consulted by no conversion |
+| `Établissement` | a new `StaffWorkspace` section, last in navigation order, gated on `facility.configure` **alone** |
+
+**No new capability.** `facility.configure`'s own French description has named *"la fiche de
+l'établissement"* since before this ticket and had no screen behind it.
+
+**Nothing rewrites `scheduled_at`.** A zone change changes how future wall clocks are interpreted
+and how stored instants display. It does not move a booking, and there is no way in the data to tell
+a zone *correction* from a *relocation*, so moving them would be a guess with clinical consequences.
+
+### Qualification — what ran, and what did not
+
+| Step | State |
+|---|---|
+| 63 HTTP-edge tests (`FP-A`…`FP-J`) | ✅ passed |
+| 11 real-PostgreSQL tests (`PG-FP-1`…`9b`) | ✅ passed, on a disposable container migrated to `0041`, **destroyed with its volume** |
+| 15 UI unit tests for the screen (incl. an axe scan with the picker open) | ✅ passed |
+| 35 navigation tests (6 new) | ✅ passed |
+| 15 negative controls | ✅ 13 reddened, 2 deliberately green, 0 unexpected, all reverted byte-for-byte |
+| Full UI unit suite | ✅ 67 of 67 files reconciled, 1088 tests — one pre-existing flake, below |
+| `tsc -b`, oxlint, `tsc -p e2e/tsconfig.json`, `alembic heads` | ✅ clean |
+| **Real-browser qualification** | ❌ **NOT RUN.** Suite written, typechecked and linted; the stack on this machine runs pre-ticket images |
+| **Full adapter suite** | ❌ not run locally |
+| **Sibling browser suites** | ❌ not re-run |
+
+### The three controls that found holes
+
+Each produced a test rather than an explanation:
+
+1. **`NC-FP-2`** had nothing to redden — that no request body carries a timezone was asserted in a
+   docstring and nowhere else. **`FP-J6`** now asserts it for both appointment request models, in
+   the model and at the edge.
+2. **`NC-FP-9`** removed `facility_profiles.ensure(...)` from `POST /organizations` and **all sixty
+   tests stayed green**, because every one builds its facility through a fixture that writes the
+   profile itself. Not one created an organization the way the product does. **`FP-J7`** now does,
+   over HTTP.
+3. **`NC-FP-10`** turned `ensure` into an overwrite and reddened nothing. **`FP-J8`** now asserts
+   insert-first-wins in both directions.
+
+### And one control rewrote a test that was proving nothing
+
+`NC-FP-11` *and* `NC-FP-12` both stayed green against `PG-FP-2`, the test that claimed to prove the
+booking-versus-timezone-change serialization. It did not prove it: the booking thread read the zone,
+waited on a barrier, then converted **in Python using the variable it had already read**. Its
+assertions held with every lock removed, because a transaction's own local variable is trivially
+consistent with itself. It looked like a serialization proof and was a tautology.
+
+`PG-FP-2` now observes **commit order** (the updater cannot commit until the booking's transaction
+ends) and **re-read stability** (the same transaction reads the zone twice and must get the same
+answer — with `expire_all()` first, or SQLAlchemy's identity map answers from memory and the
+assertion passes without reaching PostgreSQL, which is exactly how a lock test passes while proving
+nothing). `NC-FP-11` reddens through it.
+
+### Two controls stay green on purpose
+
+- **`NC-FP-12`** removes `FOR UPDATE` from `set_timezone` and nothing fails, including the rewritten
+  `PG-FP-2`. The reason is real: the `UPDATE` a moment later takes a row-exclusive lock of its own,
+  and PostgreSQL conflicts that against a booking's `FOR SHARE` just the same. **ADR-074 §5's
+  serialization depends on the write, not on that `SELECT … FOR UPDATE`.** The lock is declarative
+  today and becomes load-bearing the moment `set_timezone` derives anything from the old value.
+- **`NC-FP-14`** points `0041`'s backfill at `config.DEPLOYMENT_TIMEZONE` instead of its historical
+  literal, and nothing can fail: in the test environment `TZ` *is* `Africa/Djibouti`, so the two
+  agree. **Guarded by review only.** ADR-074 §10 is the reasoning a reviewer needs — a migration
+  that imports today's configuration claims historical rows were written under today's value, which
+  is false for exactly the deployment this ticket makes possible.
+
+### DST, now proven rather than deferred
+
+ADR-073 §8 had to record *"DST handling is untested rather than proven"*. It is proven now.
+Ambiguous and nonexistent local times are **refused** with 422 rather than silently resolved — PEP
+495's `fold` would otherwise pick one and make a library default into product policy — and `PG-FP-9b`
+proves it against `America/New_York`'s real 2025 transitions: 02:30 on 9 March refuses, 01:30 on
+2 November refuses, 10:00 on each day books and lands on 14:00Z and 15:00Z, and `day_bounds` returns
+a 23-hour and a 25-hour day.
+
+**`America/Vancouver` is deliberately not the DST fixture.** tzdata 2026c records British Columbia
+abolishing DST, so Vancouver has no autumn transition from 2026 onward — a DST assertion against it
+would look like coverage and test nothing. It stays the *second zone* in the two-timezone proofs,
+where only its offset matters.
+
+### Environment notes for whoever picks this up
+
+- **The UI suite needed 11 batches.** The runner failed to start a worker for **15 of 67** files in
+  the batched pass, under `--pool=threads` *and* the default forks pool. Those files were re-run in
+  batches of three until every file reported. The reconciliation is **by file**, parsed from every
+  log (`scratchpad/reconcile_fp_ui.py`), never a sum of batch totals: summing would have missed a
+  dropped file and double-counted a retried one.
+- **`ExchangeAuthProvider.test.tsx` fails here and is the catalogued flake.** `retry() re-runs
+  initialization from scratch` times out at 5.0–7.5s against vitest's 5s default. Untouched by this
+  ticket (last changed in DH-CLINIC-004A), imports nothing this ticket changed, and **all ten tests
+  in the file pass with `--testTimeout=30000`** with that one taking 7153ms. Margin loss under load.
+  Green in remote CI at `00de1de`. Do not debug it as a regression.
+- **Do not run the adapter suite and the UI batch script at the same time** — it manufactures that
+  flake. This session did, once, and the failure it produced was its own.
+- **The negative-control driver's failure regex must be anchored.** An unanchored `(\d+) failed`
+  matched the **port number** out of a psycopg connection error and scored a dead database as 55492
+  reddened assertions. `scratchpad/nc_fp.py` anchors on pytest's summary line and calibrates every
+  PostgreSQL control *before* mutating, because the Docker daemon here bounces about every quarter
+  of an hour and a container with no restart policy dies mid-run.
+- **`chmod +x` is not enough.** `scripts/demo/qualify-facility-profile.sh` committed as `100644`
+  after a WSL `chmod +x`; `git update-index --chmod=+x` fixed it. Check `git ls-files -s` before
+  pushing anything CI runs directly.
+
+### To finish this ticket
+
+1. `sudo scripts/demo/up.sh` — rebuilds both images and applies `0041`. The stack currently running
+   is pre-ticket: database at `0040`, adapter without `FacilityProfileRepository`, bundle without
+   `Établissement`. Expect one `RecoveryFenceUnavailable` crash-loop after a rebuild.
+2. `scripts/demo/qualify-facility-profile.sh` as the **normal user** with `SEC_DOCKER="sudo -n
+   docker"`. It refuses to start unless both images, the migration head *and* the seeded
+   `Africa/Djibouti` are what it expects — the last because a crashed earlier run of itself would
+   otherwise make FP-C compare two instants that were never under the zone it names.
+3. Re-run `17-clinic-appointments` (the conversion path changed) and `10-capabilities`.
+4. The full adapter suite.
+
+**Human Decision Required: No.** Every open question is recorded in ADR-074 §14 as a decision
+nobody has made, not as a blocker on this work: facility rename, whether an address is one fact or
+two, what else belongs on the profile, whether timezone change history must be stored, visibility to
+other participants, whether a CONNECT facility self-manages this, and whether an ambiguous local
+time should ever be bookable with explicit disambiguation.
+
+**Not pushed.** No instruction to push has been given for this ticket.

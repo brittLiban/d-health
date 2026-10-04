@@ -377,6 +377,17 @@ Legend: **FULL** · **LTD** limited, minimum data only · **NONE** · **CAP** ca
 | **Facturation** | FULL — amounts, payment state, receipt | LTD — whether settled, never amounts-as-gate | LTD — lab's own charges | NONE | LTD — totals, not clinical |
 | **Équipe et accès** | NONE | NONE | NONE | NONE | FULL |
 | **Paramètres établissement** | NONE | NONE | NONE | NONE | FULL |
+
+> **[PARTIALLY BUILT 2026-10-04, DHEALTH-FACILITY-PROFILE-001/ADR-074.]** The
+> `Paramètres établissement` row now has a screen behind it — `Établissement`, carrying the
+> facility's name (read-only) and its **own IANA timezone**. The row's `FULL` for Org Admin is
+> right in effect and wrong in form: the gate is the **capability** `facility.configure`, which
+> the `ORG_ADMIN` template happens to carry, and a direct grant reaches it without the role
+> (ADR-067 — never authorize by role name). The four `NONE`s hold: `billing.configure_prices`
+> is deliberately *not* accepted here, though it is accepted for `Services et tarifs`
+> (ADR-074 §11). Everything else a facility profile might hold — opening hours, closure days,
+> address — is still **NOT BUILT**, and each is a recorded Human Decision rather than a backlog
+> item (ADR-074 §12).
 | **Rapports** | LTD — operational counts | LTD — own clinical workload | LTD — lab operational | NONE | LTD — facility totals |
 
 ### The minimum-data rules behind the matrix
@@ -1423,11 +1434,25 @@ Status: **BUILT** · **PARTIAL** · **NOT BUILT**. Every row names the data it m
 | Screen | Roles | Status |
 |---|---|---|
 | Équipe et accès | Org Admin | **BUILT** |
-| Profil de l'établissement | Org Admin | **NOT BUILT** |
+| Profil de l'établissement | `facility.configure` | **PARTIAL 2026-10-04** (ADR-074) — built as `Établissement`: the facility's name (read-only) and its own IANA timezone. No address, hours, closure days or logo |
 | Services et tarifs | Org Admin | **NOT BUILT** |
 | Modèles de résultats | Org Admin | **BACKEND ONLY** |
 | Rapports | Org Admin; others LTD | **NOT BUILT** |
 | Patient status (no account) | Patient | **BUILT**, screen not browser-exercised |
+
+> **[2026-10-04, DHEALTH-FACILITY-PROFILE-001/ADR-074 — two corrections to the tables above.]**
+>
+> 1. `Profil de l'établissement` is now **PARTIAL**, and its `Roles` cell names a
+>    **capability** rather than a role, because that is what the code gates on. The screen is
+>    reachable by a direct `facility.configure` grant with no `ORG_ADMIN` membership, and an
+>    `ORG_ADMIN` whose grant was DENYed does not reach it (ADR-067: DENY always wins).
+>    The name is read-only **by decision** — no governed rename semantics exist (ADR-074 §6).
+> 2. The clinic `Rendez-vous` row above still reads **NOT BUILT**. That is **stale**: it was
+>    built on 2026-10-03 by DHEALTH-APPOINTMENTS-001/ADR-073, which annotated §§10, 12 and 24
+>    but not this inventory. Recorded here rather than silently rewritten, because the row's
+>    other columns (`clinician`, `Book / mark arrival`) describe a design ADR-073 deliberately
+>    departed from — a correct rewrite of that row belongs to whoever next owns §30, not to a
+>    timezone ticket.
 
 ### O-1b — the six-column orders table at 768px
 

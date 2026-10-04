@@ -10727,6 +10727,18 @@ cancellation actor and time, and the link to the visit.
 
 ### 8. Time
 
+**[Dated overlay, 2026-10-04, DHEALTH-FACILITY-PROFILE-001/ADR-074 — superseded. Every facility now
+owns its own IANA timezone** (`exchange_facility_profiles`, migration `0041`), the conversion reads
+*that* facility's zone under a `FOR SHARE` lock inside the booking transaction, and
+`DEPLOYMENT_TIMEZONE` is no longer consulted to convert anything — it is the server's own zone and
+the starting value for a new facility. `config.py` changed from refusing to boot unless
+`TZ == Africa/Djibouti` to refusing unless `TZ` is an IANA identifier it recognises. **Human Decision
+9 below is answered: yes.** The paragraph's own closing sentence — *"DST handling is untested rather
+than proven"* — no longer holds either: ambiguous and nonexistent local times are now refused with
+422, proved against `America/New_York`'s real 2025 transitions (`PG-FP-9b`). No stored instant was
+rewritten by any of it. See ADR-074 §§1–8.]**
+
+
 **One deployment timezone, and it already existed.** `config.py` has enforced `TZ == Africa/Djibouti`
 since before this ticket, raising `ConfigurationError` otherwise; this ticket gave the literal a name
 (`DEPLOYMENT_TIMEZONE`) so a second component could use it without a second copy. `Organization`
@@ -10779,7 +10791,9 @@ successful-read auditing.
 6. Are **cancellation reasons** required?
 7. Should a **scheduling reason** be stored, and is it operational or clinical?
 8. Should patients receive **reminders**?
-9. Should an `Organization` carry its **own timezone**? (Today: one enforced deployment timezone.)
+9. Should an `Organization` carry its **own timezone**? **ANSWERED yes, 2026-10-04 by ADR-074** —
+   `exchange_facility_profiles`, one row per facility, validated as an IANA identifier.
+   (Was: one enforced deployment timezone.)
 10. May a clinic **book in the past**? (Today: accepted, because backfilling a booking taken by
     telephone yesterday is legitimate and no refusal was invented.)
 11. When a booked patient has **already walked in** and holds an active visit, should check-in adopt
@@ -10829,3 +10843,436 @@ appointment interoperability; human usability; staff-ready; switch-ready; produc
 pilot-ready; or clinically live. **Human usability is not claimed** — nobody who works at a clinic
 reception desk has used this screen, nothing was timed, and product law 3 ("faster than what it
 replaces") remains a validated target rather than a current claim.
+
+## ADR-074 — ACCEPTED / IMPLEMENTED (2026-10-04, DHEALTH-FACILITY-PROFILE-001): each facility owns
+## its own wall clock — and the deployment timezone stops deciding schedules
+
+**Date:** 2026-10-04 · **Status:** ACCEPTED, IMPLEMENTED (`exchange_facility_profiles`, two routes,
+the `Établissement` section, a DST refusal policy) · **Decided by:** Liban
+(DHEALTH-FACILITY-PROFILE-001 ticket) · **Migration:** `0041_facility_profiles` ·
+**Supersedes:** ADR-073 §8 ("One deployment timezone, and it already existed"; "`Organization`
+carries **no** timezone column") · **Answers:** ADR-073 Human Decision 9 ("Should an `Organization`
+carry its **own** timezone?") — **yes** · **Builds on:** ADR-073 (appointments), ADR-067
+(capabilities), ADR-071 (one navigation door per subject)
+
+### 1. The defect this closes
+
+ADR-073 §8 recorded the state of the world honestly: `config.py` refused to boot unless
+`TZ == Africa/Djibouti`, `DEPLOYMENT_TIMEZONE` was that literal, and every appointment in the
+deployment was converted through it. One sentence in that section is the whole problem:
+
+> `Organization` carries **no** timezone column, and per-facility timezones are Human Decision 9.
+
+DHealth is **an interoperable diagnostic network**, not a single-clinic installation. The moment two
+facilities in one deployment sit in different zones, a deployment-global timezone makes the product
+quietly wrong: a receptionist types `10:00`, and the instant stored is 10:00 *somewhere else*. It is
+the worst shape of defect — it never errors, it surfaces months later as patients arriving at the
+wrong hour, and the data on disk is indistinguishable from correct data.
+
+**What this ADR does not claim.** Nothing about a single-facility Djibouti deployment was broken.
+Every instant stored under the old authority was stored correctly *for that facility*, and §4 is why
+none of them were touched.
+
+### 2. One row per facility, one fact in it
+
+`exchange_facility_profiles`: `id`, `organization_id` (FK `RESTRICT`, `UNIQUE`), `timezone_name`
+(`String(64)`), `created_at`, `updated_at`. One `CHECK`: `length(trim(timezone_name)) > 0`.
+
+**Why a fourth facility-shaped table.** Four concepts already existed and this is deliberately none
+of them:
+
+| Table | The question it answers | Why the timezone is not here |
+|---|---|---|
+| `Organization` | *Who is this network participant?* | Platform identity, deliberately thin. A facility-editable field on it makes identity editable configuration |
+| `FacilityEnrollment` | *How is this organization joining/integrating?* | An onboarding state machine. A timezone is not a step in onboarding |
+| `LabDirectoryProfile` | *How is this laboratory publicly visible?* | Directory semantics, keyed on `lab_organization_id`. A provider clinic would need a *laboratory listing* to schedule |
+| `FacilityProfile` | *What facility-local operational facts does Hawva need while staff work?* | ← here |
+
+Starting a table with one column is the point. `timezone_name` on `Organization` would have made
+facility configuration a property of platform identity, and the next operational fact would have had
+nowhere to go but there too.
+
+`trim`, not PostgreSQL's `btrim`, in the `CHECK`: the unit suite builds this schema on SQLite from
+the same metadata, and `btrim` does not exist there — the table simply failed to create. `trim` is
+standard SQL and both engines have it.
+
+### 3. IANA identifiers, never offsets — and the validator is `ZoneInfo`
+
+`Africa/Djibouti`, `America/Vancouver`. **An offset is refused rather than parsed.** `+03:00`
+describes one instant, not a place; `UTC+3` carries no daylight-saving rule. Storing either makes the
+facility's clock wrong twice a year in any zone that transitions, and right-looking in between.
+
+**Validation is in the domain layer, not a database `CHECK`.** The IANA database is amended several
+times a year. A `CHECK` enumerating today's zone names would be wrong by the next tzdata release and
+would need a *migration* to accept a newly created zone. `normalize_timezone_name()` calls
+`ZoneInfo(name)`; the column refuses the empty string and bounds the length at 64 (the longest
+identifier tzdata has ever shipped is `America/Argentina/ComodRivadavia`, 32). `ValueError` is
+caught alongside `ZoneInfoNotFoundError`, because `ZoneInfo` raises the former for an absolute path
+or a name containing `..` — both are "not a zone", and both are refusals worth having.
+
+The stated limitation: validity is a property of the tz database in the **deployed image**, not of
+this code. The only normalization performed is whitespace stripping — case is left exactly as sent,
+because tzdata is case-sensitive and silently re-casing a name turns a typo into either a different
+zone or a failure further from the person who made it.
+
+**`config.py` changed from an equality check to a validity check.** It had refused to boot unless
+`TZ == Africa/Djibouti`; that coherence is now impossible to want, because the deployment's own zone
+and a facility's zone are different facts. It now raises `ConfigurationError` unless `TZ` is an IANA
+identifier this server recognises. `DEPLOYMENT_TIMEZONE` survives with a narrowed meaning, written
+into its docstring: the **server's own** zone, and the starting value for a facility that has none.
+It is no longer consulted to convert anything.
+
+### 4. No stored instant is ever rewritten
+
+`Appointment.scheduled_at` is UTC and **nothing in this ticket writes to it**. A timezone change is
+a change to how *future* local times are interpreted and how stored instants are *displayed* — never
+a migration of bookings.
+
+This is not a simplification, it is the correct semantics. The booked instant is what staff agreed
+with the patient under the authority in effect at that moment. "Shifting" existing bookings when the
+zone is corrected would move real appointments nobody asked to move, and there is no way to tell a
+zone *correction* (the row was wrong) from a zone *change* (the facility relocated) from the data.
+`PG-FP-5` asserts a change moves no instant; the UI says so in the confirmation copy in as many
+words, because a reader does need to know that an existing booking will *display* at a different wall
+clock afterwards.
+
+### 5. A timezone change cannot tear a booking in flight
+
+The conversion from local wall clock to UTC instant now happens **inside** the appointment
+transaction, after the row read, rather than before it:
+
+```
+create / reschedule:
+  BEGIN
+    read the facility profile  FOR SHARE        ← timezone_for_conversion_in_session
+    convert local date+time → UTC with that zone
+    insert / update the booking
+  COMMIT
+
+set_timezone:
+  BEGIN
+    read the facility profile  FOR UPDATE
+    validate, write, audit facility_timezone_changed
+  COMMIT
+```
+
+`FOR SHARE` and `FOR UPDATE` on the same row are the serialization point. A booking in flight either
+completes under the old zone or waits and completes under the new one; there is no interleaving in
+which the zone is read, changed, and then used. `PG-FP-2` and `PG-FP-3` prove it with a `Barrier` on
+real PostgreSQL; `PG-FP-4` proves two administrators changing it converge on one value.
+
+`FOR SHARE` rather than `FOR UPDATE` on the read side is deliberate: two concurrent bookings at the
+same clinic must not block each other, and they need not — neither is changing the profile. Only the
+settings writer needs exclusivity, and its `FOR UPDATE` conflicts with every outstanding shared lock,
+which is exactly the ordering wanted.
+
+Reads that are not converting anything — the day view, the settings screen — use `timezone_for`,
+which takes no lock. A read lock on a settings row for every day-view render would be a contention
+point bought for nothing, and the worst outcome of the unlocked read is a view rendered under the
+zone that was authoritative a moment ago.
+
+### 6. What this is not, and must not become
+
+`FacilityProfileResponse` has three fields. **No address, no phone, no licence number, no logo.**
+
+**`public_address`/`public_phone` are not duplicated here.** A laboratory's directory address and the
+address printed on a clinical document are not established to be the same fact. Two independent
+copies of a facility's address is worse than one inconvenient one, and a settings response that
+quietly grew an address would make the next ticket's decision for it. Recorded as Human Decision 2
+rather than guessed at.
+
+**And deliberately not a projection of `FacilityEnrollment`.** A settings screen has no business
+carrying CONNECT discovery fields, vendor contacts or onboarding state: those describe how an
+organization *joined the network*, not how its staff work today. No currency, tax or invoice
+numbering either — billing owns those. No offerings, prices or result templates — those are their own
+configuration domains, reached through `Services et tarifs` and `Modèles de résultats`.
+
+`FP-A2` asserts the response projection is exactly the settings and nothing more, and `FP-J1` asserts
+the table itself carries no contact fact — so a field added in passing reddens a test rather than
+shipping.
+
+### 7. Authority, and the name is read-only
+
+**No new capability was created.** `facility.configure`'s French description has named three subjects
+since before this ticket: *"Gérer le catalogue, les modèles de résultats et la fiche de
+l'établissement"*. The third — the facility's own record — had no screen anywhere. A
+`facility.profile.manage` would have split one declared authority in two and required every existing
+holder to be re-granted something they already had.
+
+Both routes (`GET /organizations/{id}/facility-profile`, `PUT …/facility-profile/timezone`) require
+`facility.configure` on **that** organization, and both answer `Cache-Control: no-store`.
+`PG-FP-6` asserts an update names exactly one organization.
+
+**A platform administrator reaches both, and that is existing architecture rather than a new grant.**
+`authz.require_facility_configure` has carried `allow_platform_admin=True` since
+DHEALTH-ACCESS-CAPABILITIES-001 split it out, and a platform operator already configures a facility's
+catalogue, result templates and directory profile through it. A facility's timezone is the same class
+of fact; making it the single exception would be a special case with no principle behind it. Human
+Decision 6 asks whether a CONNECT facility should self-manage this or whether it is platform
+onboarding data — until that is answered, both routes exist and neither is widened.
+
+**The organization's name is read-only, and that is a decision.** `Organization.name` is network
+participant identity. Whether a facility may rename itself — and what that means for routing, for
+audit rows already written, and for the directory other facilities see — has no governed answer, so
+the name is **shown** (an administrator needs to know which facility they are configuring) and no
+editor is offered. `organization_name` travels on the response as a read-only convenience so the
+screen needs no second request for a heading; it is not part of the profile. Inventing rename
+semantics to make the form look complete is exactly the failure mode `CLAUDE.md` names. Human
+Decision 1.
+
+### 8. Time: DST is stated as a policy rather than left to a library default
+
+Python resolves an ambiguous local time silently: 01:30 on a fall-back day exists twice, and
+`ZoneInfo` picks the first by default (PEP 495 `fold=0`). A nonexistent local time — 02:30 on a
+spring-forward day — is resolved to *something* with no error at all. Either default means a
+receptionist's `01:30` becomes an instant they did not choose, and letting an accidental library
+default become Hawva's policy is how a clinic ends up with one appointment an hour out and nobody
+able to say why.
+
+**Policy: both are refused, with HTTP 422, naming the problem.**
+
+- *Ambiguous* ⇔ the local time has different UTC offsets under `fold=0` and `fold=1`.
+- *Nonexistent* ⇔ a UTC round-trip of the localized value does not return the same naive wall clock.
+
+`AmbiguousLocalTime` and `NonexistentLocalTime` are raised by `instant_from_local`, so they cover
+`create` **and** `reschedule`, and the 422 carries the message the domain wrote rather than a generic
+one — the reader is a receptionist who just typed a wall clock. The refusal is deliberate rather than
+a disambiguation UI: a two-radio "01:30 EDT or 01:30 EST?" question is meaningless to a front desk,
+and picking one silently is the defect. The hour is unbookable; 01:00 and 02:00 are not. Which
+occurrence a facility means is Human Decision 7.
+
+This is recorded explicitly because ADR-073 §8 had to say the opposite — *"Africa/Djibouti is UTC+3
+with no DST observance, so no transition is exercised … DST handling is untested rather than
+proven."* It is now proven. `PG-FP-9b` uses `America/New_York` in 2025: 2025-03-09 02:30 refuses,
+2025-11-02 01:30 refuses, 10:00 on each day books and lands on 14:00Z and 15:00Z, and `day_bounds`
+returns a 23-hour and a 25-hour day.
+
+**`America/Vancouver` is deliberately not the DST fixture.** tzdata 2026c records British Columbia
+abolishing DST, so Vancouver has no autumn transition from 2026 onward — a DST assertion against it
+would look like coverage and test nothing. It remains the *second zone* in the two-timezone proofs,
+where only its offset matters.
+
+### 9. A configuration read is not a directory read
+
+A laboratory's `LabDirectoryProfile` is deliberately network-visible: a provider choosing where to
+send work needs to see it. A facility's own settings are deliberately not — this is what an
+administrator sees while configuring their own facility, and reaching the directory must not reach
+it.
+
+An unrelated organization asking for a facility profile is told **the organization does not exist**
+(404), the anti-enumeration convention this API already follows throughout, so walking uuids cannot
+reveal which facilities are configured. `FP-H2` asserts the guessed-uuid and the real-but-foreign
+responses are byte-identical; `FP-H3` asserts directory reach is not profile reach.
+
+Human Decision 5 asks whether a facility's timezone *should* be visible to other participants — a
+referring clinic reading a laboratory's hours is a legitimate future want, and it is left unbuilt
+rather than guessed.
+
+### 10. Every facility has a profile, and the backfill tells the truth
+
+Three guarantees, so `FacilityTimezoneNotConfigured` is unreachable in practice:
+
+1. `0041` backfills one row for every organization that already existed.
+2. Both organization-creation routes write one in the **same transaction** as the organization
+   (`POST /organizations` and the onboarding route) — an organization that exists without a profile
+   is a facility that cannot schedule, so committing them separately would leave a window in which
+   that is true.
+3. `demo_seed` ensures one for every demo facility before any appointment is seeded.
+
+**The backfill value is a hardcoded literal in the migration**
+(`_HISTORICAL_DEPLOYMENT_TIMEZONE = "Africa/Djibouti"`), not `config.DEPLOYMENT_TIMEZONE`. A
+migration that imports today's configuration claims that historical rows were created under
+*today's* value — which is false for exactly the deployment this ticket makes possible. The literal
+records what the authority actually was when those rows were written, and will still be right in
+2030 when `TZ` is something else.
+
+**And the absent profile refuses rather than assuming.** No fallback to `DEPLOYMENT_TIMEZONE`
+anywhere in the conversion path. Converting under a silently assumed zone is the defect this ticket
+exists to end; a refusal naming the organization is recoverable, a plausible wrong instant is not.
+`PG-FP-7b` proves the refusal with the profile deleted.
+
+`demo_seed` **overwrites** a differing timezone rather than only inserting. `exchange_facility_profiles`
+is configuration, so it is correctly absent from `_WORKFLOW_TABLES` and `reset.sh` does not truncate
+it — but a browser suite that changes a demo clinic's zone must not leave the next run starting
+somewhere else. Reset restores the seeded value; it does not delete the row.
+
+### 11. The downgrade is guarded three times, before any DDL
+
+`0041`'s downgrade raises rather than dropping when real history exists:
+
+| Guard | Refuses when |
+|---|---|
+| `DowngradeBlockedByFacilityProfileAuditHistory` | a `facility_timezone_changed` audit row exists |
+| `DowngradeBlockedByFacilityProfileResourceAuditHistory` | any audit row names `resource_type='facility_profile'` |
+| `DowngradeBlockedByConfiguredFacilityTimezone` | a profile holds a zone **other than** the historical literal |
+
+The third is narrow on purpose: a backfilled row carries no information the downgrade would destroy,
+but a row somebody deliberately set to `America/Vancouver` does, and dropping the table discards a
+configured fact with nothing left to recover it from. All three raise **before any DDL**, matching
+every prior migration in this repo.
+
+`EXPECTED_HEAD` in `.github/workflows/ci.yml` moved to `0041_facility_profiles`. Per the ticket, that
+is required maintenance for adding a migration, not CI scope creep — and it stays a hand-maintained
+literal for the reason DHEALTH-CI-REPAIR-001 recorded: a value derived from the migration tree agrees
+with the tree about the wrong answer when a file is deleted.
+
+### 12. Audit
+
+One event: `facility_timezone_changed`, `resource_type='facility_profile'`, naming the organization
+and the acting identity. Both the `Literal` in `security_audit.py` **and** the two `CHECK`
+constraints in `models.py` were widened — and `0041` widens the same two in the database. (Updating
+only the `Literal` is a real trap: 51 tests failed with `IntegrityError` before the model constraints
+were widened too.)
+
+**Absent on purpose:** no `facility_profile_viewed` — reading is not a mutation, and D-8 is untouched
+by this ticket — and no separate created/updated pair, because the row is created by `0041`'s
+backfill or alongside its organization and only ever changes in one way.
+
+**The same limitation ADR-073 §9 recorded still applies, and is not fixed here.**
+`exchange_security_audit_events` has no value or metadata column, so the row records *that* a
+facility's timezone changed, by whom and when — **not what it changed from**. Once the row is
+overwritten the previous zone is not preserved anywhere. Widening a security audit table to carry
+arbitrary payloads is not a thing to do in passing, and the alternative — a dedicated change-history
+store — is a product decision nobody has made: Human Decision 4. The UI's confirmation step
+therefore asks for **no free-text reason**, because requesting a justification nothing can store or
+show would be theatre.
+
+### 13. The screen
+
+`Établissement`, a new `StaffWorkspace` section, last in navigation order — configuring the facility
+is the rarest thing anybody here does, and the order is "how often you need it", not "how important
+it sounds".
+
+**Gated on `facility.configure` alone.** Deliberately *not* the
+`facility.configure || billing.configure_prices` disjunction `Services et tarifs` uses: a price list
+is a billing subject; the facility's own wall clock is not, and a billing clerk who could retime the
+clinic would hold an authority nobody granted. ADR-071 refused a second navigation door into a
+subject an existing surface already owns — a facility's *record* is a different subject from what it
+*offers and charges*, so this is a first door into a new room.
+
+**The picker is the platform's.** Zone names come from `Intl.supportedValuesOf('timeZone')` — the
+browser's own tzdata copy, so there is no bundled list to go stale and no timezone library added for
+a dropdown. Where the API is unavailable the field degrades to **free text**, not to a hardcoded list
+of three countries. Either way what the browser sends is a *candidate*: the server validates it and a
+422 is rendered in the server's own words. **A client-supplied timezone is never trusted for
+conversion** — no request body anywhere carries a zone that a conversion then uses.
+
+Changing it asks twice, and the warning says what happens and what does not: future local times are
+interpreted in the new zone, stored instants display in it, and **existing appointments are not
+moved**.
+
+### 14. Human Decisions Required — recorded, not answered
+
+1. May a facility **rename itself**, and what does that mean for routing, audit and the directory?
+   (Today: `Organization.name` is read-only here — §7.)
+2. Is a facility's **address** one fact or two — the directory listing and the one printed on a
+   clinical document? (Today: `LabDirectoryProfile` only, not duplicated — §6.)
+3. What else belongs on a facility's operational profile — **opening hours**, closure days, a default
+   appointment duration? (Today: nothing. Each needs a workflow that reads it before it is worth
+   storing.)
+4. Must the **old and new timezone values** be preserved, in a dedicated change-history store?
+   (Today: the audit row records that it changed, by whom and when — §12.)
+5. Should a facility's timezone be **visible to other network participants** — a referring clinic
+   reading a laboratory's hours? (Today: the routes are same-organization only — §9.)
+6. Should a **CONNECT facility self-manage** this, or is it platform onboarding data? (Today: both a
+   facility administrator and a platform administrator reach it, neither widened — §7.)
+7. Should a **nonexistent or ambiguous** local time ever be bookable with explicit disambiguation,
+   rather than refused? (Today: refused — §8.)
+
+**ADR-073's D-1 through D-8 and D-10 through D-14 are untouched. Its D-9 is answered by this ADR.
+D-2a, D-3's participant half, D-4, D-8 and D-11 of `docs/NATIVE-OPERATING-PRODUCT.md` are untouched
+and exactly as open as they were.**
+
+### 15. Evidence, and the boundary of the claim
+
+| Suite | Result |
+|---|---|
+| `test_dhealthfacilityprofile001_facility_profile.py` (FP-A…FP-J) | **63 passed** |
+| `integration/test_dhealthfacilityprofile001_postgres_qualification.py` (PG-FP-1…9b) | **11 passed**, on a disposable PostgreSQL 16 migrated to `0041`, destroyed with its volume |
+| `ui/src/features/facility/FacilitySettingsPage.test.tsx` | **15 passed**, including an axe scan with the picker open |
+| `ui/src/features/staff/staffSections.test.ts` | **35 passed** (29 existing, 6 new for the navigation gate) |
+| Negative controls `NC-FP-1`…`NC-FP-15` | **15 run, 13 reddened, 2 deliberately green, 0 unexpected**, every one reverted byte-for-byte |
+| Full UI unit suite | **67 of 67 files reconciled, 1088 tests** — see the gap below |
+| `npm run typecheck` (`tsc -b`), `npm run lint` (oxlint), `tsc -p e2e/tsconfig.json` | clean |
+| `alembic heads` | one head, `0041_facility_profiles`, matching CI's `EXPECTED_HEAD` |
+
+**Two timezones are proved, as the ticket required:** `PG-FP-1` books the same wall clock at two
+facilities and gets two distinct instants; `PG-FP-8` shows each facility's day boundaries are its
+own; `FP-C1` does the same thing through the HTTP edge.
+
+#### Three negative controls found holes rather than confirming guards
+
+`AGENTS.md` asks for controls that can fail. Three did, and each produced a test rather than a
+rationalisation:
+
+1. **`NC-FP-2`** — "the booking request carries a timezone and the server honours it" — had **nothing
+   to redden**. `api.py`'s docstring asserted that no request body carries a zone; no test did.
+   `FP-J6` now asserts it for both appointment request models, in the model *and* at the edge.
+2. **`NC-FP-9`** — removing `facility_profiles.ensure(...)` from `POST /organizations` left all
+   sixty tests green, because every one of them builds its facility through a fixture that writes
+   the profile itself. **Not one test created an organization the way the product does.** `FP-J7`
+   now does, over HTTP.
+3. **`NC-FP-10`** — turning `ensure` from insert-first-wins into an overwrite reddened nothing. The
+   convention lived in a docstring. `FP-J8` now asserts it in both directions.
+
+#### And one rewrote a test that was proving nothing
+
+`NC-FP-11` and `NC-FP-12` both stayed green against `PG-FP-2`, which claimed to prove the §5
+serialization. It did not: it read the zone, waited on a barrier, then converted **in Python using
+the variable it had already read** — so its assertions held whether or not any lock existed. A
+transaction's own local variable is trivially consistent with itself.
+
+`PG-FP-2` now observes two things that genuinely depend on the locks: **commit order** (the
+updater's write cannot land until the booking's transaction ends) and **re-read stability** (the same
+transaction reads the zone twice and must get the same answer, with `expire_all()` first or
+SQLAlchemy's identity map answers from memory and proves nothing about the database). `NC-FP-11`
+reddens through it.
+
+#### Two controls stay green on purpose, and that is the finding
+
+- **`NC-FP-12`** removes `FOR UPDATE` from `set_timezone` and **nothing fails, including the
+  rewritten `PG-FP-2`.** The reason is real: the `UPDATE` statement a moment later takes a
+  row-exclusive lock of its own, and PostgreSQL conflicts that against a booking's `FOR SHARE` just
+  the same. So §5's serialization depends on the *write*, not on that `SELECT … FOR UPDATE`. The
+  lock is declarative today and becomes load-bearing the moment `set_timezone` derives anything
+  from the old value. Recorded as a property of the code rather than patched into a reddening.
+- **`NC-FP-14`** replaces `0041`'s hardcoded `Africa/Djibouti` with
+  `config.DEPLOYMENT_TIMEZONE` and nothing fails — because in the test environment `TZ` *is*
+  `Africa/Djibouti`, so the two agree and no assertion can distinguish them. **This is guarded by
+  review only**, and §10 is the reasoning a reviewer needs.
+
+#### The gaps, named rather than rounded up
+
+1. **One UI test file fails on this machine, and it is the catalogued pre-existing flake.**
+   `ExchangeAuthProvider.test.tsx`'s `retry() re-runs initialization from scratch` times out at
+   5.0–7.5s against vitest's 5s default. It is **untouched by this ticket** (last changed in
+   DH-CLINIC-004A) and imports nothing this ticket changed. Diagnosed, not assumed: all ten tests in
+   the file pass with `--testTimeout=30000`, with that one taking **7153ms**. It is margin loss under
+   this machine's load. The same file is green in remote CI at `00de1de`.
+2. **The UI suite needed 11 batches to reconcile.** The runner failed to start a worker for 15 of 67
+   files in the batched pass (both `--pool=threads` and the default forks pool), so those files were
+   re-run in batches of three until every file reported. The reconciliation is **by file**, parsed
+   out of every log, not a sum of batch totals — summing would have missed a dropped file and
+   double-counted a retried one.
+3. **No real-browser qualification has been run.** `ui/e2e/native/18-facility-profile.spec.ts`,
+   `native-facility-profile.config.ts` and `scripts/demo/qualify-facility-profile.sh` are written,
+   typechecked and linted, but the demo stack on this machine is running pre-ticket images (its
+   database is at `0040`, its adapter has no `FacilityProfileRepository`, its bundle has no
+   `Établissement` section). **Written is not demonstrated** and this ADR does not claim otherwise.
+4. **No full adapter-suite run.** The ~900 adapter tests beyond this ticket's 74 are unobserved
+   against this code locally. This is the same gap ADR-073 §11 recorded, and for the same reason.
+5. **Sibling browser suites have not been re-run.** The capability catalogue gained no row, so
+   `10-capabilities` has nothing new to see, but the appointment conversion path changed and
+   `17-clinic-appointments` has not been exercised against it.
+
+**May now be claimed:** each facility in a Hawva deployment has its own authoritative IANA timezone;
+appointment local-time conversion uses that facility's zone, read under a lock inside the booking
+transaction; a timezone change moves no stored instant; ambiguous and nonexistent local times are
+refused rather than silently resolved; a facility administrator can change the zone through a
+`facility.configure`-gated screen; and the deployment timezone no longer decides any schedule.
+
+**May not be claimed:** facility master data; opening hours or closure calendars; per-clinician
+schedules; cross-facility schedule visibility; a governed rename; timezone change history; that the
+screen works in a real browser against the real stack; human usability; staff-ready;
+production-ready; pilot-ready; or clinically live. **Nobody who administers a clinic has used this
+screen.** See `PROJECT_STATE.md` for exactly which qualification steps completed and which did not.

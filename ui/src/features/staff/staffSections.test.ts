@@ -94,8 +94,8 @@ describe('availableSections', () => {
     // `team` first, and the order matters: `resolveSection` lands on the first available section,
     // and DHEALTH-NATIVE-ACCESS-001 decided an administrator opens the application on
     // `Équipe et accès`. The test below is what holds that.
-    expect(idsFor(provider(['ORG_ADMIN']))).toEqual(['team', 'prices'])
-    expect(idsFor(lab(['ORG_ADMIN']))).toEqual(['team', 'prices'])
+    expect(idsFor(provider(['ORG_ADMIN']))).toEqual(['team', 'prices', 'facility'])
+    expect(idsFor(lab(['ORG_ADMIN']))).toEqual(['team', 'prices', 'facility'])
   })
 
   it('never offers the operational till to somebody who cannot take a payment', () => {
@@ -139,6 +139,7 @@ describe('availableSections', () => {
       'team',
       'billing',
       'prices',
+      'facility',
     ])
   })
 
@@ -166,12 +167,14 @@ describe('availableSections', () => {
       'results',
       'team',
       'prices',
+      'facility',
     ])
     expect(idsFor(lab(['LAB_TECH', 'ORG_ADMIN']))).toEqual([
       'today',
       'orders',
       'team',
       'prices',
+      'facility',
     ])
   })
 
@@ -271,8 +274,12 @@ describe('DHEALTH-LAB-OFFERINGS-001 — who reaches Services et tarifs', () => {
    * noticed if a later refactor took it away again.
    */
   it('reaches it through facility.configure alone', () => {
+    // `facility' comes along because DHEALTH-FACILITY-PROFILE-001 gated the new section on
+    // `facility.configure` *alone* -- deliberately not this section's
+    // `facility.configure || billing.configure_prices` disjunction. A price list is a billing
+    // subject; the facility's own record is not, so a billing clerk gets `prices` and no more.
     const membership = { ...lab([]), capabilities: ['facility.configure'] }
-    expect(idsFor(membership)).toEqual(['prices'])
+    expect(idsFor(membership)).toEqual(['prices', 'facility'])
   })
 
   it('still reaches it through billing.configure_prices alone', () => {
@@ -287,7 +294,7 @@ describe('DHEALTH-LAB-OFFERINGS-001 — who reaches Services et tarifs', () => {
       ...lab([]),
       capabilities: ['facility.configure', 'billing.configure_prices'],
     }
-    expect(idsFor(membership)).toEqual(['prices'])
+    expect(idsFor(membership)).toEqual(['prices', 'facility'])
   })
 
   it('does not reach it on a laboratory authority that is neither', () => {
@@ -297,5 +304,47 @@ describe('DHEALTH-LAB-OFFERINGS-001 — who reaches Services et tarifs', () => {
     expect(idsFor({ ...lab([]), capabilities: ['lab.queue.work'] })).not.toContain('prices')
     expect(idsFor({ ...lab([]), capabilities: ['lab.result.release'] })).not.toContain('prices')
     expect(idsFor({ ...lab([]), capabilities: ['billing.operate'] })).not.toContain('prices')
+  })
+})
+
+describe('DHEALTH-FACILITY-PROFILE-001 — who reaches Établissement', () => {
+  it('reaches it through facility.configure', () => {
+    expect(idsFor({ ...provider([]), capabilities: ['facility.configure'] })).toContain('facility')
+    expect(idsFor({ ...lab([]), capabilities: ['facility.configure'] })).toContain('facility')
+  })
+
+  it('does not reach it through billing.configure_prices', () => {
+    // `Services et tarifs` accepts either capability. This section deliberately does not: a price
+    // list is a billing subject, and a facility's own record -- its name and the timezone every
+    // local wall clock it stores is interpreted in -- is not. A billing clerk who could retime the
+    // clinic would be an authority nobody granted.
+    const clerk = { ...provider([]), capabilities: ['billing.configure_prices'] }
+    expect(idsFor(clerk)).not.toContain('facility')
+    expect(idsFor(clerk)).toContain('prices')
+  })
+
+  it('does not reach it on clinical or laboratory workflow authority', () => {
+    expect(idsFor(provider(['CLINICIAN']))).not.toContain('facility')
+    expect(idsFor(lab(['LAB_TECH']))).not.toContain('facility')
+    expect(idsFor(lab(['LAB_RESULT_RELEASER']))).not.toContain('facility')
+    expect(idsFor({ ...provider([]), capabilities: ['appointment.manage'] })).not.toContain(
+      'facility',
+    )
+  })
+
+  it('shows it exactly once, and last', () => {
+    // Last on purpose: configuring the establishment is the rarest thing anybody here does, and
+    // navigation order is "how often you need it", not "how important it sounds".
+    const ids = idsFor(provider(['CLINICIAN', 'ORG_ADMIN']))
+    expect(ids.filter((id) => id === 'facility')).toHaveLength(1)
+    expect(ids[ids.length - 1]).toBe('facility')
+  })
+
+  it('offers nothing at all to a membership holding no capabilities', () => {
+    expect(availableSections(provider([]), NO_CAPABILITIES)).toEqual([])
+  })
+
+  it('labels it in French', () => {
+    expect(sectionLabel('facility')).toBe('Établissement')
   })
 })
