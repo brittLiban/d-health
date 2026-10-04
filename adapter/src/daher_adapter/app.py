@@ -75,10 +75,12 @@ def create_app(
         patient_public_base_url=active_settings.patient_public_base_url,
         notification_default_region=active_settings.notification_default_region,
         notification_receipts_configured=active_settings.notification_receipts_configured,
-        # DHEALTH-APPOINTMENTS-001. Passed explicitly from the validated settings rather than left
-        # to the router's default: `Settings.from_env` is the component that enforces `TZ`, so the
-        # running application takes the value from the place that checked it.
-        facility_timezone=active_settings.timezone,
+        # DHEALTH-FACILITY-PROFILE-001. The zone a **newly created** organization's profile starts
+        # with, and nothing more: ADR-074 moved wall-clock authority to each facility's own profile
+        # row, so this no longer decides how any appointment is interpreted. Passed explicitly from
+        # the validated settings rather than left to the router's default, because
+        # `Settings.from_env` is the component that validated it.
+        default_facility_timezone=active_settings.timezone,
     )
     # DH-CONNECT-AGENT-001 §8/§10: a **second validator with a second audience**, for connector
     # agents only. Same issuer, same signing keys, different `aud` -- so a clinician's token is not

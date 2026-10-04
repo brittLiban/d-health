@@ -70,6 +70,7 @@ __all__ = [
     "ExchangeIdentity",
     "ExchangeIdentityStatus",
     "ExchangeSecurityAuditEvent",
+    "FacilityProfile",
     "LabDirectoryProfile",
     "LabOffering",
     "LabObservation",
@@ -2335,6 +2336,12 @@ class ExchangeSecurityAuditEvent(Base):
             # There is deliberately no `appointment_viewed`: reading is not a mutation (D-8).
             "'appointment_created', 'appointment_rescheduled', 'appointment_cancelled', "
             "'appointment_checked_in', "
+            # DHEALTH-FACILITY-PROFILE-001: one event for the one mutation a facility's operational
+            # profile has. It records *that* the timezone changed, by whom and when -- not the old
+            # and new values, because this table has no value column and ADR-074 declines to add
+            # one (Human Decision 4), exactly as ADR-073 declined for a reschedule's previous
+            # instant.
+            "'facility_timezone_changed', "
             # DHEALTH-BILLING-001: the four financial mutations. No amount is recorded here --
             # the authoritative figure lives on the immutable Invoice/Payment row, and a second
             # copy could diverge from it. No void, no reversal (neither policy is decided), and
@@ -2411,7 +2418,11 @@ class ExchangeSecurityAuditEvent(Base):
             # DHEALTH-APPOINTMENTS-001: a scheduling event names the booking, never the patient and
             # never the visit it produced -- both are reachable from it, and the `'visit'` line
             # above already states why this table does not record who was seen when.
-            "'appointment')",
+            "'appointment', "
+            # DHEALTH-FACILITY-PROFILE-001: the facility's own settings, named distinctly from
+            # `facility_enrollment` -- "who changed this clinic's configuration?" and "who moved it
+            # through onboarding?" are different questions and should not share a resource type.
+            "'facility_profile')",
             name="ck_exchange_security_audit_events_resource_type",
         ),
     )
@@ -2670,6 +2681,74 @@ class EnrollmentBlockerCode(StrEnum):
     CONNECTOR_NOT_IMPLEMENTED = "CONNECTOR_NOT_IMPLEMENTED"
     FACILITY_CONFIGURATION_INCOMPLETE = "FACILITY_CONFIGURATION_INCOMPLETE"
     CLINICAL_TEMPLATE_SIGNOFF_REQUIRED = "CLINICAL_TEMPLATE_SIGNOFF_REQUIRED"
+
+
+class FacilityProfile(Base):
+    """DHEALTH-FACILITY-PROFILE-001/ADR-074: the facility-local operational facts Hawva needs while
+    staff are working. Exactly one row per ``Organization``.
+
+    ── Why this is a fourth table and not a column on an existing one ──
+
+    Four facility-shaped concepts already existed and this is deliberately none of them:
+
+    * ``Organization`` answers *who is this network participant?* -- id, type, name, status. It is
+      kept deliberately thin and is platform identity, not facility-editable configuration.
+    * ``FacilityEnrollment`` answers *how is this organization joining or integrating with Hawva?*
+      -- participation mode, onboarding status, CONNECT discovery, vendor contact. It is an
+      onboarding process with a state machine; a timezone is not a step in it.
+    * ``LabDirectoryProfile`` answers *how is this laboratory publicly visible?* -- ``listed``,
+      ``accepting_orders``, ``public_address``. It is marketplace/directory semantics, keyed on
+      ``lab_organization_id``, and providers have no equivalent. Putting a provider clinic's
+      timezone there would mean a clinic needs a *laboratory directory listing* to schedule.
+    * ``FacilityProfile`` (here) answers *what facility-local operational facts does Hawva need
+      while staff work?* Today that is exactly one fact: the clinic's own wall clock.
+
+    Starting one table with one column is the point. The alternative -- a ``timezone_name`` column
+    on ``Organization`` -- would have made facility-editable configuration a field on platform
+    identity, and the next operational fact would have had nowhere to go but there too.
+
+    ── What this table must never become ──
+
+    Not a hospital master-data record. ``public_address``/``public_phone`` are **not** duplicated
+    here: a directory address and the address printed on a clinical document are not established to
+    be the same fact, and two independent copies of a facility's address is worse than one
+    inconvenient one (ADR-074 §6, recorded as a Human Decision). No currency, tax or invoice
+    numbering -- billing owns those. No offerings, prices or result templates -- those are their
+    own configuration domains.
+    """
+
+    __tablename__ = "exchange_facility_profiles"
+    __table_args__ = (
+        UniqueConstraint("organization_id", name="uq_exchange_facility_profiles_organization"),
+        # Nonblank, bounded. The IANA database is not expressible as a database constraint and
+        # deliberately is not attempted here: it changes several times a year, and a CHECK listing
+        # today's zone names would be wrong by next release. ``ZoneInfo`` is the validator, in the
+        # domain layer, where it can be kept current with the tz database the runtime actually has.
+        # The column's job is to refuse the empty string and bound the length.
+        # `trim`, not PostgreSQL's `btrim`: the unit suite builds this schema on SQLite from this
+        # same metadata, and `btrim` does not exist there -- the table simply failed to create.
+        # `trim` is standard SQL and both engines have it.
+        CheckConstraint(
+            "length(trim(timezone_name)) > 0",
+            name="ck_exchange_facility_profiles_timezone_nonblank",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("exchange_organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: An IANA timezone identifier -- ``Africa/Djibouti``, ``America/Vancouver``. Never an offset:
+    #: ``UTC+3`` carries no daylight-saving rule and ``+03:00`` is a fact about one instant rather
+    #: than about a place. 64 characters is comfortably above the longest identifier the tz database
+    #: has ever shipped (``America/Argentina/ComodRivadavia``, 32).
+    timezone_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
 
 
 class FacilityEnrollment(Base):

@@ -761,7 +761,7 @@ def test_pg_ap_8d_the_stored_instant_is_the_facility_wall_clock_as_real_timestam
         token_validator=build_validator(public_key),
         audit_writer=ExchangeAuditWriter(tmp_path / "audit.jsonl"),
         platform_admin_role=PLATFORM_ADMIN_ROLE,
-        facility_timezone=TZ,
+        default_facility_timezone=TZ,
     )
     app = FastAPI()
     app.include_router(router)

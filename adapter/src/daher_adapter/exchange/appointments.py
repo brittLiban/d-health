@@ -17,10 +17,22 @@ independently: `ck_exchange_appointments_cancelled_has_no_visit` and
 
 ── Time ──
 
-A receptionist types a wall clock. This module converts it, **server-side**, in the deployment
-timezone (`config.DEPLOYMENT_TIMEZONE`) and stores a UTC instant. The browser's own zone never
-participates in deciding when a patient is expected, and "today" means the clinic's today -- which
-is why `day_bounds` exists rather than a `date(now)` anywhere in the frontend.
+A receptionist types a wall clock. This module converts it, **server-side**, in **that clinic's own
+timezone** and stores a UTC instant. The browser's own zone never participates in deciding when a
+patient is expected, and "today" means the clinic's today -- which is why `day_bounds` exists rather
+than a `date(now)` anywhere in the frontend.
+
+**DHEALTH-FACILITY-PROFILE-001/ADR-074 changed where that zone comes from.** It was
+`config.DEPLOYMENT_TIMEZONE`, one value for every organization in a deployment, which meant one
+Hawva deployment could not truthfully schedule a clinic in Djibouti and a clinic in Vancouver. The
+authority is now the facility's own `FacilityProfile` row, read per `provider_organization_id`. Two
+consequences worth knowing before reading the code:
+
+* the write paths (`create`, `reschedule`) read the zone **inside their own transaction** under a
+  `FOR SHARE` lock, so a concurrent timezone change cannot land between validating a wall clock and
+  storing the instant it means;
+* a wall clock that does not exist, or exists twice, is **refused** rather than silently resolved --
+  see `instant_from_local`.
 
 ── What this module refuses to invent ──
 
@@ -42,6 +54,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from daher_adapter.exchange.authorization import AuthenticatedPrincipal
+from daher_adapter.exchange.facility_profile import FacilityProfileRepository
 from daher_adapter.exchange.models import (
     Appointment,
     AppointmentStatus,
@@ -149,14 +162,68 @@ def day_bounds(day: date, timezone_name: str) -> tuple[datetime, datetime]:
 
     This function is the whole reason a day view cannot drift: "today" is resolved from the
     facility's timezone on the server, so a browser in another zone asking for the same date gets
-    the same bookings. Africa/Djibouti is UTC+3 with no DST observance, so no transition is
-    exercised today -- the arithmetic goes through `ZoneInfo` rather than a fixed offset so that it
-    stays correct if that ever changes, but **DST handling is untested rather than proven**.
+    the same bookings.
+
+    A civil day across a DST transition is **not** 24 hours, and this returns the real bounds rather
+    than a fixed span: 23 hours on a spring-forward day, 25 on a fall-back day. That is correct --
+    the clinic's day is however long the clinic's clocks say it is. Tested in both directions in
+    `America/New_York`. `Africa/Djibouti` never transitions, so every day there is exactly 24 hours.
     """
     zone = ZoneInfo(timezone_name)
     start_local = datetime.combine(day, time.min, tzinfo=zone)
     end_local = datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone)
     return start_local.astimezone(UTC), end_local.astimezone(UTC)
+
+
+class AmbiguousLocalTime(ValueError):
+    """This wall clock happens twice on this date in this facility's zone, so it names two instants.
+
+    DHEALTH-FACILITY-PROFILE-001/ADR-074 §8. Raised rather than resolved: Python would silently pick
+    one (`fold=0`, the first occurrence), and letting an accidental library default become Hawva's
+    policy is exactly the mistake that produces a clinic day where one appointment is an hour out
+    and nobody can say why. Which occurrence a facility means is a product question nobody has
+    answered -- ADR-074 Human Decision 7.
+    """
+
+
+class NonexistentLocalTime(ValueError):
+    """This wall clock does not occur on this date in this facility's zone -- the clocks skipped it.
+
+    Same reasoning as `AmbiguousLocalTime`: Python resolves it silently, and a booking at a time
+    that never happens is a data-entry error worth telling the receptionist about rather than
+    quietly relocating by an hour.
+    """
+
+
+def _local_time_fold_offsets(day: date, at: time, zone: ZoneInfo) -> tuple[timedelta, timedelta]:
+    """The UTC offsets this wall clock would have under each PEP 495 `fold`."""
+    naive = datetime.combine(day, at)
+    first = naive.replace(tzinfo=zone, fold=0).utcoffset()
+    second = naive.replace(tzinfo=zone, fold=1).utcoffset()
+    assert first is not None and second is not None  # noqa: S101 -- ZoneInfo always answers
+    return first, second
+
+
+def is_ambiguous_local_time(day: date, at: time, timezone_name: str) -> bool:
+    """True when this wall clock occurs twice -- the autumn fall-back hour.
+
+    Detected by PEP 495's own definition: an ambiguous time has a different UTC offset under
+    `fold=0` and `fold=1`.
+    """
+    first, second = _local_time_fold_offsets(day, at, ZoneInfo(timezone_name))
+    return first != second
+
+
+def is_nonexistent_local_time(day: date, at: time, timezone_name: str) -> bool:
+    """True when this wall clock never occurs -- the spring-forward gap.
+
+    Detected by round-tripping: a wall clock that exists comes back unchanged through UTC, and one
+    that was skipped comes back as a different wall clock.
+    """
+    zone = ZoneInfo(timezone_name)
+    naive = datetime.combine(day, at)
+    round_tripped = naive.replace(tzinfo=zone).astimezone(UTC).astimezone(zone).replace(tzinfo=None)
+    return round_tripped != naive
 
 
 def instant_from_local(day: date, at: time, timezone_name: str) -> datetime:
@@ -166,7 +233,36 @@ def instant_from_local(day: date, at: time, timezone_name: str) -> datetime:
     frontend would interpret the receptionist's "10:00" in *the viewer's* zone, so the same booking
     would land on a different instant depending on who made it -- and on a laptop set to UTC it
     would be three hours out in Djibouti. `NC-AP-14` breaks exactly this.
+
+    ── The DST policy, and why it is a refusal ──
+
+    A wall clock that does not exist, or exists twice, is **refused**. Both are real in any zone
+    that transitions: `America/New_York` skips 02:30 on 2025-03-09 and runs 01:30 twice on
+    2025-11-02. `Africa/Djibouti` has never transitioned, so neither check fires there and this is
+    a no-op for every facility that exists today.
+
+    Refusing is a decision, not a limitation of the library. `datetime.combine(..., tzinfo=zone)`
+    answers both cases without complaint -- it picks the `fold=0` reading -- and shipping that would
+    have made an accidental default into product policy. Hawva does not yet know which occurrence a
+    facility means when it says 01:30 on a fall-back night, so it declines to guess and says so to
+    the person typing. ADR-074 §8 and Human Decision 7.
+
+    **The honest limit:** these checks are only as good as the runtime's tz database. A deployment
+    whose image carries stale tz data may not know a transition exists and will therefore accept a
+    wall clock this function would otherwise refuse. That is a deployment property, recorded rather
+    than papered over.
     """
+    if is_nonexistent_local_time(day, at, timezone_name):
+        raise NonexistentLocalTime(
+            f"{at.strftime('%H:%M')} does not exist on {day.isoformat()} in {timezone_name}: the "
+            f"clocks move forward and that hour is skipped. Choose a time outside the gap."
+        )
+    if is_ambiguous_local_time(day, at, timezone_name):
+        raise AmbiguousLocalTime(
+            f"{at.strftime('%H:%M')} occurs twice on {day.isoformat()} in {timezone_name}: the "
+            f"clocks move back and that hour repeats, so this wall clock names two different "
+            f"instants. Choose a time outside the repeated hour."
+        )
     return datetime.combine(day, at, tzinfo=ZoneInfo(timezone_name)).astimezone(UTC)
 
 
@@ -181,21 +277,31 @@ class AppointmentRepository:
         organizations: OrganizationRepository,
         visits: VisitRepository,
         security_audit: ExchangeSecurityAuditRepository,
-        facility_timezone: str,
+        facility_profiles: FacilityProfileRepository,
     ) -> None:
         self._sessions = session_factory
         self._organizations = organizations
         self._visits = visits
         self._audit = security_audit
-        self._timezone = facility_timezone
+        self._profiles = facility_profiles
 
-    @property
-    def facility_timezone(self) -> str:
-        """The timezone every wall clock in this module is interpreted in.
+    def facility_timezone(self, provider_organization_id: uuid.UUID) -> str:
+        """The timezone **this clinic's** wall clocks are interpreted in.
+
+        DHEALTH-FACILITY-PROFILE-001 turned this from a property into a lookup, and that is the
+        whole architectural change: it used to return one `config.DEPLOYMENT_TIMEZONE` for every
+        organization in the deployment, which meant a clinic in Djibouti and a clinic in Vancouver
+        could not both be scheduled truthfully. The authority is now the facility's own profile row.
+
+        Unlocked, because every caller of *this* method is a read -- a day view, or resolving the
+        facility's "today". The write path does not use it: `create` and `reschedule` take a
+        `FOR SHARE` lock inside their own transaction instead, so a concurrent timezone change
+        cannot land between validating a wall clock and storing the instant it means.
 
         Exposed so the API can tell the frontend which zone to *format* in, rather than the
-        frontend assuming the viewer's own."""
-        return self._timezone
+        frontend assuming the viewer's own.
+        """
+        return self._profiles.timezone_for(provider_organization_id)
 
     # -- creation ---------------------------------------------------------------------------------
 
@@ -223,12 +329,23 @@ class AppointmentRepository:
         """
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
-        scheduled_at = instant_from_local(scheduled_date, scheduled_time, self._timezone)
 
         with self._sessions.begin() as session:
             # Appointments exist at providers. A laboratory has no outpatient consultation to book,
             # the same check `visits.start_in_session` makes for the same reason.
             self._organizations.require_type(provider_organization_id, OrganizationType.PROVIDER)
+
+            # DHEALTH-FACILITY-PROFILE-001: the facility's own zone, read **inside this
+            # transaction** under a `FOR SHARE` lock, and only then used to convert the wall clock.
+            # Converting before the transaction -- which is what this line used to do, against a
+            # deployment-global constant -- would reopen the torn window ADR-074 §5 closes: a
+            # concurrent timezone change could commit between the conversion and the insert, and the
+            # stored instant would disagree with the zone the response names. `NC-FP-11` removes
+            # the lock to prove this ordering is load-bearing.
+            timezone_name = self._profiles.timezone_for_conversion_in_session(
+                session, provider_organization_id
+            )
+            scheduled_at = instant_from_local(scheduled_date, scheduled_time, timezone_name)
 
             patient = session.get(Patient, patient_id)
             if patient is None or patient.provider_organization_id != provider_organization_id:
@@ -304,11 +421,17 @@ class AppointmentRepository:
         Refused once the booking has produced a visit: arrival is history and scheduling must not
         rewrite it.
         """
-        scheduled_at = instant_from_local(scheduled_date, scheduled_time, self._timezone)
         with self._sessions.begin() as session:
             appointment = self._lock(session, provider_organization_id, appointment_id)
             self._require_mutable(appointment)
-            appointment.scheduled_at = scheduled_at
+            # Same ordering as `create`, for the same reason: the facility's zone is read inside
+            # this transaction under `FOR SHARE`, and the wall clock is converted only then.
+            timezone_name = self._profiles.timezone_for_conversion_in_session(
+                session, provider_organization_id
+            )
+            appointment.scheduled_at = instant_from_local(
+                scheduled_date, scheduled_time, timezone_name
+            )
             session.flush()
             self._audit_event(
                 session,
@@ -450,7 +573,9 @@ class AppointmentRepository:
         and a read that hid them would make "was this cancelled or never booked?" unanswerable from
         the day view. The API's own projection marks them, and the UI does not offer them an arrival
         action."""
-        start, end = day_bounds(day, self._timezone)
+        # The facility's own zone, unlocked: this is a read, and a day view rendered under the zone
+        # that was authoritative a moment ago is harmless where a torn *write* would not be.
+        start, end = day_bounds(day, self._profiles.timezone_for(provider_organization_id))
         with self._sessions() as session:
             rows = session.scalars(
                 select(Appointment)

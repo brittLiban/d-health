@@ -10,8 +10,10 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
+from daher_adapter.config import DEPLOYMENT_TIMEZONE
 from daher_adapter.exchange.catalog import CatalogEntryRecord, CatalogRepository, LabOfferingRecord
 from daher_adapter.exchange.facility_enrollment import FacilityEnrollmentRepository
+from daher_adapter.exchange.facility_profile import FacilityProfileRepository
 from daher_adapter.exchange.identity import (
     PatientReferenceRecord,
     PatientReferenceRepository,
@@ -75,6 +77,27 @@ def _enrol_and_staff(
         assignments.assign(membership_id=membership.id, role=role)
 
 
+def _ensure_facility_profile(
+    organizations: OrganizationRepository, organization: OrganizationRecord
+) -> None:
+    """Give a test organization the facility profile a real one has.
+
+    DHEALTH-FACILITY-PROFILE-001 made each facility's own timezone the authority for interpreting
+    its wall clocks, and migration 0041 backfills a profile for every organization that existed
+    while both organization-creation routes write one for every organization since -- so an
+    organization without a profile is a state production cannot produce.
+
+    Called from `make_provider`/`make_lab` **regardless of `operational`**: a profile is not
+    operational readiness. An unenrolled, unstaffed facility still has a timezone, and the tests
+    that deliberately build that state are about enrollment and staffing rather than about a
+    facility with no clock.
+
+    Reaches for the repository's own session factory for the same reason `_enrol_and_staff` does.
+    """
+    sessions = organizations._sessions  # noqa: SLF001 -- see `_enrol_and_staff`'s docstring
+    FacilityProfileRepository(sessions).ensure(organization.id, DEPLOYMENT_TIMEZONE)
+
+
 def lab_staff(organizations: OrganizationRepository, lab_organization_id: uuid.UUID) -> uuid.UUID:
     """DHEALTH-SPECIMEN-001: the identity id ``make_lab`` already staffed this laboratory with.
 
@@ -105,6 +128,7 @@ def make_provider(
     production work may actually be routed from. Pass ``operational=False`` for a test that is
     specifically about an unenrolled or unstaffed facility."""
     organization = organizations.create(org_type=OrganizationType.PROVIDER.value, name=name)
+    _ensure_facility_profile(organizations, organization)
     if operational:
         _enrol_and_staff(organizations, organization, (OrganizationRole.CLINICIAN,))
     return organization
@@ -117,6 +141,7 @@ def make_lab(
     release are separate (ADR-044), and a lab missing either cannot complete an order it receives.
     One membership holds both, which is a real small-laboratory configuration."""
     organization = organizations.create(org_type=OrganizationType.LAB.value, name=name)
+    _ensure_facility_profile(organizations, organization)
     if operational:
         _enrol_and_staff(
             organizations,

@@ -5,6 +5,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import URL
 
@@ -236,9 +237,21 @@ def _notification_settings(environment: Mapping[str, str]) -> dict[str, object]:
 #: imports this, and `exchange/api.py`'s router default is this constant rather than a second copy
 #: of the string.
 #:
-#: **This is a deployment fact, not a facility setting.** Whether an `Organization` should carry
-#: its own timezone is an open product question (ADR-073's Human Decision 9); until it is answered
-#: every facility in a deployment shares this one, and `Africa/Djibouti` is UTC+3 with no DST.
+#: **This is no longer facility workflow authority.** ADR-073's Human Decision 9 asked whether an
+#: `Organization` should carry its own timezone; DHEALTH-FACILITY-PROFILE-001/ADR-074 answered yes,
+#: and each facility's `FacilityProfile.timezone_name` is now the authority for interpreting its
+#: wall clocks. Two jobs remain here, and they are both real:
+#:
+#: * the **server's own** zone, which is what `Settings.timezone` means -- log timestamps and the
+#:   process's notion of local time. Validated above as a real IANA name, no longer required to
+#:   equal this constant.
+#: * the **starting value** for a newly created facility's profile, and the **historical backfill**
+#:   value `0041_facility_profiles` wrote for every organization that already existed. That
+#:   backfill is truthful specifically because the equality check this constant used to enforce
+#:   meant no deployment could ever have run with a different zone -- see that migration's §1.
+#:
+#: `Africa/Djibouti` is UTC+3 and has never observed DST, which is why no appointment in any
+#: existing database has ever crossed a transition.
 DEPLOYMENT_TIMEZONE = "Africa/Djibouti"
 
 
@@ -340,9 +353,30 @@ class Settings:
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
         env = os.environ if environment is None else environment
+        # DHEALTH-FACILITY-PROFILE-001/ADR-074 relaxed this from an equality to a validity check,
+        # and the change is load-bearing rather than cosmetic. It used to read:
+        #
+        #     if timezone != DEPLOYMENT_TIMEZONE:
+        #         raise ConfigurationError(f"TZ must be {DEPLOYMENT_TIMEZONE}")
+        #
+        # A deployment whose `TZ` was anything other than `Africa/Djibouti` refused to boot. That
+        # was coherent while one deployment-global timezone decided every facility's schedule; it is
+        # incoherent now that each facility carries its own, because a deployment hosting a clinic
+        # in Vancouver would not have started.
+        #
+        # What is still checked is that the value is a timezone at all. The server's own zone
+        # remains a real fact -- it is what log timestamps, any future scheduled job, and the
+        # starting value for a newly created facility's profile are expressed in -- so an
+        # unparseable `TZ` is still a configuration error worth refusing to boot on. What it is no
+        # longer is the authority for interpreting a clinic's wall clock.
         timezone = env.get("TZ", DEPLOYMENT_TIMEZONE)
-        if timezone != DEPLOYMENT_TIMEZONE:
-            raise ConfigurationError(f"TZ must be {DEPLOYMENT_TIMEZONE}")
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError) as error:
+            raise ConfigurationError(
+                f"TZ must be an IANA timezone identifier this server recognises, such as "
+                f"{DEPLOYMENT_TIMEZONE!r}; got {timezone!r}"
+            ) from error
 
         db_name = _required(env, "ADAPTER_DB_NAME")
         db_user = _required(env, "ADAPTER_DB_USER")

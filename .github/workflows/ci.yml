@@ -123,13 +123,19 @@ jobs:
         # migrations: the chain 0027..0040 applied cleanly in CI and this literal
         # was the only thing failing, which is the guard working as designed --
         # it noticed that nobody had re-asserted the required terminal revision.
+        #
+        # Bumped again 2026-10-04 (DHEALTH-FACILITY-PROFILE-001) to
+        # 0041_facility_profiles, in the same commit as the migration. That is the
+        # maintenance DHEALTH-CI-REPAIR-001 deliberately restored: this literal is
+        # hand-maintained precisely so that adding a migration without re-asserting
+        # the required head is a loud failure rather than a silent one.
         env:
           ADAPTER_DB_HOST: localhost
           ADAPTER_DB_PORT: 5432
           ADAPTER_DB_USER: adapter
           ADAPTER_DB_PASSWORD: adapter
           ADAPTER_DB_NAME: adapter
-          EXPECTED_HEAD: 0040_clinic_appointments
+          EXPECTED_HEAD: 0041_facility_profiles
         working-directory: adapter
         run: |
           alembic upgrade head

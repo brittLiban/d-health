@@ -67,12 +67,14 @@ from daher_adapter.exchange.appointments import (
     ActiveVisitAlreadyExists as AppointmentActiveVisitAlreadyExists,
 )
 from daher_adapter.exchange.appointments import (
+    AmbiguousLocalTime,
     AppointmentAlreadyArrived,
     AppointmentCancelled,
     AppointmentNotFound,
     AppointmentPatientNotFound,
     AppointmentRecord,
     AppointmentRepository,
+    NonexistentLocalTime,
 )
 from daher_adapter.exchange.audit import ExchangeAuditEvent, ExchangeAuditWriter
 from daher_adapter.exchange.authorization import (
@@ -122,6 +124,12 @@ from daher_adapter.exchange.facility_enrollment import (
     ParticipationModeChangeRefused,
     RouteActivationNotReady,
     facility_has_dependent_workflow_in_session,
+)
+from daher_adapter.exchange.facility_profile import (
+    FacilityProfileRecord,
+    FacilityProfileRepository,
+    FacilityTimezoneNotConfigured,
+    InvalidFacilityTimezone,
 )
 from daher_adapter.exchange.identity import (
     PatientReferenceRepository,
@@ -3450,6 +3458,41 @@ class AppointmentDayResponse(BaseModel):
     appointments: list[AppointmentResponse]
 
 
+class FacilityProfileResponse(BaseModel):
+    """DHEALTH-FACILITY-PROFILE-001/ADR-074: a facility's own operational settings.
+
+    Deliberately three fields. This is **not** a facility master-data record and must not become
+    one: no address, no phone, no licence, no logo -- see ADR-074 §6 and its Human Decisions for
+    what is deliberately absent and why. And deliberately **not** a projection of
+    `FacilityEnrollment`: a settings screen has no business carrying CONNECT discovery fields,
+    vendor contacts or onboarding state, which belong to how an organization joined the network
+    rather than to how its staff work today.
+
+    `organization_name` is read-only here. It is network participant identity on `Organization`,
+    and whether a facility may rename itself is an open question (ADR-074 Human Decision 1), so the
+    settings screen shows it and offers no editor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    organization_id: uuid.UUID
+    organization_name: str
+    timezone_name: str
+    updated_at: datetime
+
+
+class FacilityTimezoneUpdateRequest(BaseModel):
+    """An IANA timezone identifier, and nothing else.
+
+    No offset: `UTC+3` and `+03:00` are refused by `normalize_timezone_name`, because an offset
+    carries no daylight-saving rule and names one instant rather than a place. The server validates
+    against its own tz database -- the browser may offer a picker, but what it sends is a candidate,
+    not an authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timezone_name: str = Field(min_length=1, max_length=64)
+
+
 class AppointmentCreateRequest(BaseModel):
     """A clinic-local calendar date and wall clock -- never an instant.
 
@@ -3553,12 +3596,14 @@ def build_exchange_router(
     #: operator read so "everything stops at SENT" reads as a known configuration state rather than
     #: as messages mysteriously never reaching DELIVERED.
     notification_receipts_configured: bool = False,
-    #: DHEALTH-APPOINTMENTS-001. The timezone a receptionist's wall clock is interpreted in, and the
-    #: one every appointment day boundary is computed from. Defaults to `config.DEPLOYMENT_TIMEZONE`
-    #: -- the same constant `Settings.from_env` enforces `TZ` against -- rather than to a second
-    #: copy of the literal, so there is exactly one place the deployment timezone is written down.
-    #: `app.py` passes `settings.timezone` explicitly.
-    facility_timezone: str = DEPLOYMENT_TIMEZONE,
+    #: DHEALTH-FACILITY-PROFILE-001. The timezone a **new** organization's profile is created with,
+    #: and nothing else. It is no longer the authority for interpreting any wall clock: ADR-074
+    #: moved that to each facility's own `FacilityProfile` row, so a deployment can host a clinic in
+    #: Djibouti and a clinic in Vancouver. What remains here is the starting value for a facility
+    #: nobody has configured yet, which is the deployment's own zone -- the most likely correct
+    #: answer for the first facility an operator creates, and changeable afterwards from the
+    #: facility's own settings. `app.py` passes `settings.timezone` explicitly.
+    default_facility_timezone: str = DEPLOYMENT_TIMEZONE,
 ) -> APIRouter:
     identities = ExchangeIdentityRepository(session_factory)
     organizations = OrganizationRepository(session_factory)
@@ -3584,8 +3629,12 @@ def build_exchange_router(
     # the visit repository's own `start_in_session`, inside the scheduling transaction, so every
     # rule about attendance stays in `exchange/visits.py` and is enforced once. It takes no
     # results, release or lab repository -- scheduling structurally cannot observe clinical state.
+    # DHEALTH-FACILITY-PROFILE-001. The facility's operational profile, and the authority for every
+    # wall-clock conversion below. Constructed before `appointments` because the appointment
+    # repository takes it: the timezone is read per organization, inside the booking transaction.
+    facility_profiles = FacilityProfileRepository(session_factory, security_audit)
     appointments = AppointmentRepository(
-        session_factory, organizations, visits, security_audit, facility_timezone
+        session_factory, organizations, visits, security_audit, facility_profiles
     )
     # DHEALTH-BILLING-001. Constructed with the same three collaborators as `visits` and
     # nothing else -- in particular no results, release or lab-workflow repository, so this
@@ -3991,6 +4040,13 @@ def build_exchange_router(
                 record = organizations.create(
                     org_type=body.organization_type, name=body.name, session=session
                 )
+                # DHEALTH-FACILITY-PROFILE-001: in the **same transaction** as the organization. An
+                # organization that exists without a profile is a facility that cannot schedule, so
+                # committing them separately would leave a window in which that is true. The
+                # starting value is the deployment's own zone -- the most likely correct answer for
+                # the first facility an operator creates, and changeable afterwards from the
+                # facility's own settings.
+                facility_profiles.ensure(record.id, default_facility_timezone, session=session)
                 security_audit.record(
                     session,
                     event_type="organization_created",
@@ -4867,7 +4923,7 @@ def build_exchange_router(
                     )
         except TemplateValidationError as error:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
             ) from error
         except TemplateConflict as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -6055,12 +6111,18 @@ def build_exchange_router(
         a schedule cannot afford to get wrong."""
         response.headers["Cache-Control"] = "no-store"
         _require_appointment_read(principal, provider_id)
-        resolved = day or datetime.now(ZoneInfo(appointments.facility_timezone)).date()
+        # DHEALTH-FACILITY-PROFILE-001: **this clinic's** zone, not the deployment's. "Today" is
+        # therefore this facility's today -- two clinics in one deployment on opposite sides of the
+        # date line legitimately disagree about what day it is, and each is right about its own.
+        timezone_name = appointments.facility_timezone(provider_id)
+        resolved = day or datetime.now(ZoneInfo(timezone_name)).date()
         records = appointments.list_for_day(provider_id, resolved)
         return AppointmentDayResponse(
             provider_organization_id=provider_id,
             day=resolved,
-            facility_timezone=appointments.facility_timezone,
+            # The response still names the zone, so the browser formats in the clinic's zone rather
+            # than the viewer's. That contract is unchanged; only its source moved.
+            facility_timezone=timezone_name,
             appointments=[_to_appointment_response(record) for record in records],
         )
 
@@ -6105,6 +6167,18 @@ def build_exchange_router(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="appointments exist at provider organizations",
             ) from error
+        except (AmbiguousLocalTime, NonexistentLocalTime) as error:
+            # DHEALTH-FACILITY-PROFILE-001/ADR-074 §8. 422, with the message the domain wrote: the
+            # reader is a receptionist who just typed a wall clock, and "that hour repeats on this
+            # date, choose one outside it" is actionable where a generic refusal is not.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except FacilityTimezoneNotConfigured as error:
+            # 409, not a silent UTC fallback. A facility with no timezone authority cannot have a
+            # wall clock interpreted for it, and inventing one would store the wrong instant with
+            # nothing reporting it.
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         if not created:
             response.status_code = status.HTTP_200_OK
         return _to_appointment_response(record)
@@ -6147,6 +6221,14 @@ def build_exchange_router(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="this appointment is cancelled"
             ) from error
+        except (AmbiguousLocalTime, NonexistentLocalTime) as error:
+            # Same DST policy as `create`: a move to a wall clock that does not exist, or exists
+            # twice, in this facility's zone is refused rather than resolved.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except FacilityTimezoneNotConfigured as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         return _to_appointment_response(record)
 
     @router.post(
@@ -7297,7 +7379,7 @@ def build_exchange_router(
             channel = NotificationChannel(notify_request.channel)
             if not notification_transport.supports(channel):
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"this deployment cannot send on the {channel.value} channel",
                 )
             try:
@@ -7306,7 +7388,7 @@ def build_exchange_router(
                 )
             except InvalidDestination as error:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
                 ) from error
 
         notification_id: uuid.UUID | None = None
@@ -8576,11 +8658,11 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except UnknownTemplateObservationDefinition as error:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
             ) from error
         except NativeValueTypeMismatch as error:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
             ) from error
         except ObservationValueConflict as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -8972,7 +9054,7 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except NativeValueTypeMismatch as error:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
             ) from error
 
         return _observation_response(order_id, item_id, successor)
@@ -9791,7 +9873,7 @@ def build_exchange_router(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except NativeValueTypeMismatch as error:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
             ) from error
         return _observation_response(order_id, item_id, successor)
 
@@ -10452,6 +10534,13 @@ def build_exchange_router(
                 organization = organizations.create(
                     org_type=body.organization_type, name=body.name, session=session
                 )
+                # DHEALTH-FACILITY-PROFILE-001, same transaction and same reasoning as the plain
+                # organization route above. A facility onboarded through this wizard gets its
+                # profile here rather than needing a separate configuration step before it can
+                # schedule anything.
+                facility_profiles.ensure(
+                    organization.id, default_facility_timezone, session=session
+                )
                 security_audit.record(
                     session,
                     event_type="organization_created",
@@ -10551,6 +10640,102 @@ def build_exchange_router(
     ) -> list[FacilityEnrollmentResponse]:
         _require_platform(principal, None)
         return [_enrollment_response(record) for record in facility_enrollments.list_all()]
+
+    # ── DHEALTH-FACILITY-PROFILE-001: the facility's own operational settings ────────────────────
+
+    def _facility_profile_response(record: FacilityProfileRecord) -> FacilityProfileResponse:
+        return FacilityProfileResponse(
+            organization_id=record.organization_id,
+            organization_name=record.organization_name,
+            timezone_name=record.timezone_name,
+            updated_at=record.updated_at,
+        )
+
+    @router.get(
+        "/organizations/{organization_id}/facility-profile",
+        response_model=FacilityProfileResponse,
+    )
+    def get_facility_profile(
+        organization_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityProfileResponse:
+        """This facility's own operational settings.
+
+        **Configuration read, not a directory read.** ADR-074 §9: a laboratory's
+        `LabDirectoryProfile` is deliberately network-visible to providers choosing where to send
+        work, and this is deliberately not -- it is what a facility's own administrator sees when
+        configuring it. An unrelated organization asking for it is told the organization does not
+        exist, the anti-enumeration convention this API already follows throughout, so walking
+        uuids cannot reveal which facilities are configured.
+
+        `facility.configure` guards both this read and the write below, and a platform
+        administrator reaches both. That is the existing architecture rather than a new grant:
+        `authz.require_facility_configure` has carried `allow_platform_admin=True` since
+        DHEALTH-ACCESS-CAPABILITIES-001 split it out, and a platform operator already configures a
+        facility's catalogue, result templates and directory profile through it. A facility's
+        timezone is the same class of fact, and making it the single exception would be a special
+        case with no principle behind it. ADR-074 Human Decision 6 asks whether CONNECT facilities
+        should self-manage this or whether it is platform onboarding data; until that is answered,
+        both routes exist and neither is widened."""
+        response.headers["Cache-Control"] = "no-store"
+        _require_facility_configure(principal, organization_id)
+        record = facility_profiles.get(organization_id)
+        if record is None:
+            # Unreachable for a facility created through any supported path -- 0041 backfilled every
+            # organization that existed and `create_organization` writes one for every organization
+            # since. Surfaced as a 404 rather than an invented default, so a facility that somehow
+            # has none is a visible configuration fault rather than a silent UTC assumption.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility profile not found"
+            )
+        return _facility_profile_response(record)
+
+    @router.put(
+        "/organizations/{organization_id}/facility-profile/timezone",
+        response_model=FacilityProfileResponse,
+    )
+    def set_facility_timezone(
+        organization_id: uuid.UUID,
+        payload: FacilityTimezoneUpdateRequest,
+        response: Response,
+        principal: Annotated[AuthenticatedPrincipal, Depends(get_principal)],
+    ) -> FacilityProfileResponse:
+        """Change the timezone Hawva interprets this facility's local wall clocks in.
+
+        **No existing appointment moves.** `scheduled_at` holds the instant staff booked under the
+        authority in effect when they booked it, and this route rewrites none of them (ADR-074 §4,
+        `NC-FP-7`). What changes is how *future* wall clocks are converted and how stored instants
+        are presented.
+
+        The zone is taken from the **path's organization**, never from the request body: a caller
+        cannot schedule a different instant by submitting a timezone alongside an appointment, which
+        is why `AppointmentCreateRequest` has no timezone field at all and `NC-FP-2` exists.
+
+        A wall clock that no longer exists, or newly exists twice, under the new zone is not
+        retro-validated: existing bookings are instants and remain exactly the instants they were.
+        Only new conversions are checked, and those are refused rather than guessed
+        (`appointments.instant_from_local`)."""
+        response.headers["Cache-Control"] = "no-store"
+        _require_facility_configure(principal, organization_id)
+        try:
+            record = facility_profiles.set_timezone(
+                principal=principal,
+                organization_id=organization_id,
+                timezone_name=payload.timezone_name,
+            )
+        except InvalidFacilityTimezone as error:
+            # 422: the submitted value is not a timezone this server's tz database knows. The
+            # message names what was sent and what shape is expected, because the person who will
+            # read it is an administrator who just typed or picked something.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            ) from error
+        except FacilityTimezoneNotConfigured as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="facility profile not found"
+            ) from error
+        return _facility_profile_response(record)
 
     @router.get(
         "/organizations/{organization_id}/enrollment", response_model=FacilityEnrollmentResponse

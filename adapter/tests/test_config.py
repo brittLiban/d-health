@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from daher_adapter.config import ConfigurationError, Settings
+from daher_adapter.config import DEPLOYMENT_TIMEZONE, ConfigurationError, Settings
 
 
 def environment(**overrides: str) -> dict[str, str]:
@@ -27,9 +27,29 @@ def test_settings_build_url_without_string_interpolation() -> None:
     assert settings.retry_max_attempts == 5
 
 
-def test_settings_refuse_wrong_timezone() -> None:
-    with pytest.raises(ConfigurationError, match="Africa/Djibouti"):
-        Settings.from_env(environment(TZ="UTC"))
+def test_settings_accept_any_real_timezone() -> None:
+    """DHEALTH-FACILITY-PROFILE-001/ADR-074 replaced an equality check with a validity check.
+
+    This test previously asserted the opposite -- that `TZ="UTC"` was **refused**, because
+    `Settings.from_env` required `TZ == Africa/Djibouti`. That was coherent while one
+    deployment-global timezone decided every facility's schedule. It is incoherent now that each
+    facility carries its own: a deployment hosting a clinic in Vancouver would not have booted.
+
+    The deployment timezone is still a real fact (log timestamps, the starting value for a newly
+    created facility's profile), so it is still validated -- just no longer constrained to one
+    value.
+    """
+    for name in ("UTC", "America/Vancouver", "Africa/Nairobi", DEPLOYMENT_TIMEZONE):
+        assert Settings.from_env(environment(TZ=name)).timezone == name
+
+
+def test_settings_refuse_a_timezone_that_is_not_one() -> None:
+    """Validity is still enforced: an unparseable `TZ` is a configuration error worth refusing to
+    boot on, and an **offset** is refused along with nonsense -- `UTC+3` carries no daylight-saving
+    rule, so accepting it would be accepting a value that is wrong twice a year."""
+    for name in ("Mars/Olympus_Mons", "UTC+3", "+03:00", "Not/A/Zone"):
+        with pytest.raises(ConfigurationError, match="IANA timezone"):
+            Settings.from_env(environment(TZ=name))
 
 
 def test_settings_require_database_password() -> None:

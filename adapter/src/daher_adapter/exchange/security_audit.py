@@ -245,6 +245,22 @@ SecurityEventType = Literal[
     "appointment_rescheduled",
     "appointment_cancelled",
     "appointment_checked_in",
+    # DHEALTH-FACILITY-PROFILE-001/ADR-074: one event, for the one mutation a facility's operational
+    # profile has.
+    #
+    # It records **that** the facility's timezone changed, by whom, and when. It does **not** record
+    # the old and new values: this table has no value or metadata column, and ADR-074 declines to
+    # add one for the same reason ADR-073 declined to add one for a rescheduled appointment's
+    # previous instant -- widening a security audit table to carry arbitrary payloads is not a
+    # thing to do in passing, and the alternative (a dedicated change-history store) is a product
+    # decision nobody has made. The limitation is explicit, not accidental: ADR-074 Human Decision
+    # 4 asks whether old/new values must be preserved, and until it is answered a reader of this
+    # table can establish who changed the zone and when, but not what it was before.
+    #
+    # **Absent on purpose:** no `facility_profile_viewed` (reading is not a mutation -- D-8), and no
+    # separate created/updated pair, because the row is created by 0041's backfill or alongside its
+    # organization and only ever changes in one way.
+    "facility_timezone_changed",
     # DHEALTH-BILLING-001/ADR-066: the four financial mutations, and deliberately only four.
     #
     # Money is the one domain where "who did this, to whom, for how much, when" is the whole
@@ -314,6 +330,12 @@ SecurityResourceType = Literal[
     # deliberately not the visit a check-in produced (`visit_created` already names that, and the
     # booking reaches it through `visit_id`) -- the same convention as every block above.
     "appointment",
+    # DHEALTH-FACILITY-PROFILE-001. The facility's own operational profile. Named distinctly from
+    # `facility_enrollment` on purpose: enrollment is how an organization joined the network and is
+    # largely platform-operated, while this is configuration the facility itself owns. A reader
+    # asking "who changed this clinic's settings?" and one asking "who moved it through onboarding?"
+    # are asking different questions and should not have to disambiguate one resource type.
+    "facility_profile",
 ]
 
 #: DHEALTH-ACCESS-CAPABILITIES-001/ADR-067: the member-specific capability mutations.

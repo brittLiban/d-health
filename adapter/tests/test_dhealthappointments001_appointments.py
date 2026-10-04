@@ -135,7 +135,7 @@ def client(sessions: sessionmaker[Session], keypair, tmp_path: Path) -> TestClie
         audit_writer=ExchangeAuditWriter(tmp_path / "exchange-audit.jsonl"),
         platform_admin_role=PLATFORM_ADMIN_ROLE,
         patient_access_ttl_hours=TTL_HOURS,
-        facility_timezone=TZ,
+        default_facility_timezone=TZ,
     )
     app = FastAPI()
     app.include_router(router)

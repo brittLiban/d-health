@@ -60,6 +60,7 @@ from daher_adapter.exchange.models import (
     ClinicService,
     ClinicServicePrice,
     FacilityEnrollment,
+    FacilityProfile,
     LabPrice,
     OnboardingStatus,
     OrganizationMembershipStatus,
@@ -510,6 +511,18 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
         created_by_identity_id=seed_identity_id,
     )
     _ensure_patient_date_of_birth(session_factory, provider.id)
+    # DHEALTH-FACILITY-PROFILE-001: the demo's timezone truth, written **before** the bookings
+    # below, because `_ensure_demo_appointments` converts wall clocks through the facility's own
+    # profile now and would otherwise have none to read.
+    #
+    # Reconciled on every reset rather than only created, which is the one place this differs from
+    # most baseline seeding. `exchange_facility_profiles` is **configuration**, so it deliberately
+    # is not in `_WORKFLOW_TABLES` and a reset does not truncate it -- the same reasoning that keeps
+    # `exchange_membership_capability_overrides` out of that tuple. But a browser suite that changes
+    # the demo clinic's timezone to prove the feature works would then leave it changed for every
+    # suite that runs afterwards, and their wall-clock arithmetic would be silently hours out. So
+    # reset asserts the baseline back.
+    _ensure_demo_facility_timezones(session_factory, (provider.id, lab.id))
     # DHEALTH-APPOINTMENTS-001: two synthetic bookings so a reset leaves a demo that can be
     # driven immediately -- one today to arrive, one tomorrow to show an expectation that is
     # not an encounter. Needs the patient, which the call above has just reconciled.
@@ -684,6 +697,42 @@ def seed_baseline(session_factory: sessionmaker[Session]) -> None:
         )
 
 
+def _ensure_demo_facility_timezones(
+    session_factory: sessionmaker[Session], organization_ids: tuple[uuid.UUID, ...]
+) -> None:
+    """Both demo organizations carry the deterministic demo timezone. Idempotent, and reconciling.
+
+    DHEALTH-FACILITY-PROFILE-001. The value is `DEPLOYMENT_TIMEZONE` -- `Africa/Djibouti` -- which
+    is the demo's existing semantics and is **seeded explicitly** rather than inferred from
+    whatever zone the developer's machine happens to be in. A demo whose clinic timezone depended on
+    the laptop running it would make every wall-clock assertion in the browser suite
+    machine-dependent.
+
+    Unlike most baseline seeding this **overwrites** an existing differing value rather than leaving
+    it alone. That is deliberate and is the difference between creation and reset: the browser suite
+    changes this clinic's timezone to a second zone to prove the feature works, and a reset that
+    politely left Vancouver in place would hand the next suite a clinic whose local day is eight
+    hours from where its fixtures expect it. `exchange_facility_profiles` is configuration rather
+    than workflow state, so it is correctly absent from `_WORKFLOW_TABLES` and survives the
+    truncation -- which is exactly why reset has to assert the value back instead.
+    """
+    with session_factory.begin() as session:
+        for organization_id in organization_ids:
+            profile = session.scalars(
+                select(FacilityProfile).where(FacilityProfile.organization_id == organization_id)
+            ).one_or_none()
+            if profile is None:
+                session.add(
+                    FacilityProfile(
+                        organization_id=organization_id,
+                        timezone_name=DEPLOYMENT_TIMEZONE,
+                    )
+                )
+            elif profile.timezone_name != DEPLOYMENT_TIMEZONE:
+                profile.timezone_name = DEPLOYMENT_TIMEZONE
+                profile.updated_at = utc_now()
+
+
 def _ensure_demo_appointments(session_factory, provider_organization_id, actor_id) -> None:
     """Two synthetic bookings for the demo patient: one today, one tomorrow. Idempotent.
 
@@ -695,10 +744,22 @@ def _ensure_demo_appointments(session_factory, provider_organization_id, actor_i
     re-establishing a baseline, and writing an `appointment_rescheduled` audit row with the seed
     identity as the actor would put a fiction in the security audit table.
 
-    The wall clocks are interpreted in the deployment timezone by the same `instant_from_local` the
-    product uses, so the seeded bookings land where the clinic's own day view looks for them.
+    The wall clocks are interpreted by the same `instant_from_local` the product uses, so the seeded
+    bookings land where the clinic's own day view looks for them.
+
+    DHEALTH-FACILITY-PROFILE-001: that interpretation now reads **this clinic's own profile** rather
+    than `DEPLOYMENT_TIMEZONE`. `_ensure_demo_facility_timezones` runs immediately before this and
+    sets the profile to the demo baseline, so the two agree today -- but reading the profile means
+    the seed follows the facility if that baseline is ever changed, instead of silently seeding
+    bookings into a day the clinic's own view does not look at.
     """
-    timezone_name = DEPLOYMENT_TIMEZONE
+    with session_factory() as session:
+        profile = session.scalars(
+            select(FacilityProfile).where(
+                FacilityProfile.organization_id == provider_organization_id
+            )
+        ).one_or_none()
+    timezone_name = profile.timezone_name if profile is not None else DEPLOYMENT_TIMEZONE
     today = datetime.now(ZoneInfo(timezone_name)).date()
     wanted = (
         (DEMO_APPOINTMENT_TODAY_KEY, today, DEMO_APPOINTMENT_TODAY_TIME),
