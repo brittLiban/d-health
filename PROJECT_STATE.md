@@ -24918,4 +24918,25 @@ two, what else belongs on the profile, whether timezone change history must be s
 other participants, whether a CONNECT facility self-manages this, and whether an ambiguous local
 time should ever be bookable with explicit disambiguation.
 
-**Not pushed.** No instruction to push has been given for this ticket.
+### ✅ Pushed and remotely green — run `37267161399`, `41ca8d4`, all ten jobs
+
+Pushed `00de1de..41ca8d4` on instruction. The CI workflow completed
+**`conclusion=success`** with every job green:
+
+| Job | Why it mattered here |
+|---|---|
+| `adapter — ruff + pytest` | the migration-head guard, now at `0041_facility_profiles` — the one assertion this ticket was obliged to move. Its four real-PostgreSQL steps ran remotely too |
+| `ui — lint, typecheck, test, build` | **the whole UI suite, remotely, with the `Content-Type` fix in it.** The local pass needed 11 batches and a per-file reconciliation; this is the same 67 files in one clean run on a machine that does not drop workers |
+| `native demo — real boot (DH-DEMO-001)` | boots the stack from scratch and seeds the baseline, so `_ensure_demo_facility_timezones` ran before any appointment was seeded on a database built by `0041` from empty — the path no local run exercises, because this machine's demo database was migrated rather than created |
+| `static checks` | the image-pin gate, unchanged |
+| `compose interpolates and parses` | the base+overlay composition DHEALTH-CI-REPAIR-001 fixed, still correct |
+| `provisioning — ruff + pytest`, `OpenMRS narrow TestOrder module`, `seed + form-safety suites`, `oauth2login — patched identity tests`, `openelis order-correlation patch — compiles` | success |
+
+**Two things this closes that no local run could.** The demo boot job builds the database from
+nothing, so `0041`'s backfill and `demo_seed`'s profile step were exercised against a genuinely
+fresh schema rather than against a migrated one. And the `ui` job ran all 67 files in a single pass,
+which is the result this machine's worker-start failures have never produced — the local
+reconciliation stands as written, and this is a second, independent observation of the same suite.
+
+**`97bc22e` went up with this push.** It is DHEALTH-CI-REPAIR-001's final documentation commit,
+which recorded that ticket's green run and was never pushed at the time. Nothing in it is code.
