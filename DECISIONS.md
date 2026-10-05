@@ -11197,6 +11197,7 @@ and exactly as open as they were.**
 | Full UI unit suite | **67 of 67 files reconciled, 1090 tests, zero failures** — twice, the second time after the client fix |
 | Sibling browser suites | **171 phases re-run green** across all thirteen — appointments 13, capabilities 6, clinic-visit 9, golden journey 12, front desk 9, access 16, security 31, offerings 13, report 19, lab-blocked 13, specimen 14, lab-reception 10, billing 6 |
 | `npm run typecheck` (`tsc -b`), `npm run lint` (oxlint), `tsc -p e2e/tsconfig.json` | clean |
+| Full adapter suite | **2228 passed, 291 skipped, 0 failed** (20m12s) — the gap ADR-073 §11 left open, now closed |
 | `alembic heads` | one head, `0041_facility_profiles`, matching CI's `EXPECTED_HEAD` |
 
 Every sibling suite was re-run, not only the appointment one: the conversion path inside the
@@ -11309,8 +11310,10 @@ reads the row's own text is the honest way to close it**, and is named rather th
    this ticket** (last changed in DH-CLINIC-004A) and imports nothing this ticket changed. It is
    margin loss under load: this session manufactured it once by running the adapter suite and the UI
    batch script at the same time, which is a thing not to do.
-3. **No full adapter-suite run.** The ~900 adapter tests beyond this ticket's 74 are unobserved
-   against this code locally. The same gap ADR-073 §11 recorded, for the same reason.
+3. **The 291 skips in the adapter suite are the opt-in PostgreSQL suites**, each of which skips
+   unless its own `DH*_PG_*` variables are set. This ticket's eleven were run separately against a
+   disposable container; the others were not, so "2228 passed" is the SQLite/HTTP-edge body of the
+   suite plus this ticket's PostgreSQL work, not every integration suite in the repository.
 4. **The Docker daemon in this environment restarts every container roughly every quarter of an
    hour.** One browser run was destroyed mid-flight by it (every phase failing against a 502 edge),
    and the disposable PostgreSQL container died under the negative-control pass. Both were re-run.

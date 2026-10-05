@@ -24762,7 +24762,7 @@ a zone *correction* from a *relocation*, so moving them would be a guess with cl
 | **Real-browser qualification** | ✅ **11 of 11 phases passed** against the real stack — and found a defect the whole unit suite was blind to, below |
 | 47 client tests (2 new) | ✅ passed — the new pair guards that defect |
 | **Sibling browser suites** | ✅ **171 phases re-run green** across all thirteen. With this ticket's 11, **182 browser phases** |
-| **Full adapter suite** | ❌ not run locally |
+| **Full adapter suite** | ✅ **2228 passed, 291 skipped, 0 failed** (20m12s). The 291 skips are the opt-in `DH*_PG_*` integration suites; this ticket's eleven were run separately |
 
 ### The browser found a defect every unit test in the repository was blind to
 
@@ -24885,8 +24885,11 @@ where only its offset matters.
 
 ### What remains
 
-1. **The full adapter suite has not run locally.** The ~900 tests beyond this ticket's 74 are
-   unobserved against this code. Same gap ADR-073 §11 recorded, same reason.
+1. **The other tickets' opt-in PostgreSQL suites were not run.** The full adapter pass skipped 291
+   tests, every one of them an integration suite that skips unless its own `DH*_PG_*` variables are
+   set. This ticket's eleven were run against a disposable container and destroyed with it; the rest
+   would each need their own. Nothing here touches what they cover, but "2228 passed" is not "every
+   test in the repository ran".
 2. **No DOM assertion on an existing booking's rendered wall clock.** The browser suite deliberately
    does not make one: the booking is a week out so it is off the day view, FP-C acts as an
    administrator who sees no schedule, and under Vancouver's offset 07:00Z falls on the previous

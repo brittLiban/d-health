@@ -58,9 +58,13 @@ one was re-run rather than only the appointment suite: the conversion path insid
 transaction changed, `config.py`'s boot check changed, and `demo_seed` gained a step that runs before
 any appointment is seeded.
 
-**Still not claimed:** the full adapter suite has not run locally, and the browser suite makes no
-DOM assertion about an existing booking's *rendered* wall clock (ADR-074 §15 says why, and what
-would close it). **Nobody who administers a clinic has used the screen.**
+**The full adapter suite ran: 2228 passed, 291 skipped, 0 failed.** That closes the gap ADR-073 §11
+left open. The 291 skips are the opt-in `DH*_PG_*` integration suites, each needing its own
+disposable database; this ticket's eleven were run against one and destroyed with it.
+
+**Still not claimed:** the browser suite makes no DOM assertion about an existing booking's
+*rendered* wall clock (ADR-074 §15 says why, and what would close it). **Nobody who administers a
+clinic has used the screen.**
 
 ---
 
